@@ -1,0 +1,5 @@
+[Unit]
+Description=fleet board-state snapshot to git
+[Service]
+Type=oneshot
+ExecStart=/opt/paracoding-mcp/board_snapshot.sh

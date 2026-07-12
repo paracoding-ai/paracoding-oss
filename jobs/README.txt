@@ -1,0 +1,1 @@
+job types: browser_job,deploy_static,gcloud_enable_api,reload_nginx,run_box_deploy,stitch_parts,sync_path,workspace_patch

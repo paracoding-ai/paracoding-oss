@@ -1,0 +1,21 @@
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere                  
+[ 2] 8888/tcp                   ALLOW IN    Anywhere                  
+[ 3] 80/tcp                     ALLOW IN    Anywhere                  
+[ 4] 443/tcp                    ALLOW IN    Anywhere                  
+[ 5] 53                         ALLOW IN    Anywhere                  
+[ 6] 8000/tcp                   ALLOW IN    Anywhere                  
+[ 7] 8902/tcp                   ALLOW IN    Anywhere                  
+[ 8] 8904/tcp                   ALLOW IN    Anywhere                  
+[ 9] 22/tcp (v6)                ALLOW IN    Anywhere (v6)             
+[10] 8888/tcp (v6)              ALLOW IN    Anywhere (v6)             
+[11] 80/tcp (v6)                ALLOW IN    Anywhere (v6)             
+[12] 443/tcp (v6)               ALLOW IN    Anywhere (v6)             
+[13] 53 (v6)                    ALLOW IN    Anywhere (v6)             
+[14] 8000/tcp (v6)              ALLOW IN    Anywhere (v6)             
+[15] 8902/tcp (v6)              ALLOW IN    Anywhere (v6)             
+[16] 8904/tcp (v6)              ALLOW IN    Anywhere (v6)             
+

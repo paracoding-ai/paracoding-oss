@@ -1,0 +1,14 @@
+# agent unix users (from ttyd era, kept; MCP agents workspace-owned by mcpsvc)
+systemd-network uid=998
+example-agent uid=1003
+demo-demo-ccxavatar uid=1004
+demo-demo-ccxhandoff uid=1005
+paracoding-linkedin uid=1006
+paracoding-publisher uid=1007
+paracoding-ghost uid=1009
+paracoding-ads uid=1010
+mcpsvc uid=999
+paracoding-advisor uid=1011
+cuworker uid=997
+# agents group:
+agents:x:1000:example-agent,demo-demo-ccxavatar,demo-demo-ccxhandoff,paracoding-linkedin,paracoding-publisher,paracoding-ghost,paracoding-ads,mcpsvc,paracoding-advisor

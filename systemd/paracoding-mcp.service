@@ -1,0 +1,11 @@
+[Unit]
+Description=fleet MCP server (streamable-http, 127.0.0.1:8200)
+After=network-online.target
+[Service]
+User=mcpsvc
+WorkingDirectory=/opt/paracoding-mcp
+ExecStart=/opt/paracoding-mcp/venv/bin/python /opt/paracoding-mcp/server.py
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

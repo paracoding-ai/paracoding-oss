@@ -1,0 +1,5 @@
+*/5 * * * * /home/paracoding-infra/bin/infra-watch.sh >/dev/null 2>&1
+# /etc/cron.d:
+certbot
+e2scrub_all
+sysstat

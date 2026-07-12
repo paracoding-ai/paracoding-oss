@@ -1,0 +1,5 @@
+[Unit]
+Description=fleet breakglass work watcher (detect items needing SSH/root)
+[Service]
+Type=oneshot
+ExecStart=/opt/paracoding-mcp/breakglass_watch.sh

@@ -1,0 +1,5 @@
+[Unit]
+Description=fleet agent-workspace git autosync
+[Service]
+Type=oneshot
+ExecStart=/opt/paracoding-mcp/autosync.sh

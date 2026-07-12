@@ -1,0 +1,11 @@
+[Unit]
+Description=fleet privileged MCP server (infra jobs)
+After=network.target
+[Service]
+Type=simple
+User=mcpsvc
+ExecStart=/opt/paracoding-mcp/venv/bin/python /opt/paracoding-mcp/server_infra.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

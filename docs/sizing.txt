@@ -1,0 +1,10 @@
+# sizing for GCE mirror (#98)
+RAM:
+               total        used        free      shared  buff/cache   available
+Mem:           3.8Gi       732Mi       421Mi       2.0Mi       3.0Gi       3.1Gi
+Swap:          495Mi       5.0Mi       490Mi
+DISK:
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda         79G   11G   64G  14% /
+CPU: 2 cores
+USED: 10764088	/
