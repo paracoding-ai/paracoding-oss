@@ -16,3 +16,9 @@ pointers; secrets stay host-side (root-only) / GCP Secret Manager.
 - `docs/`      capture manifest, package list, cron, firewall + **`docs/REBUILD.md` runbook**
 - `scripts/`   `rebuild.sh` (turnkey host rebuild, verified by drill #100), `provision-vm.sh`, `mint_mcp_vhost.py`
 - `requirements.txt` pinned venv deps; `mcp/restore_board.py` board-state restore
+
+## Two-VM architecture (MCP server + operator desktop)
+Paracoding runs an always-on **MCP server** (e2-small, hardened) and a SEPARATE **operator desktop**
+(e2-standard-4, idle-stops when unused) — cheaper and more secure than one big always-on box.
+- Server: `scripts/rebuild.sh --fresh` (quickstart).
+- Desktop: `scripts/provision-desktop.sh <PROJECT> <MCP_INTERNAL_IP>` — see `docs/DESKTOP.md`.
