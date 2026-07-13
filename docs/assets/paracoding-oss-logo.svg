@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 660" width="600" height="660" role="img" aria-label="PARACODING — open-source agent fleet">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F5D57A"/>
+      <stop offset="0.5" stop-color="#D4AF37"/>
+      <stop offset="1" stop-color="#A9821E"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.6">
+      <stop offset="0" stop-color="#D4AF37" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#D4AF37" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="600" height="660" rx="28" fill="#0A0A0A"/>
+  <circle cx="300" cy="250" r="230" fill="url(#glow)"/>
+  <g fill="none" stroke="url(#gold)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M132 268 C132 150 210 78 300 78 C390 78 468 150 468 268 C468 300 452 318 420 320 L180 320 C148 318 132 300 132 268 Z" fill="#0A0A0A"/>
+    <path d="M300 92 C296 150 296 220 300 306"/>
+    <path d="M262 120 C222 138 214 176 244 196 C210 206 206 246 240 260 C214 276 220 306 250 308"/>
+    <path d="M210 150 C182 168 182 200 208 214 C186 228 190 258 216 266"/>
+    <path d="M170 196 C152 210 154 236 176 248 C160 260 164 284 184 292"/>
+    <path d="M338 120 C378 138 386 176 356 196 C390 206 394 246 360 260 C386 276 380 306 350 308"/>
+    <path d="M390 150 C418 168 418 200 392 214 C414 228 410 258 384 266"/>
+    <path d="M430 196 C448 210 446 236 424 248 C440 260 436 284 416 292"/>
+  </g>
+  <g fill="url(#gold)">
+    <path d="M198 320 L402 320 L392 344 C386 356 372 362 358 362 L242 362 C228 362 214 356 208 344 Z"/>
+    <path d="M262 362 L338 362 L330 470 C328 500 316 516 300 516 C284 516 272 500 270 470 Z"/>
+  </g>
+  <g stroke="#8C6A18" stroke-width="3" stroke-linecap="round" opacity="0.7">
+    <path d="M289 380 L289 500"/>
+    <path d="M311 380 L311 500"/>
+  </g>
+  <text x="300" y="576" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="66" letter-spacing="6" fill="url(#gold)" font-weight="700">PARACODING</text>
+  <text x="300" y="614" text-anchor="middle" font-family="Verdana, Geneva, sans-serif" font-size="18" letter-spacing="7" fill="#C9A94A">OPEN-SOURCE AGENT FLEET</text>
+</svg>
