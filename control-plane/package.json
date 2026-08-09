@@ -1,0 +1,28 @@
+{
+  "name": "paracoding-control-plane",
+  "version": "1.0.0",
+  "description": "GCP/Firebase serverless board, journal, history, data-lake & MCP control plane",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --platform=node --format=cjs --target=node20 --outfile=dist/index.js && esbuild src/gittools.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/gittools.js --external:firebase-admin --external:@google-cloud/storage --external:isomorphic-git",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.7.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@simplewebauthn/server": "10.0.0",
+    "express": "5.2.1",
+    "firebase-admin": "14.2.0",
+    "http-proxy": "1.18.1",
+    "uuid": "14.0.1",
+    "zod": "4.4.3",
+    "isomorphic-git": "^1.40.0",
+    "diff": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/uuid": "^10.0.0",
+    "@types/node": "^20.12.7",
+    "typescript": "^7.0.2"
+  }
+}

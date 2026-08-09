@@ -1,0 +1,82 @@
+Paracoding.AI Agentic Harness
+Copyright 2026 Seaside Mushrooms LLC
+
+This product includes software developed by Seaside Mushrooms LLC.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+--------------------------------------------------------------------------------
+TRADEMARKS
+--------------------------------------------------------------------------------
+
+"Paracoding", "Paracoding.AI", "Agentic Fungi", "Seaside Mushrooms", and the
+Paracoding mushroom-brain logo are trademarks of Seaside Mushrooms LLC.
+
+Apache License 2.0 section 6 does not grant trademark rights. You are free to
+fork, modify, rebrand and redistribute this software — including commercially —
+but not to use these marks to name your fork, to imply endorsement, or to pass
+your product off as ours. Nominative use ("a fork of Paracoding.AI", "compatible
+with Paracoding.AI") is fine and expected.
+
+--------------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+--------------------------------------------------------------------------------
+
+This distribution depends on the following third-party components. Each remains
+governed by its own license. This list is maintained by hand; if you add a
+dependency, add it here.
+
+RUNTIME DEPENDENCIES (npm)
+
+  @modelcontextprotocol/sdk  ^1.12.0   MIT
+  @simplewebauthn/server     ^10.0.1   MIT
+  express                    ^4.19.2   MIT
+  firebase-admin             ^12.7.0   Apache-2.0
+  uuid                       ^9.0.1    MIT
+  zod                        ^3.23.8   MIT
+
+BUILD / DEVELOPMENT DEPENDENCIES (npm)
+
+  @types/express             ^4.17.21  MIT
+  @types/node                ^20.14.10 MIT
+  typescript                 ^5.5.4    Apache-2.0
+
+BROWSER COMPONENTS LOADED AT RUNTIME FROM A CDN
+
+  These are not listed in package.json and will be missed by an SBOM tool
+  pointed only at the manifest. They are fetched by the browser at page load.
+
+  @simplewebauthn/browser    10.0.0    MIT
+                                       loaded by src/gate.html and src/cockpit.html
+  qrcodejs (davidshimjs)     unpinned  MIT
+                                       loaded by src/gate.html
+  Google Identity Services   n/a       Proprietary — Google Terms of Service
+                                       https://accounts.google.com/gsi/client
+                                       loaded by src/gate.html and by the OAuth
+                                       consent page generated in src/mcp-oauth.ts
+
+  KNOWN ISSUE: these are loaded without Subresource Integrity hashes, and the
+  qrcodejs reference is unpinned (floating HEAD via a CDN gh path). Both are
+  tracked as security findings and should be pinned and vendored before you rely
+  on this in production. See SECURITY.md.
+
+--------------------------------------------------------------------------------
+SUPPORTING THIS PROJECT
+--------------------------------------------------------------------------------
+
+This software is free, and always will be. Nothing you can pay for unlocks a
+feature, removes a restriction, or changes your rights under the Apache License.
+
+If it saves you time and you want to say thanks, there is a link in the app and
+in the README. Entirely optional, and declining costs you nothing — the button
+that turns the ads off is right next to the one that donates, it is free, and it
+always works.

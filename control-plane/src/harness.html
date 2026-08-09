@@ -1,0 +1,1034 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<!-- PC-PASSKEY-UX-v1 : passkey-neutral wording + truthful abort copy -->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#123a56">
+<title>Paracoding Agentic Harness — Chat</title>
+<style>
+  :root{
+    --g1:#123a56;--g2:#0f4a47;--g3:#175339;
+    --ink:#ffffff;--ink-soft:rgba(255,255,255,.82);--ink-dim:rgba(255,255,255,.62);
+    --glass:rgba(255,255,255,.12);--glass-2:rgba(255,255,255,.18);--glass-line:rgba(255,255,255,.28);
+    --gold:#ffd77a;--shadow:0 10px 30px rgba(10,40,60,.28);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);
+    background:linear-gradient(135deg,var(--g1) 0%,var(--g2) 52%,var(--g3) 100%) fixed;
+    display:flex;flex-direction:column;height:100dvh;overflow:hidden;}
+  a{color:#fff;text-decoration:none}
+  .hdr{display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;background:rgba(6,18,26,.22);border-bottom:1px solid var(--glass-line);backdrop-filter:blur(8px)}
+  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 10px rgba(240,194,74,.45));mix-blend-mode:screen}
+  .hdr .ttl{font-weight:800;letter-spacing:.02em;font-size:1.02rem}
+  .hdr .sub{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-dim)}
+  .hdr .rt{margin-left:auto;display:flex;gap:.4rem}
+  .hbtn{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.45rem .7rem;font-size:.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.4rem}
+  .hbtn:hover{background:var(--glass-2)}
+  .hbtn:disabled{opacity:.45;cursor:default}
+  .vmlight{width:12px;height:12px;border-radius:50%;flex:none;box-shadow:0 0 10px currentColor;align-self:center}
+  .vmlight.on{color:#4df5b0;background:#4df5b0}
+  .vmlight.off{color:#ff8f86;background:#ff8f86}
+  .vmlight.prov{color:rgba(255,255,255,.4);background:rgba(255,255,255,.4);box-shadow:none}
+  .divb{width:1px;height:22px;background:var(--glass-line);align-self:center;margin:0 .15rem}
+  .startb{border-color:rgba(120,255,190,.55)!important;background:rgba(60,200,140,.22)!important}
+  .stopb{border-color:rgba(255,150,140,.55)!important;background:rgba(200,80,80,.22)!important}
+  .app{flex:1;display:flex;min-height:0}
+  .side, .rdp{transition:width .16s ease}
+  .side.collapsed, .rdp.collapsed{width:0!important;min-width:0;padding:0;overflow:hidden;border:0}
+  .splitter{width:7px;flex:none;cursor:col-resize;position:relative}
+  .splitter::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2px;height:30px;background:var(--glass-line);border-radius:2px}
+  .splitter:hover::after{background:#fff}
+  .splitter.hidden{display:none}
+  .rail{flex:none;width:24px;display:none;align-items:center;justify-content:center;cursor:pointer;font-weight:900;color:var(--ink-soft);background:rgba(6,18,26,.30)}
+  .rail:hover{background:var(--glass);color:#fff}
+  .rail.show{display:flex}
+  .railL{border-right:1px solid var(--glass-line)}
+  .railR{border-left:1px solid var(--glass-line)}
+  .sidetop{display:flex;justify-content:flex-end;padding:.35rem .4rem 0}
+  .collapseBtn{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:7px;cursor:pointer;font-size:.85rem;font-weight:900;line-height:1;padding:.12rem .45rem}
+  .collapseBtn:hover{background:var(--glass-2)}
+  .side{width:270px;flex:none;display:flex;flex-direction:column;min-height:0;background:rgba(6,18,26,.18);border-right:1px solid var(--glass-line);backdrop-filter:blur(8px)}
+  .side .sec{padding:.7rem .8rem}
+  .side .lbl{font-size:.64rem;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-dim);margin:.2rem 0 .5rem}
+  .toggle{display:flex;background:rgba(6,18,26,.28);border:1px solid var(--glass-line);border-radius:12px;padding:.22rem;gap:.22rem}
+  .toggle button{flex:1;border:0;background:transparent;color:var(--ink-soft);font-weight:700;font-size:.86rem;padding:.5rem;border-radius:9px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.4rem}
+  .toggle button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;box-shadow:0 2px 10px rgba(0,0,0,.18)}
+  .toggle .dotc{width:8px;height:8px;border-radius:50%}
+  .dotClaude{background:#d97757}.dotGemini{background:#4b8bf5}
+  .subtoggle{display:flex;gap:.3rem;margin-top:.4rem}
+  .subtoggle button{flex:1;border:1px solid var(--glass-line);background:var(--glass);color:var(--ink-soft);font-weight:700;font-size:.76rem;padding:.4rem .3rem;border-radius:9px;cursor:pointer;line-height:1.15;text-align:center}
+  .subtoggle button:hover{background:var(--glass-2)}
+  .subtoggle button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;border-color:#fff}
+  .subtoggle button small{display:block;font-weight:600;font-size:.62rem;opacity:.7;margin-top:.05rem}
+  .agents{flex:1;overflow-y:auto;padding:0 .55rem .5rem}
+  .agent{display:flex;align-items:center;gap:.55rem;padding:.5rem .55rem;border-radius:11px;cursor:pointer;border:1px solid transparent;margin:.16rem 0}
+  .agent:hover{background:var(--glass)}
+  .agent.sel{background:var(--glass-2);border-color:var(--glass-line)}
+  .agent .st{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 7px currentColor}
+  .s-working{color:#c6ffe4}.s-waiting{color:#ffe6a6}.s-idle{color:rgba(255,255,255,.4)}
+  .agent .nm{font-weight:600;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agent .rl{font-size:.68rem;color:var(--ink-dim);white-space:nowrap}
+  .agent .meta{margin-left:auto;text-align:right}
+  .provision{display:flex;align-items:center;gap:.5rem;padding:.55rem;margin:.25rem .1rem;border-radius:11px;border:1px dashed var(--glass-line);color:#fff;font-weight:600;font-size:.85rem;cursor:pointer}
+  .provision:hover{background:var(--glass)}
+  .keys{border-top:1px solid var(--glass-line);padding:.6rem .8rem;display:flex;align-items:center;gap:.55rem;cursor:pointer}
+  .keys:hover{background:var(--glass)}
+  .keys .ic{font-size:1.05rem}.keys .k{font-size:.82rem;font-weight:600}.keys .state{margin-left:auto;font-size:.68rem}
+  .ok{color:#c6ffe4}.miss{color:#ffd7d0}
+  .chat{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+  .chat .cbar{display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--glass-line);background:rgba(255,255,255,.06)}
+  .chat .cbar .who{font-weight:800}
+  .chat .cbar .via{margin-left:auto;font-size:.72rem;color:var(--ink-soft);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:.2rem .6rem}
+  .chat .cbar .meter{font-size:.66rem;color:var(--ink-dim);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:.2rem .55rem;margin-left:.35rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44ch;flex:0 1 auto}
+  .stream{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.7rem}
+  .msg{max-width:76%;padding:.65rem .85rem;border-radius:15px;line-height:1.45;font-size:.94rem;white-space:pre-wrap;word-wrap:break-word;box-shadow:var(--shadow)}
+  .msg.me{align-self:flex-end;background:rgba(255,255,255,.22);border:1px solid var(--glass-line);border-bottom-right-radius:5px}
+  .msg.ag{align-self:flex-start;background:rgba(6,18,26,.30);border:1px solid var(--glass-line);border-bottom-left-radius:5px}
+  .msg .nmtag{display:block;font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:.25rem}
+  .empty{margin:auto;text-align:center;color:var(--ink-soft);max-width:340px}
+  .empty img{width:64px;height:64px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 16px rgba(240,194,74,.45));mix-blend-mode:screen;margin-bottom:.6rem}
+  .composer{padding:.7rem 1rem;border-top:1px solid var(--glass-line);background:rgba(255,255,255,.06)}
+  .cin{display:flex;gap:.5rem;align-items:flex-end}
+  textarea{flex:1;resize:none;max-height:140px;background:rgba(6,18,26,.28);border:1px solid var(--glass-line);color:#fff;border-radius:12px;padding:.7rem .8rem;font:inherit;font-size:.95rem}
+  textarea::placeholder{color:var(--ink-dim)}
+  textarea:focus{outline:none;border-color:#fff}
+  .mic{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:12px;padding:.7rem .8rem;font-size:1rem;cursor:pointer;flex:none}
+  .mic:hover{background:var(--glass-2)}
+  .mic.rec{background:rgba(255,80,80,.4);border-color:#ff8f86;animation:pulse 1s infinite}
+  @keyframes pulse{50%{opacity:.55}}
+  .send{background:linear-gradient(135deg,#fff,#dff6ff);color:#0e3a52;border:0;border-radius:12px;padding:.7rem 1.05rem;font-weight:800;cursor:pointer;box-shadow:var(--shadow);flex:none}
+  .send:disabled{opacity:.5;cursor:default}
+  .modal{position:fixed;inset:0;background:rgba(4,14,20,.55);display:none;align-items:center;justify-content:center;padding:1rem;z-index:20}
+  .modal.on{display:flex}
+  .sheet{width:100%;max-width:430px;background:linear-gradient(135deg,rgba(18,58,86,.97),rgba(15,74,71,.97));border:1px solid var(--glass-line);border-radius:18px;padding:1.1rem;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+  .sheet h3{margin:.1rem 0 .2rem;font-size:1.05rem}
+  .sheet p{color:var(--ink-soft);font-size:.82rem;margin:.2rem 0 .8rem}
+  .kfield{margin:.7rem 0}
+  .kfield label{display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:700;margin-bottom:.3rem}
+  .kfield .row{display:flex;gap:.45rem}
+  .kfield input{flex:1;background:rgba(6,18,26,.30);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.6rem .7rem;font:inherit}
+  .kfield input::placeholder{color:var(--ink-dim)}
+  .kfield .save{background:#fff;color:#0e3a52;border:0;border-radius:10px;padding:.6rem .8rem;font-weight:800;cursor:pointer}
+  .tag{font-size:.66rem;padding:.12rem .45rem;border-radius:999px;border:1px solid var(--glass-line)}
+  .sheet .close{margin-top:.6rem;width:100%;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.6rem;font-weight:700;cursor:pointer}
+  .hint{color:var(--ink-dim);font-size:.7rem;margin-top:.3rem}
+  .rdp{width:400px;flex:none;display:flex;flex-direction:column;min-height:0;padding:.55rem;background:rgba(6,18,26,.14);border-left:1px solid var(--glass-line)}
+  .rdpwrap{flex:1;min-height:0;border-radius:15px;padding:2px;background:linear-gradient(135deg,var(--g1),var(--g2) 55%,var(--g3));box-shadow:var(--shadow)}
+  .rdpinner{height:100%;display:flex;flex-direction:column;min-height:0;background:#04121b;border-radius:13px;overflow:hidden}
+  .rdpbar{display:flex;align-items:center;gap:.5rem;padding:.45rem .6rem;background:rgba(6,18,26,.55);border-bottom:1px solid var(--glass-line)}
+  .rdpbar .rdplight{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 7px currentColor}
+  .rdpbar .t{font-size:.68rem;font-weight:800;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:linear-gradient(90deg,#eafaff,#bfeee0);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .rdpbar .exp{margin-left:auto;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:8px;padding:.25rem .55rem;cursor:pointer;font-size:.74rem;font-weight:700;white-space:nowrap}
+  .rdpbar .exp:hover{background:var(--glass-2)}
+  .rdptabs{display:none;gap:.3rem;padding:.4rem .5rem;background:rgba(6,18,26,.35);border-bottom:1px solid var(--glass-line)}
+  .rdptabs button{flex:1;background:var(--glass);border:1px solid var(--glass-line);color:var(--ink-soft);border-radius:8px;padding:.35rem .2rem;font-size:.73rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.25rem}
+  .rdptabs button:hover{background:var(--glass-2)}
+  .rdptabs button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;border-color:#fff}
+  .rdpbody{flex:1;position:relative;background:#04121b;min-height:0}
+  .rdpbody iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+  .rdpph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.55rem;text-align:center;padding:1.2rem;color:var(--ink-soft)}
+  .rdpph .em{font-size:2rem;filter:drop-shadow(0 0 12px rgba(120,220,255,.4))}
+  .rdpph .btn{margin-top:.3rem;background:linear-gradient(135deg,#fff,#dff6ff);color:#0e3a52;border:0;border-radius:10px;padding:.5rem .9rem;font-weight:800;cursor:pointer}
+  .rdp.full{position:fixed;inset:0;width:auto!important;z-index:60;padding:1.2rem;background:rgba(3,10,16,.9);backdrop-filter:blur(6px);border:0}
+  .rdp.full .rdpwrap{border-radius:18px}
+  @media(max-width:480px){ .side{width:210px} .msg{max-width:88%} }
+  #rdpPanel,#split,#railR,#rdpBtn,.mtab button[data-p="desktop"]{display:none!important}
+  .vmlight.starting{background:transparent!important;border:2px solid rgba(255,255,255,.35);border-top-color:#ffe08a;box-shadow:none;animation:vmspin .7s linear infinite}
+  .btnspin{display:inline-block;width:.8em;height:.8em;border:2px solid rgba(255,255,255,.3);border-top-color:#ffe08a;border-radius:50%;animation:vmspin .7s linear infinite;margin-right:.35rem;vertical-align:-1px}
+  @keyframes vmspin{to{transform:rotate(360deg)}}
+  .term{position:absolute;inset:0;display:flex;flex-direction:column;background:#030e16;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .termout{flex:1;overflow-y:auto;padding:.55rem .65rem;font-size:.78rem;line-height:1.4}
+  .tl{white-space:pre-wrap;word-break:break-word;margin:.04rem 0}
+  .tl.cmd{color:#eafaff;font-weight:700}
+  .tl.out{color:#bfe6d4}
+  .tl.err{color:#ff9a90}
+  .tl.sys{color:rgba(255,255,255,.5);font-size:.7rem}
+  .termin{display:flex;align-items:center;gap:.4rem;padding:.4rem .55rem;border-top:1px solid var(--glass-line);background:rgba(6,18,26,.6)}
+  .termps{color:#5fd0c4;font-weight:800}
+  .termin input{flex:1;background:transparent;border:0;color:#eafaff;font-family:inherit;font-size:.8rem;outline:none}
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <img src="/assets/brain.png" alt="logo" onerror="this.style.display='none'">
+    <div><div class="sub">Paracoding.ai</div><div class="ttl">Agentic Harness</div></div>
+    <div class="rt">
+      <span class="vmlight off" id="vmLight" title="VM stopped"></span>
+      <button class="hbtn startb" id="vmBtn" onclick="toggleVM()">▶ Start VM</button>
+      <button class="hbtn" id="rdpBtn" onclick="openRDP()" disabled>🖥 Remote Desktop</button>
+      <span class="divb"></span>
+      <button class="hbtn" id="rdpBtn2" onclick="window.open('https://remotedesktop.google.com/access','_blank','noopener')" title="Chrome Remote Desktop (new tab)">🖥️ Remote Desktop</button>
+      <button class="hbtn" onclick="window.open('/dash','pcdash')">📊 Dashboard</button>
+      <button class="hbtn" onclick="window.open('/gate','pcgate')">⌂ Gate</button>
+      <button class="hbtn" onclick="window.open('/wiki','pcwiki')" title="Internal system wiki">📖 Docs</button>
+    </div>
+  </div>
+  <div class="app">
+    <div class="rail railL" id="railL" onclick="toggleSide()" title="Expand sidebar">›</div>
+    <aside class="side" id="side">
+      <div class="sidetop"><button class="collapseBtn" onclick="toggleSide()" title="Collapse sidebar">‹</button></div>
+      <div class="sec">
+        <div class="lbl">Provider</div>
+        <div class="toggle" id="toggle">
+          <button data-p="claude" onclick="setProvider('claude')"><span class="dotc dotClaude"></span>Claude</button>
+          <button data-p="gemini" class="on" onclick="setProvider('gemini')"><span class="dotc dotGemini"></span>Gemini</button>
+        </div>
+        <div class="subtoggle" id="modelToggle"></div>
+      </div>
+      <div class="sec" style="padding-bottom:.2rem"><div class="lbl">Paracoding Fleet</div></div>
+      <div class="agents" id="agents"></div>
+      <div style="padding:0 .55rem"><div class="provision" onclick="provision()"><span style="font-size:1.1rem">＋</span> Provision a new agent</div></div>
+      <div class="keys" onclick="openKeys()"><span class="ic">🔑</span><span class="k">API keys</span><span class="state" id="keyState">…</span></div>
+    </aside>
+    <main class="chat">
+      <div class="cbar">
+        <span class="st s-idle" id="cWhoDot" style="width:9px;height:9px;border-radius:50%">●</span>
+        <span class="who" id="cWho" onclick="pickStrainNav()" style="cursor:pointer" title="Pick a strain">Select an agent</span><button id="pcStatusBtn" onclick="pcStatus()" title="Status - reads this strain's identity, its last journal actions and its work-item backlog. Local read, NO model call, no API credit." style="margin-left:.6rem;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:8px;padding:.2rem .55rem;font-size:.74rem;font-weight:700;cursor:pointer">&#9679; Status</button>
+        <span class="via" id="cVia">via Gemini</span>
+        <span class="meter" id="cMeter">session 0 in / 0 out</span>
+      </div>
+      <div class="stream" id="stream">
+        <div class="empty" id="empty">
+          <img src="/assets/brain.png" onerror="this.style.display='none'">
+          <div><b>Pick a strain</b> on the left to start chatting.<br>Status up top reads its live state; the model lives in Layers &rsaquo; Settings.</div>
+        </div>
+      </div>
+      <div class="composer"><div class="cin">
+        <textarea id="ta" rows="1" placeholder="Message the selected agent…" oninput="grow(this)" onkeydown="keyd(event)"></textarea>
+        <input type="file" id="imgIn" accept="image/*" multiple style="display:none" onchange="onImg(this)"><button class="mic" id="upBtn" onclick="document.getElementById('imgIn').click()" title="Attach a screenshot">📎</button><button class="mic" id="micBtn" onclick="toggleMic()" title="Dictate — voice to text">🎤</button>
+        <button class="mic" id="playBtn" onclick="playLast()" title="Play the last reply aloud">&#9654;</button><button class="send" id="send" onclick="send()" disabled>Send</button>
+      </div></div>
+    </main>
+    <div class="splitter" id="split" onmousedown="startResize(event)"></div>
+    <aside class="rdp" id="rdpPanel">
+      <div class="rdpwrap"><div class="rdpinner">
+        <div class="rdpbar">
+          <span class="rdplight" id="rdpLight" style="color:#ff8f86;background:#ff8f86"></span>
+          <span class="t">Paracoding Workstation</span>
+          <button class="exp" onclick="toggleRdp()" title="Collapse">›</button>
+          <button class="exp" id="rdpExp" onclick="breakout()" title="Open desktop in its own full tab">⛶ Break out</button>
+        </div>
+        <div class="rdptabs" id="rdpTabs">
+          <button class="on" data-v="chrome" onclick="setView('chrome')">🌐 Chrome</button>
+          <button data-v="claude" onclick="setView('claude')">✦ Claude</button>
+          <button data-v="terminal" onclick="setView('terminal')">⌨ Terminal</button>
+        </div>
+        <div class="rdpbody" id="rdpBody">
+          <div class="rdpph" id="rdpPh"><div class="em">🖥️</div><div><b>Workstation</b><br>Start &amp; connect to bring it live.</div><button class="btn" id="rdpConnect" onclick="connectRDP()">▶ Start &amp; connect</button></div>
+        </div>
+      </div></div>
+    </aside>
+    <div class="rail railR" id="railR" onclick="toggleRdp()" title="Expand workstation">‹</div>
+  </div>
+  <div class="modal" id="keyModal"><div class="sheet">
+    <h3>🔑 API keys</h3>
+    <p>Gemini rotates automatically (no key). Claude you rotate yourself — recommended every 30 days: go to console → API keys → Create → copy → paste here → Update. Dot goes back green.</p>
+    <div class="kfield"><label><span class="dotc dotClaude"></span> Claude (Anthropic) <span class="tag" id="tagClaude">—</span></label>
+      <div class="row"><input id="inClaude" type="password" placeholder="your Anthropic API key"><button class="save" onclick="saveKey('claude')">Rotate</button></div>
+      <div class="hint">Paste new key -> verifies -> auto-disables old via Admin API -> saves to Secret Manager.</div></div>
+    <div class="kfield" style="opacity: 0.7"><label><span class="dotc dotGemini"></span> Gemini (Google AI) <span class="tag" id="tagGemini">—</span></label>
+      <div class="row"><input id="inGemini" type="password" placeholder="No static key needed (token auth)" disabled><button class="save" disabled>Token</button></div>
+      <div class="hint">Token-only via Vertex AI OAuth.</div></div>
+    <button class="close" onclick="closeKeys()">Done</button>
+  </div></div>
+<script>
+  let PROVIDER='gemini', AGENTS=[], SEL=null; const HIST={}; let DEMO=false;
+  const $=id=>document.getElementById(id);
+  const esc=s=>String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  function ago(ms){ if(!ms)return''; const m=Math.max(0,Math.round((Date.now()-ms)/60000)); if(m<1)return'now'; if(m<60)return m+'m'; const h=Math.round(m/60); if(h<24)return h+'h'; return Math.round(h/24)+'d'; }
+  async function api(path,opts){ const r=await fetch(path,Object.assign({credentials:'include'},opts||{})); if(!r.ok){ let _b=null; try{_b=await r.json();}catch(e){} throw {status:r.status, body:_b}; } return r.json(); }
+  let vmRunning=false, vmProvisioned=true, vmStarting=false, vmStartAt=0;
+  function paintVM(){ const l=$('vmLight'),b=$('vmBtn'),r=$('rdpBtn'),r2=$('rdpBtn2');
+    var rdpOn=!!vmRunning; if(r) r.disabled=!rdpOn; if(r2) r2.disabled=!rdpOn;
+    if(!vmProvisioned){ l.className='vmlight prov'; l.title='not provisioned'; b.textContent='▶ Start VM'; b.disabled=true; b.className='hbtn startb'; if(r)r.disabled=true; if(r2)r2.disabled=true; return; }
+    if(vmStarting && !vmRunning){ l.className='vmlight starting'; l.title='booting'; b.innerHTML='<span class="btnspin"></span>Booting\u2026'; b.disabled=true; b.className='hbtn startb'; if(r)r.disabled=true; if(r2)r2.disabled=true; return; }
+    if(vmRunning){ l.className='vmlight on'; l.title='VM running'; b.textContent='⏹ Stop VM'; b.className='hbtn stopb'; b.disabled=false; }
+    else{ l.className='vmlight off'; l.title='VM stopped'; b.textContent='▶ Start VM'; b.className='hbtn startb'; b.disabled=false; } }
+  async function toggleVM(){ const b=$('vmBtn');
+    if(!vmRunning){ b.disabled=true; vmStarting=true; vmStartAt=Date.now(); b.innerHTML='<span class="btnspin"></span>Booting\u2026'; $('vmLight').className='vmlight starting'; $('vmLight').title='booting';
+      if(DEMO){ setTimeout(()=>{ vmRunning=true; paintVM(); },1500); return; }
+      try{ await api('/api/vm/start',{method:'POST'}); }catch(e){} pollVM();
+    } else { if(!DEMO){ try{ await api('/api/vm/stop',{method:'POST'}); }catch(e){} } vmRunning=false; paintVM(); } }
+  function openRDP(){ connectRDP(); }
+  async function pollVM(){ if(DEMO) return; try{ const d=await api('/api/vm/status'); vmProvisioned=d.provisioned!==false; vmRunning=(d.state==='RUNNING'); if(vmRunning){ vmStarting=false; } else if(vmStarting && vmStartAt && (Date.now()-vmStartAt>120000)){ vmStarting=false; } paintVM(); }catch(e){} }
+  /* [HARNESSUI-MODEL-DERIVE-V1] EMPTY on purpose. Every model name the page shows comes from
+     /api/models, which builds the catalog from the CHAT_API_* environment. A literal here is
+     the defect this change exists to remove: it renders before the fetch and then keeps
+     rendering if the fetch fails, so a stale literal outlives the config it contradicts. */
+  const MODELS={ claude:[], gemini:[] };
+  const MODEL={claude:'',gemini:''};
+  var PCEFFORT='';                    /* server-configured effort, from /api/models */
+  var PCRUNTIME={model:'',effort:''}; /* what /api/chat reported it ACTUALLY answered with */
+  function renderModelToggle(){ const el=$('modelToggle'); el.innerHTML='';
+    for(const m of (MODELS[PROVIDER]||[])){ const b=document.createElement('button'); b.className=(MODEL[PROVIDER]===m.id)?'on':'';
+      b.innerHTML=esc(m.label)+(m.sub?'<small>'+esc(m.sub)+'</small>':''); b.onclick=()=>{ MODEL[PROVIDER]=m.id; renderModelToggle(); updateVia(); }; el.appendChild(b); } }
+  /* [HARNESSUI-MODEL-DERIVE-V1] The badge is derived from the api model id, in this order of
+     authority: (1) what /api/chat reported the provider actually answered with, (2) the
+     /api/models catalog entry's api id. The effort suffix is the server's configured effort.
+     'claude-opus-5' + 'medium' -> 'Opus 5 Medium'. Nothing is typed; if the config changes the
+     badge changes with it, and if it cannot be derived it says so rather than inventing one. */
+  function pcModelLabel(api){ var s=String(api||'').trim(); if(!s) return '';
+    s=s.replace(/^models\//,'').replace(/^(claude|gemini|anthropic|google)[-.]/i,'');
+    s=s.replace(/-\d{6,8}$/,'').replace(/-(preview|latest|exp)$/i,'');
+    return s.split(/[-_]/).filter(function(w){return !!w;}).map(function(w){
+      return /^[0-9]/.test(w)?w:(w.charAt(0).toUpperCase()+w.slice(1)); }).join(' '); }
+  function pcEffortLabel(e){ var s=String(e||'').trim().toLowerCase();
+    if(!s||s==='none') return ''; return s.charAt(0).toUpperCase()+s.slice(1); }
+  function updateVia(){ var el=$('cVia'); if(!el) return;
+    var m=(MODELS[PROVIDER]||[]).find(function(x){return x.id===MODEL[PROVIDER];});
+    var api=PCRUNTIME.model||(m&&m.api)||'';
+    var lab=pcModelLabel(api);
+    var eff=(PROVIDER==='claude')?pcEffortLabel(PCRUNTIME.effort||PCEFFORT):'';
+    el.textContent=lab?(lab+(eff?(' '+eff):'')):'model unavailable';
+    el.title=api?('api model: '+api+(eff?(' · effort: '+eff.toLowerCase()):'')+' — derived from '
+      +(PCRUNTIME.model?'the last /api/chat response':'/api/models'))
+      :'model unknown: /api/models has not answered'; }
+  window.pcModelLabel=pcModelLabel; window.pcEffortLabel=pcEffortLabel;
+  function setProvider(p){ PROVIDER=p; document.querySelectorAll('#toggle button').forEach(b=>b.classList.toggle('on',b.dataset.p===p)); renderModelToggle(); updateVia(); }
+  async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.effort) PCEFFORT=String(d.effort);
+      if(!MODELS.claude.some(m=>m.id===MODEL.claude)) MODEL.claude=MODELS.claude[0]&&MODELS.claude[0].id; if(!MODELS.gemini.some(m=>m.id===MODEL.gemini)) MODEL.gemini=MODELS.gemini[0]&&MODELS.gemini[0].id;
+      renderModelToggle(); updateVia(); }catch(e){} }
+  // ---- token / cost meter -------------------------------------------------------------------
+  // Session tally accumulates client-side from the `usage` /api/chat now returns per turn.
+  // The day total is ONE /api/usage call on page load and one after each completed turn.
+  // /api/usage is a Firestore read, NOT a model call: it can never cost money. NO polling timer.
+  var METER = { i: 0, o: 0, cw: 0, cr: 0, turns: 0 };
+  var METERDAY = null;
+  function meterFmt(n){ n = Number(n || 0) || 0; if (n >= 1000000) return (n/1000000).toFixed(2)+'M'; if (n >= 1000) return (n/1000).toFixed(1)+'k'; return String(n); }
+  function meterPaint(){ var el = $('cMeter'); if (!el) return;
+    var txt = 'session ' + meterFmt(METER.i) + ' in / ' + meterFmt(METER.o) + ' out';
+    var d = METERDAY;
+    if (d && d.ok) {
+      txt += ' \u00b7 today ' + meterFmt(d.total_tokens);
+      txt += (d.prices_configured && d.cost_usd !== null) ? (' \u00b7 today $' + Number(d.cost_usd).toFixed(4)) : ' \u00b7 price not configured';
+    }
+    el.textContent = txt;
+    el.title = 'session: in ' + METER.i + ', out ' + METER.o + ', cache write ' + METER.cw + ', cache read ' + METER.cr + ' over ' + METER.turns + ' turn(s). "today" is a Firestore read of token_usage since 00:00 UTC; cost is computed at read time from config/models prices.';
+  }
+  function meterAddTurn(u){
+    if (u) { METER.i += Number(u.input_tokens || 0) || 0; METER.o += Number(u.output_tokens || 0) || 0;
+             METER.cw += Number(u.cache_creation_input_tokens || 0) || 0; METER.cr += Number(u.cache_read_input_tokens || 0) || 0;
+             METER.turns++; }
+    meterPaint(); loadUsage();
+  }
+  async function loadUsage(){ if (DEMO) { meterPaint(); return; }
+    try { var d = await api('/api/usage'); METERDAY = (d && d.ok) ? d : null; } catch(e){ METERDAY = null; }
+    meterPaint(); }
+  function statusClass(s){ return s==='working'?'s-working':s==='waiting'?'s-waiting':'s-idle'; }
+  function renderAgents(){ const el=$('agents'); el.innerHTML='';
+    if(!AGENTS.length){ el.innerHTML='<div style="padding:.6rem;color:var(--ink-dim);font-size:.82rem">No agents provisioned yet.</div>'; return; }
+    for(const a of AGENTS){ const d=document.createElement('div'); d.className='agent'+(SEL&&SEL.id===a.id?' sel':''); d.onclick=()=>selectAgent(a.id);
+      d.innerHTML='<span class="st '+statusClass(a.status)+'">●</span><div style="min-width:0"><div class="nm">'+esc(a.name)+'</div><div class="rl">'+esc(a.role||a.id)+'</div></div><div class="meta"><div class="rl">'+(a.last_ts?ago(a.last_ts):'')+'</div>'+(a.backlog?'<div class="rl" style="color:var(--gold)">'+a.backlog+' queued</div>':'')+'</div>'; el.appendChild(d); } }
+  function selectAgent(id){ SEL=AGENTS.find(a=>a.id===id)||null; window.SEL=SEL; renderAgents(); $('cWho').textContent=SEL?SEL.name:'Select an agent';
+    $('cWhoDot').className='st '+(SEL?statusClass(SEL.status):'s-idle'); $('ta').disabled=!SEL; $('send').disabled=!SEL; renderStream(); $('ta').focus(); if(SEL){ HIST[SEL.id]=[]; renderStream(); loadHistory(SEL.id,true); } }
+  async function loadHistory(id,force){ if(DEMO) return; try{ const d=await api('/api/chat/history?agentId='+encodeURIComponent(id)+(force?'&full=1':'')); if(d&&d.history){ const cur=HIST[id]||[]; if(force||cur.length<=d.history.length){ HIST[id]=d.history.map(function(h){return {role:h.role,text:h.text};}); if(SEL&&SEL.id===id) renderStream(); } } }catch(e){} }
+  function refreshHistory(){ if(!SEL) return; loadHistory(SEL.id,true); }
+  function md(t){
+    t=String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    t=t.replace(/`([^`]+)`/g,'<code style="background:rgba(255,255,255,.1);padding:.05rem .3rem;border-radius:4px;font-size:.86em">$1</code>');
+    t=t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    var lines=t.split(/\n/), out=[], i=0;
+    while(i<lines.length){
+      var ln=lines[i];
+      if(/^\s*([-*•])\s+/.test(ln)){ var it=[]; while(i<lines.length){ var m=lines[i].match(/^\s*([-*•])\s+(.*)$/); if(!m)break; it.push('<li style="margin:.15rem 0">'+m[2]+'</li>'); i++; } out.push('<ul style="margin:.35rem 0;padding-left:1.2rem">'+it.join('')+'</ul>'); continue; }
+      if(/^\s*\d+[.)]\s+/.test(ln)){ var itn=[]; while(i<lines.length){ var mn=lines[i].match(/^\s*\d+[.)]\s+(.*)$/); if(!mn)break; itn.push('<li style="margin:.15rem 0">'+mn[1]+'</li>'); i++; } out.push('<ol style="margin:.35rem 0;padding-left:1.4rem">'+itn.join('')+'</ol>'); continue; }
+      if(ln.trim()===''){ i++; continue; }
+      var para=[]; while(i<lines.length && lines[i].trim()!=='' && !/^\s*([-*•]|\d+[.)])\s+/.test(lines[i])){ para.push(lines[i]); i++; }
+      out.push('<p style="margin:.45rem 0;line-height:1.5">'+para.join('<br>')+'</p>');
+    }
+    return out.join('');
+  }
+  function pickStrainNav(){
+    if(typeof SEL!=='undefined' && SEL) return;
+    if(typeof window.__setPane==='function'){ window.__setPane('agents'); return; }
+    var s=document.getElementById('side');
+    if(s && s.classList.contains('collapsed') && typeof toggleSide==='function') toggleSide();
+  }
+  function renderStream(){ const s=$('stream');
+    if(!SEL){ s.innerHTML=''; s.appendChild(mkEmpty()); return; }
+    const h=HIST[SEL.id]||[];
+    if(!h.length){ s.innerHTML=''; const e=mkEmpty(); e.querySelector('div:last-child').innerHTML='<b>'+esc(SEL.name)+'</b><br>'+esc(SEL.role||'')+' — no messages yet. Status reads its live state.'; s.appendChild(e); return; }
+    s.innerHTML=''; for(const m of h){ const d=document.createElement('div'); d.className='msg '+(m.role==='me'?'me':'ag'); d.innerHTML=(m.role==='me'?'':'<span class="nmtag">'+esc(SEL.name)+'</span>')+((m.imgs&&m.imgs.length)?m.imgs.map(function(im){return '<img src="data:'+im.media_type+';base64,'+im.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">';}).join(''):(m.img&&m.img.data?'<img src="data:'+m.img.media_type+';base64,'+m.img.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">':''))+md(m.text); s.appendChild(d); } s.scrollTop=s.scrollHeight; }
+  function mkEmpty(){ const e=document.createElement('div'); e.className='empty'; e.innerHTML='<img src="/assets/brain.png" onerror="this.style.display=\'none\'"><div>No messages yet.</div>'; return e; }
+  function grow(t){ t.style.height='auto'; t.style.height=Math.min(140,t.scrollHeight)+'px'; }
+  function keyd(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } }
+  let PENDIMG=[];
+  function onImg(inp){ const fs=inp.files; if(!fs||!fs.length) return; for(var i=0;i<fs.length;i++){ (function(f){ const rd=new FileReader(); rd.onload=function(e){ PENDIMG.push({media_type:f.type||'image/png', data:String(e.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; var b=$('upBtn'); if(b)b.textContent='📎'+PENDIMG.length; }; rd.readAsDataURL(f); })(fs[i]); } inp.value=''; }
+  $('ta').addEventListener('paste', e => { for (const it of (e.clipboardData?.items||[])) { if (it.type && it.type.indexOf('image')===0){ const f=it.getAsFile(); if(f){ const rd=new FileReader(); rd.onload=ev=>{ PENDIMG.push({media_type:f.type||'image/png', data:String(ev.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; const b=$('upBtn'); if(b)b.textContent='📎'+PENDIMG.length; }; rd.readAsDataURL(f); e.preventDefault(); } } } });
+  async function send(){ const ta=$('ta'); const text=ta.value.trim(); if((!text&&!PENDIMG.length)||!SEL) return;
+    const imgs=PENDIMG; PENDIMG=[]; var _ub=$('upBtn'); if(_ub)_ub.textContent='📎';
+    (HIST[SEL.id]=HIST[SEL.id]||[]).push({role:'me',text,imgs}); ta.value=''; grow(ta); renderStream();
+    const pending={role:'ag',text:'…'}; HIST[SEL.id].push(pending); renderStream();
+    try{ let reply; const mlabel=(MODELS[PROVIDER]||[]).find(x=>x.id===MODEL[PROVIDER]); const mname=mlabel?mlabel.label:MODEL[PROVIDER];
+      if(DEMO){ await new Promise(r=>setTimeout(r,500)); reply='(demo) '+SEL.name+' via '+(PROVIDER==='claude'?'Claude ':'Gemini ')+mname+': got "'+text+'".'; }
+      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:PROVIDER,model:MODEL[PROVIDER],agentId:SEL.id,message:text,images:imgs,history:[]})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage); if(d&&d.model) PCRUNTIME.model=String(d.model); if(d&&d.effort) PCRUNTIME.effort=String(d.effort); updateVia(); }
+      pending.text=reply;
+    }catch(e){ pending.text=(e.status===401)?'🔒 Session expired — unlock at the Gate.':(e.status===412?'No '+PROVIDER+' API key set — add one with the 🔑 key button.':'Error talking to '+PROVIDER+((e&&e.body&&e.body.error)?(': '+String(e.body.error).slice(0,300)):'')+'.'); }
+    renderStream(); }
+  function playLast(){ try{ var syn=window.speechSynthesis; if(!syn){ alert('Read-aloud is not supported in this browser.'); return; } if(syn.speaking||syn.pending){ syn.cancel(); return; } var h=(SEL&&HIST[SEL.id])||[]; var last=''; for(var i=h.length-1;i>=0;i--){ if(h[i] && h[i].role!=='me' && h[i].text && h[i].text!==String.fromCharCode(8230)){ last=h[i].text; break; } } if(!last) return; var u=new SpeechSynthesisUtterance(String(last).replace(/[#*_>]/g,' ').slice(0,4000)); u.rate=1.02; try{ syn.cancel(); }catch(e){} syn.speak(u); }catch(e){} }  // ---- mic: browser Web Speech API dictation (mobile-friendly, no deps) ----
+  let _rec=null, _listening=false, _micWant=false, _micBase='';
+  function toggleMic(){ const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){ alert('Voice input isn\'t supported in this browser.'); return; }
+    if(_micWant){ _micWant=false; try{_rec&&_rec.stop();}catch(e){} return; }
+    const ta=$('ta'); _micBase=ta.value; _micWant=true;
+    const mk=()=>{ _rec=new SR(); _rec.lang='en-US'; _rec.interimResults=true; _rec.continuous=true;
+      _rec.onstart=()=>{ _listening=true; $('micBtn').classList.add('rec'); };
+      _rec.onresult=(e)=>{ let t=''; for(let i=0;i<e.results.length;i++){ t+=e.results[i][0].transcript; } ta.value=(_micBase?_micBase+' ':'')+t; grow(ta); if(SEL) $('send').disabled=!ta.value.trim(); };
+      _rec.onerror=(ev)=>{ if(ev&&(ev.error==='not-allowed'||ev.error==='service-not-allowed')){ _micWant=false; $('micBtn').classList.remove('rec'); } };
+      _rec.onend=()=>{ _listening=false; if(_micWant){ _micBase=ta.value; try{ _rec.start(); }catch(e){ setTimeout(()=>{ try{ _rec.start(); }catch(_){} }, 300); } } else { $('micBtn').classList.remove('rec'); if(SEL) $('send').disabled=!ta.value.trim(); ta.focus(); } };
+      try{ _rec.start(); }catch(e){} };
+    mk(); }
+  function openKeys(){ $('keyModal').classList.add('on'); }
+  function closeKeys(){ $('keyModal').classList.remove('on'); }
+  function paintKeyState(st){ const c=!!(st&&st.claude), g=!!(st&&st.gemini);
+    const now = Date.now();
+    let cColor = 'miss', cText = 'not set';
+    let gColor = 'ok', gText = 'token auth';
+    let cDot = '<span class="st s-idle" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px"></span>';
+    let gDot = '<span class="st s-working" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#4df5b0"></span>';
+
+    if (c) {
+      let ageDays = st.claude_set_at ? (now - st.claude_set_at) / 86400000 : 0;
+      if (ageDays <= 30) {
+        cColor = 'ok'; cText = 'set (' + Math.floor(ageDays) + 'd)';
+        cDot = '<span class="st s-working" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#4df5b0"></span>';
+      } else if (ageDays <= 60) {
+        cColor = 'miss'; cText = 'set (' + Math.floor(ageDays) + 'd)';
+        cDot = '<span class="st s-waiting" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#ffd77a"></span>';
+      } else {
+        cColor = 'miss'; cText = 'set (' + Math.floor(ageDays) + 'd)';
+        cDot = '<span class="st" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#ff8f86;color:#ff8f86"></span>';
+      }
+    }
+
+    $('tagClaude').innerHTML= cDot + cText; $('tagClaude').className='tag '+(cColor);
+    $('tagGemini').innerHTML= gDot + gText; $('tagGemini').className='tag ok';
+    
+    $('keyState').innerHTML = gDot + cDot;
+  }
+  async function loadKeys(){ try{ paintKeyState(await api('/api/keys/status')); }catch(e){ if(DEMO) paintKeyState({claude:false,gemini:false}); else $('keyState').innerHTML='<span class="miss">—</span>'; } }
+  async function saveKey(p){ const v=$('in'+(p==='claude'?'Claude':'Gemini')).value.trim(); if(!v) return;
+    if(DEMO){ paintKeyState(Object.assign({claude:$('tagClaude').textContent==='set',gemini:$('tagGemini').textContent==='set'},{[p]:true})); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; return; }
+    try{ await api('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:v})}); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; loadKeys(); }catch(e){ alert('Could not save key ('+(e.status||'net')+').'); } }
+  /* [STRAINLIFE-UI-PROVISION-V1] this used to do location.href to a route that has never existed, so the
+     only fleet-facing way to make a strain was a 404. It now runs the create flow, which asks
+     for a name first. If the lifecycle script failed to load we say so rather than navigating
+     somewhere that 404s. */
+  function provision(){ if(DEMO){ alert('Creating a strain is disabled in the demo view.'); return; } if(typeof window.slNewStrain==='function'){ window.slNewStrain(); return; } alert('Create a new strain is unavailable: the strain-lifecycle script did not load.'); }
+  const DEMO_AGENTS=[{id:'fleet-engineer',name:'Fleet Engineer',role:'engineer - example strain',status:'working',last_ts:Date.now()-120000,backlog:0},{id:'fleet-archivist',name:'Fleet Archivist',role:'archivist - example strain',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-inspector',name:'Fleet Inspector',role:'inspector - example strain',status:'idle',last_ts:Date.now()-7200000,backlog:0}];
+  async function loadFleet(){ try{ const d=await api('/api/fleet/agents'); AGENTS=d.agents||d||[]; }catch(e){ DEMO=true; AGENTS=DEMO_AGENTS; } renderAgents(); }
+  let rdpConnected=false;
+  function paintRDPLight(){ const l=$('rdpLight'); const on=(rdpConnected||vmRunning); l.style.color=on?'#4df5b0':'#ff8f86'; l.style.background=on?'#4df5b0':'#ff8f86'; }
+  function toggleFull(){ const p=$('rdpPanel'); p.classList.toggle('full'); $('rdpExp').textContent=p.classList.contains('full')?'⤢ Collapse':'⛶ Break out'; }
+  let VIEW='chrome';
+  const VIEWMETA={ chrome:{em:'🌐',t:'Chrome',d:'The workstation desktop — Chrome with the Claude extension, streamed live.'}, claude:{em:'✦',t:'Claude',d:'The workstation desktop (Claude runs in Chrome here), streamed live.'}, terminal:{em:'⌨',t:'Terminal',d:'A live shell into the box — runs as you.'} };
+  function setView(v){ VIEW=v; document.querySelectorAll('#rdpTabs button').forEach(b=>b.classList.toggle('on',b.dataset.v===v)); (rdpConnected||vmRunning)?connectRDP():showViewPh(); }
+  function showViewPh(){ if(VIEW==='terminal'){ mountTerminal(); return; } const m=VIEWMETA[VIEW]; $('rdpBody').innerHTML='<div class="rdpph"><div class="em">'+m.em+'</div><div><b>'+m.t+'</b><br>'+m.d+'</div><button class="btn" onclick="connectRDP()">▶ Start & connect</button></div>'; }
+  async function connectRDP(){
+    const m=VIEWMETA[VIEW]; const body=$('rdpBody');
+    if(VIEW==='terminal'){ rdpConnected=true; paintRDPLight(); mountTerminal(); return; }
+    if(!vmRunning){ await toggleVM(); }
+    if(DEMO){ body.innerHTML='<div class="rdpph"><div class="em">'+m.em+'</div><div><b>'+m.t+' — connected (demo)</b><br>'+m.d+'</div></div>'; rdpConnected=true; paintRDPLight(); return; }
+    body.innerHTML='<iframe src="/rdp" title="'+m.t+'" allow="clipboard-read; clipboard-write; fullscreen"></iframe>'; rdpConnected=true; paintRDPLight(); }
+  // ---- live web terminal (wired to /api/shell on the running box) ----
+  let TERMHIST=[], THI=0;
+  function termPrint(out,text,cls){ const d=document.createElement('div'); d.className='tl '+(cls||'out'); d.textContent=text; out.appendChild(d); out.scrollTop=out.scrollHeight; }
+  async function termHealth(out){ try{ const h=await fetch('/api/shell/health').then(r=>r.json()); if(h&&h.up){ const mins=Math.round((h.window_remaining_ms||0)/60000); termPrint(out,'● box online'+(h.window_active?(' · ops window '+Math.floor(mins/60)+'h '+(mins%60)+'m left'):' · window inactive'),'sys'); } else { termPrint(out,'● box not reachable — press ▶ Start VM up top, then retry.','err'); } }catch(e){} }
+  function mountTerminal(){ const body=$('rdpBody');
+    body.innerHTML='<div class="term"><div class="termout" id="termout"></div><div class="termin"><span class="termps">$</span><input id="termcmd" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="run a command on the box…"></div></div>';
+    const out=$('termout'), inp=$('termcmd');
+    termPrint(out,'Paracoding Workstation — live shell (runs as you via the ops window).','sys');
+    termHealth(out); inp.focus();
+    inp.onkeydown=(e)=>{ if(e.key==='Enter'){ const c=inp.value.trim(); if(c){ inp.value=''; runTerm(c,out); } }
+      else if(e.key==='ArrowUp'){ e.preventDefault(); if(THI>0){ THI--; inp.value=TERMHIST[THI]||''; } }
+      else if(e.key==='ArrowDown'){ e.preventDefault(); if(THI<TERMHIST.length){ THI++; inp.value=TERMHIST[THI]||''; } } }; }
+  async function runTerm(cmd,out){ TERMHIST.push(cmd); THI=TERMHIST.length; termPrint(out,'$ '+cmd,'cmd');
+    const wait=document.createElement('div'); wait.className='tl sys'; wait.textContent='…'; out.appendChild(wait); out.scrollTop=out.scrollHeight;
+    try{ const r=await fetch('/api/shell',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});
+      const j=await r.json().catch(()=>({})); wait.remove();
+      if(!r.ok||j.error){ termPrint(out,(j&&j.error)||('shell error '+r.status),'err'); }
+      else { if(j.stdout) termPrint(out,String(j.stdout).replace(/\n$/,''),'out'); if(j.stderr) termPrint(out,String(j.stderr).replace(/\n$/,''),'err'); termPrint(out,'[exit '+(j.exit||0)+(j.authed?' · as you':'')+']','sys'); }
+    }catch(e){ wait.remove(); termPrint(out,'network error','err'); } out.scrollTop=out.scrollHeight; }
+  function toggleSide(){ const s=$('side'); const c=s.classList.toggle('collapsed'); $('railL').classList.toggle('show', c); }
+  function toggleRdp(){ const p=$('rdpPanel'); if(p.classList.contains('full')) toggleFull();
+    const c=p.classList.toggle('collapsed'); $('railR').classList.toggle('show', c); $('split').classList.toggle('hidden', c); if(!c) p.style.width='400px'; }
+  let _rz=null;
+  function startResize(e){ _rz={x:e.clientX, w:$('rdpPanel').offsetWidth}; document.body.style.userSelect='none'; window.addEventListener('mousemove',onResize); window.addEventListener('mouseup',stopResize); e.preventDefault(); }
+  function onResize(e){ if(!_rz) return; let w=_rz.w+(_rz.x-e.clientX); w=Math.max(0,Math.min(window.innerWidth-360,w));
+    if(w<70){ $('rdpPanel').classList.add('collapsed'); $('railR').classList.add('show'); $('split').classList.add('hidden'); }
+    else { $('rdpPanel').classList.remove('collapsed'); $('railR').classList.remove('show'); $('split').classList.remove('hidden'); $('rdpPanel').style.width=w+'px'; } }
+  function stopResize(){ _rz=null; document.body.style.userSelect=''; window.removeEventListener('mousemove',onResize); window.removeEventListener('mouseup',stopResize); }
+  function breakout(){ window.open('/rdp?view='+VIEW,'paracoding-workstation'); }
+  (async function(){ setProvider('claude'); paintVM(); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{ var _adv=(AGENTS||[]).find(function(a){return a.id==='fleet-archivist';})||(AGENTS||[])[0]; if(_adv && !SEL) selectAgent(_adv.id); }catch(e){} pollVM(); setInterval(pollVM,8000); paintRDPLight(); showViewPh(); })();
+</script>
+<style id="pcfungi">
+:root{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30}
+.agent .st{box-shadow:none!important}
+</style>
+<style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(240,194,74,.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style><script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js"></script>
+
+<script id="pcdecor">
+(function(){
+  if(window.__pcdecor)return; window.__pcdecor=true;
+  function sc(id){id=String(id||'');var h=5381;for(var i=0;i<id.length;i++)h=((h*33)^id.charCodeAt(i))>>>0;return 'hsl('+(h%360)+',60%,63%)';}
+  function mush(c){return '<svg viewBox="0 0 24 24" width="13" height="13" style="vertical-align:-2px"><path d="M12 3.5C7.3 3.5 4 6.4 4 9.3c0 .9.7 1.4 1.7 1.4h12.6c1 0 1.7-.5 1.7-1.4 0-2.9-3.3-5.8-8-5.8z" fill="'+c+'"/><path d="M10.4 10.7h3.2l-.4 6.6c-.1 1-.5 1.7-1.2 1.7s-1.1-.7-1.2-1.7z" fill="'+c+'" opacity=".6"/></svg>';}
+  var FORK='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#c9a3ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.4"/><circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.5v9"/><path d="M18 9.3c0 3.4-3 3.6-6 5.1"/></svg>';
+  function setText(el,val){ if(el && el.textContent!==val) el.textContent=val; }
+  function jp(u,b){return fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){return r.json().catch(function(){return {};}).then(function(d){return {ok:r.ok,status:r.status,data:d};});});}
+  function rid(a){var rl=a.querySelector('.rl');var x=rl?rl.textContent.trim():'';return x.indexOf('fleet-')===0?x:('fleet-'+x);}
+  window.delStrain=async function(a){
+    var nm=a.querySelector('.nm');var name=nm?nm.textContent.trim():'strain';var id=rid(a);
+    if(!confirm('Delete the '+name+'?\n\nIts history is backed up to the Mycelium, then removed. This cannot be undone.'))return;
+    try{
+      var SA=window.SimpleWebAuthnBrowser;if(!SA){alert('Passkey library not loaded.');return;}
+      var r=await jp('/api/webauthn/elevate/options',{});if(!r.ok){alert('Passkey: '+(r.data.error||r.status)+(r.status===401?' (unlock at the Autoclave first)':''));return;}
+      var asr=await SA.startAuthentication(r.data);
+      r=await jp('/api/webauthn/elevate/verify',{response:asr});if(!r.ok){alert('Passkey check failed: '+(r.data.error||r.status));return;}
+      r=await jp('/api/strain/delete',{agentId:id});if(!r.ok){alert('Delete failed: '+(r.data.error||r.status));return;}
+      if(typeof loadFleet==='function')loadFleet();
+    }catch(e){}
+  };
+  window.subStrain=async function(a){
+    var nm=a.querySelector('.nm');var pname=nm?nm.textContent.trim():'strain';var pid=rid(a);
+    var name=prompt('Subculture '+pname+' into a new strain.\n\nThe new strain inherits its full history. Name it:','');
+    if(!name)return;name=name.trim();if(!name)return;
+    try{
+      var SA=window.SimpleWebAuthnBrowser;if(!SA){alert('Passkey library not loaded.');return;}
+      var r=await jp('/api/webauthn/elevate/options',{});if(!r.ok){alert('Passkey: '+(r.data.error||r.status)+(r.status===401?' (unlock at the Autoclave first)':''));return;}
+      var asr=await SA.startAuthentication(r.data);
+      r=await jp('/api/webauthn/elevate/verify',{response:asr});if(!r.ok){alert('Passkey check failed: '+(r.data.error||r.status));return;}
+      r=await jp('/api/strain/subculture',{parentId:pid,name:name});if(!r.ok){alert('Subculture failed: '+(r.data.error||r.status));return;}
+      alert('Subcultured '+pname+' -> '+(r.data.childId||name)+'. Inherited '+(r.data.inherited||0)+' turns of history.');
+      if(typeof loadFleet==='function')loadFleet();
+    }catch(e){}
+  };
+  /* [STRAINLIFE-UI-CREATE-V1] create-a-strain. The response carries the paste ONCE: it is not stored
+     server-side and never journalled, so this panel is the only place it will ever exist. */
+  function slPaste(id,txt){
+    var w=document.createElement('div');
+    w.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.74);z-index:99999;display:flex;align-items:center;justify-content:center;padding:18px';
+    var p=document.createElement('div');
+    p.style.cssText='background:#111110;border:1px solid #2f2b24;border-radius:12px;padding:14px;max-width:720px;width:100%;display:flex;flex-direction:column;gap:9px';
+    var h=document.createElement('div');h.textContent='Strain '+id+' created \u2014 this paste is shown ONCE';
+    h.style.cssText='color:#e9c46a;font:650 15px/1.3 -apple-system,BlinkMacSystemFont,sans-serif';
+    var s=document.createElement('div');s.textContent='It carries a live session key. Only its hash is stored and it is never written to the journal. Copy it into a fresh Cowork chat now; if you lose it, mint a new one at the Autoclave.';
+    s.style.cssText='color:#8b857a;font:12px/1.5 -apple-system,BlinkMacSystemFont,sans-serif';
+    var ta=document.createElement('textarea');ta.value=txt;ta.readOnly=true;
+    ta.style.cssText='height:44vh;background:#070807;border:1px solid #22201b;border-radius:9px;color:#cfc9bd;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;padding:10px;white-space:pre-wrap';
+    var row=document.createElement('div');row.style.cssText='display:flex;gap:8px';
+    var cl=document.createElement('button');cl.type='button';cl.textContent='Done';
+    cl.style.cssText='flex:1;padding:12px;border:0;border-radius:9px;background:#242119;color:#c9c2b4;font:650 14px/1 inherit;cursor:pointer';
+    var cp=document.createElement('button');cp.type='button';cp.textContent='Copy';
+    cp.style.cssText='flex:1;padding:12px;border:0;border-radius:9px;background:#e9c46a;color:#14120c;font:650 14px/1 inherit;cursor:pointer';
+    cp.onclick=function(){ta.select();try{document.execCommand('copy');cp.textContent='Copied';}catch(e){cp.textContent='Select the text and copy';}};
+    cl.onclick=function(){ta.value='';if(w.parentNode)w.parentNode.removeChild(w);};
+    row.appendChild(cl);row.appendChild(cp);
+    p.appendChild(h);p.appendChild(s);p.appendChild(ta);p.appendChild(row);w.appendChild(p);
+    document.body.appendChild(w);
+  }
+  window.slNewStrain=async function(){
+    var name=prompt('Create a new strain.\n\nName it (e.g. ads, or fleet-analyst):','');
+    if(!name)return;name=name.trim();if(!name)return;
+    var slug=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+/,'').replace(/-+$/,'').slice(0,40);
+    if(!slug){alert('That name has no usable letters.');return;}
+    var id=slug.indexOf('fleet-')===0?slug:('fleet-'+slug);
+    if(!confirm('Create the strain "'+id+'"?\n\nIt starts with a seed LESSONS.md of its own and is handed one session key.'))return;
+    try{
+      var SA=window.SimpleWebAuthnBrowser;if(!SA){alert('Passkey library not loaded.');return;}
+      var r=await jp('/api/webauthn/elevate/options',{});if(!r.ok){alert('Passkey: '+(r.data.error||r.status)+(r.status===401?' (unlock at the Autoclave first)':''));return;}
+      var asr=await SA.startAuthentication(r.data);
+      r=await jp('/api/webauthn/elevate/verify',{response:asr});if(!r.ok){alert('Passkey check failed: '+(r.data.error||r.status));return;}
+      r=await jp('/api/strain/create',{id:id,display_name:name,mode:'new',pasteable:true});
+      if(!r.ok){alert('Create failed: '+(r.data.error||r.status));return;}
+      if(typeof loadFleet==='function')loadFleet();
+      if(r.data&&r.data.paste){slPaste(id,r.data.paste);}
+      else{alert('Created '+id+'. No session key was minted: this role is not pasteable.');}
+    }catch(e){}
+  };
+  function labels(){
+    if(document.title!=='Agentic Fungi')document.title='Agentic Fungi';
+    document.querySelectorAll('.ttl').forEach(function(e){if(e.textContent.indexOf('Agentic Harness')>=0)setText(e,e.textContent.replace('Agentic Harness','Agentic Fungi'));});
+    document.querySelectorAll('.lbl').forEach(function(e){if(e.textContent.indexOf('Paracoding Fleet')>=0)setText(e,e.textContent.replace('Paracoding Fleet','Strain Collection'));if(e.textContent.indexOf('Provider')>=0)setText(e,e.textContent.replace('Provider','Substrate'));});
+    document.querySelectorAll('.hbtn').forEach(function(e){if(e.textContent.indexOf('Gate')>=0)setText(e,e.textContent.replace('Gate','Autoclave'));});
+    /* [STRAINLIFE-UI-LABEL-V1] the bottom link is a CREATE action now, not a fork of somebody else. */
+    document.querySelectorAll('.provision').forEach(function(e){if(e.textContent.indexOf('Provision a new agent')>=0)setText(e,e.textContent.replace('Provision a new agent','Create a new strain'));});
+    var who=document.getElementById('cWho');if(who&&who.textContent==='Select an agent')setText(who,'Select a strain');
+    document.querySelectorAll('.empty div').forEach(function(e){if(e.innerHTML&&e.innerHTML.indexOf('fleet agent')>=0)e.innerHTML=e.innerHTML.replace(/fleet agent/g,'strain');});
+  }
+  function decorate(){
+    document.querySelectorAll('#agents .agent').forEach(function(a){
+      var nm=a.querySelector('.nm');if(nm){var m=nm.textContent.match(/^Fleet\s+(.+)$/);if(m)setText(nm,m[1]+' strain');}
+      var rl=a.querySelector('.rl');if(rl){setText(rl,rl.textContent.replace(/^fleet-/,''));}
+      var st=a.querySelector('.st');if(st&&!st.querySelector('svg')){st.textContent='';st.innerHTML=mush(sc(rid(a)));}
+      var meta=a.querySelector('.meta')||a;
+      if(!meta.querySelector('.pcsubx')){var fx=document.createElement('span');fx.className='pcsubx';fx.title='Subculture (clone this strain with its full history)';fx.style.cssText='margin-left:.35rem;cursor:pointer;opacity:.55;display:inline-flex;align-items:center';fx.innerHTML=FORK;fx.onmouseenter=function(){fx.style.opacity='1';};fx.onmouseleave=function(){fx.style.opacity='.55';};fx.onclick=function(ev){ev.stopPropagation();subStrain(a);};meta.insertBefore(fx,meta.firstChild);}
+      if(!meta.querySelector('.pcdelx')){var dx=document.createElement('span');dx.className='pcdelx';dx.innerHTML='&times;';dx.title='Delete strain';dx.style.cssText='margin-left:.35rem;color:#ff6b6b;font-weight:900;cursor:pointer;font-size:1.05rem;line-height:1;opacity:.5';dx.onmouseenter=function(){dx.style.opacity='1';};dx.onmouseleave=function(){dx.style.opacity='.5';};dx.onclick=function(ev){ev.stopPropagation();delStrain(a);};meta.appendChild(dx);}
+    });
+  }
+  var OBS=null,busy=false;
+  function paint(){
+    if(busy)return;busy=true;
+    if(OBS)OBS.disconnect();
+    try{labels();decorate();}catch(e){}
+    if(OBS){var ag=document.getElementById('agents');if(ag)OBS.observe(ag,{childList:true,subtree:true});}
+    busy=false;
+  }
+  function start(){
+    OBS=new MutationObserver(function(){paint();});
+    paint();
+    setInterval(paint,2500);
+  }
+  // keyboard-aware height: keep the composer above the on-screen keyboard (iOS visualViewport)
+  (function(){ var vv=window.visualViewport; if(!vv) return;
+    function fit(){ document.body.style.height=Math.round(vv.height)+'px'; }
+    vv.addEventListener('resize',fit); vv.addEventListener('scroll',fit); fit();
+    document.addEventListener('focusin',function(e){ if(e&&e.target&&e.target.id==='ta') setTimeout(function(){ try{ e.target.scrollIntoView({block:'end'}); }catch(_){}} ,140); });
+  })();
+  if(document.readyState!=='loading')start();else document.addEventListener('DOMContentLoaded',start);
+})();
+</script>
+<style id="pctheme">
+  /* palette themes (override the 3 gradient stops + accent). data-theme wins over :root + pcfungi. */
+  html[data-theme="purple"]{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30;--gold:#ffd77a}
+  html[data-theme="green"]{--g1:#123a56;--g2:#0f4a47;--g3:#175339;--gold:#ffd77a}
+  html[data-theme="orange"]{--g1:#7a3a12;--g2:#5a260e;--g3:#2a1206;--gold:#ffcf8a}
+  html[data-theme="blue"]{--g1:#123a6a;--g2:#12306a;--g3:#0a1430;--gold:#9ec7ff}
+  html[data-theme="dark"]{--g1:#26262c;--g2:#17171c;--g3:#0b0b0e;--gold:#cfd3da}
+  /* mushroom OFF: drop the gold logo glow (plainer, professional look) */
+  body.nomush .brand img,body.nomush .hdr img,body.nomush .empty img{filter:none!important;box-shadow:none!important}
+  /* floating theme control */
+  #pcThemeBtn{position:fixed;right:12px;bottom:14px;z-index:200;width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.16);backdrop-filter:blur(8px);color:#fff;font-size:1.2rem;line-height:1;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
+  #pcThemePanel{position:fixed;right:12px;bottom:66px;z-index:201;display:none;flex-direction:column;gap:.7rem;padding:.85rem .9rem;border-radius:14px;border:1px solid rgba(255,255,255,.22);background:linear-gradient(150deg,var(--g1),var(--g2) 70%,var(--g3));backdrop-filter:blur(14px);box-shadow:0 16px 44px rgba(0,0,0,.55);min-width:212px}
+  #pcThemePanel.show{display:flex}
+  #pcThemePanel .hd{font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.6);font-weight:800}
+  #pcThemePanel .row{display:flex;align-items:center;justify-content:space-between;gap:.6rem;color:#fff;font-size:.84rem;font-weight:700}
+  #pcThemePanel .sw{display:flex;gap:.5rem;flex-wrap:wrap}
+  #pcThemePanel .sw button{width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
+  #pcThemePanel .sw button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
+  .pcsw{position:relative;width:46px;height:26px;border-radius:999px;background:rgba(255,255,255,.25);cursor:pointer;flex:none;transition:background .15s;border:0;padding:0}
+  .pcsw.on{background:#5fce9a}
+  .pcsw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s}
+  .pcsw.on i{left:23px}
+  @media(max-width:768px){ #pcThemeBtn{bottom:calc(76px + env(safe-area-inset-bottom));right:10px;width:40px;height:40px} #pcThemePanel{bottom:calc(124px + env(safe-area-inset-bottom))} }
+</style>
+<script id="pcthemejs">
+(function(){
+  if(window.__pctheme)return; window.__pctheme=true;
+  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e']];
+  function g(k,d){ try{ var v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }
+  function s(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+  var theme=g('pc_theme','purple'), mush=g('pc_mush','1')==='1', btn;
+  function applyTheme(t){ document.documentElement.setAttribute('data-theme',t); }
+  function applyMush(on){ document.body.classList.toggle('nomush',!on); if(btn) btn.textContent=on?'🍄':'◉'; }
+  applyTheme(theme);
+  btn=document.createElement('button'); btn.id='pcThemeBtn'; btn.type='button'; btn.title='Theme';
+  var panel=document.createElement('div'); panel.id='pcThemePanel';
+  var hd=document.createElement('div'); hd.className='hd'; hd.textContent='Theme'; panel.appendChild(hd);
+  var r1=document.createElement('div'); r1.className='row'; var l1=document.createElement('span'); l1.textContent='Mushroom'; var sw=document.createElement('button'); sw.type='button'; sw.className='pcsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(l1); r1.appendChild(sw); panel.appendChild(r1);
+  var r2=document.createElement('div'); r2.className='row'; var l2=document.createElement('span'); l2.textContent='Color'; r2.appendChild(l2); panel.appendChild(r2);
+  var sws=document.createElement('div'); sws.className='sw';
+  function markSw(){ [].forEach.call(sws.children,function(c){ c.classList.toggle('on', c.getAttribute('data-t')===theme); }); }
+  PAL.forEach(function(pp){ var b=document.createElement('button'); b.type='button'; b.title=pp[0]; b.setAttribute('data-t',pp[0]); b.style.background='linear-gradient(135deg,'+pp[1]+','+pp[2]+')'; b.onclick=function(){ theme=pp[0]; s('pc_theme',theme); applyTheme(theme); markSw(); }; sws.appendChild(b); });
+  panel.appendChild(sws);
+  document.body.appendChild(btn); document.body.appendChild(panel);
+  applyMush(mush); markSw();
+  btn.onclick=function(ev){ ev.stopPropagation(); panel.classList.toggle('show'); };
+  sw.onclick=function(){ mush=!mush; sw.classList.toggle('on',mush); s('pc_mush',mush?'1':'0'); if(mush && theme==='green') theme='purple'; else if(!mush && theme==='purple') theme='green'; s('pc_theme',theme); applyTheme(theme); applyMush(mush); markSw(); };
+  document.addEventListener('click',function(e){ if(panel.classList.contains('show') && !panel.contains(e.target) && e.target!==btn) panel.classList.remove('show'); });
+})();
+</script>
+
+<style id="pcdashpanel">
+  #pcThemeBtn{display:none!important}
+  /* theme the dashboard panel + strip the leftover RDP "terminal" chrome */
+  #rdpPanel{background:linear-gradient(160deg,var(--g1),var(--g2) 65%,var(--g3))!important}
+  #rdpPanel .rdpwrap,#rdpPanel .rdpinner,#rdpPanel .rdpbody{background:transparent!important;border:0!important;padding:0!important}
+  #rdpPanel .rdpbar,#rdpPanel .rdptabs{display:none!important}
+  .dpwrap{display:flex;flex-direction:column;height:100%;min-height:0;overflow-y:auto;padding:.7rem .75rem;gap:.75rem}
+  .dphd{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
+  .dphd .t{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:#fff;font-weight:800}
+  .dphd .x{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.28);color:#fff;border-radius:9px;padding:.25rem .6rem;font-weight:900;cursor:pointer}
+  .dpsec{border:1px solid rgba(255,255,255,.16);border-radius:13px;background:rgba(255,255,255,.07);padding:.7rem .8rem;position:relative}
+  .dpsec>h4{margin:0 0 .55rem;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.62);font-weight:800}
+  .dprow{display:flex;align-items:center;justify-content:space-between;gap:.6rem;color:#fff;font-size:.85rem;font-weight:700;margin:.35rem 0}
+  .dpsw{position:relative;width:46px;height:26px;border-radius:999px;background:rgba(255,255,255,.25);cursor:pointer;flex:none;border:0;padding:0;transition:background .15s}
+  .dpsw.on{background:#5fce9a}
+  .dpsw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s}
+  .dpsw.on i{left:23px}
+  .dpsm{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem}
+  .dpsm button{width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
+  .dpsm button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
+  .dpag{display:flex;align-items:center;gap:.55rem;padding:.4rem .2rem;border-top:1px solid rgba(255,255,255,.08)}
+  .dpag:first-of-type{border-top:0}
+  .dpdot{width:11px;height:11px;border-radius:50%;flex:none;box-shadow:0 0 8px currentColor}
+  .dpdot.g{background:#4fd08a;color:#4fd08a}.dpdot.y{background:#f4c04e;color:#f4c04e}.dpdot.r{background:#ff6b6b;color:#ff6b6b}
+  .dpag .nm{font-weight:700;font-size:.84rem;color:#fff}
+  .dpag .wt{font-size:.64rem;color:rgba(255,255,255,.6);margin-top:.05rem}
+  .dpag .meta{margin-left:auto;text-align:right;font-size:.64rem;color:rgba(255,255,255,.6);white-space:nowrap}
+  .dpstat{display:flex;gap:.5rem;flex-wrap:wrap}
+  .dpstat .cell{flex:1;min-width:88px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:.5rem .6rem}
+  .dpstat .cell .n{font-size:1.05rem;font-weight:800;color:#fff}
+  .dpstat .cell .l{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.6);font-weight:700}
+  /* ---- right dashboard DRAWER: inline, mirrors the left nav drawer ---- */
+  /* override the legacy hard-hide of the workstation panel/rail; the old splitter stays off */
+  #rdpPanel{display:flex!important}
+  #split{display:none!important}
+  #railR{display:none}
+  #railR.show{display:flex!important}
+  /* right-edge rail = mirror of the left railL chevron (inline; reflows the center chat) */
+  #railR{position:static!important;width:24px!important;height:auto!important;border-radius:0!important;box-shadow:none!important;border:0!important;border-left:1px solid var(--glass-line)!important;background:rgba(6,18,26,.30)!important;color:var(--ink-soft)!important;font-size:1.05rem!important;font-weight:900!important;z-index:auto!important}
+  #railR.show:hover{background:var(--glass)!important;color:#fff!important}
+  /* mobile: mirror the left overlay drawer, flipped to the right edge (kills the old slide-over) */
+  @media(max-width:768px){
+    body.mobile #rdpPanel{position:absolute!important;top:0;right:0;bottom:0;left:auto!important;z-index:40;width:230px!important;max-width:84vw!important;
+      background:linear-gradient(180deg,var(--g1) 0%,var(--g3) 100%)!important;border-left:1px solid rgba(150,110,220,.28)!important;box-shadow:-6px 0 26px rgba(0,0,0,.45)!important;border-radius:0!important}
+    body.mobile #rdpPanel.collapsed{width:0!important;box-shadow:none!important;border:0!important;overflow:hidden!important}
+    body.mobile #railR{position:absolute!important;right:0;top:0;bottom:0;left:auto!important;height:auto!important;width:22px!important;z-index:41;border-radius:0!important;background:linear-gradient(180deg,var(--g1),var(--g3))!important;box-shadow:none!important;border-left:1px solid rgba(255,255,255,.18)!important}
+  }
+</style>
+<script id="pcdashpaneljs">
+(function(){
+  if(window.__pcdash)return; window.__pcdash=true;
+  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e']];
+  function $(id){return document.getElementById(id);}
+  function g(k,d){try{var v=localStorage.getItem(k);return v==null?d:v;}catch(e){return d;}}
+  function s(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+  function applyTheme(t){document.documentElement.setAttribute('data-theme',t);}
+  function applyMush(on){document.body.classList.toggle('nomush',!on);}
+  function api(u){return fetch(u,{credentials:'include'}).then(function(r){return r.ok?r.json().then(function(j){j.__ok=true;return j;}):{__ok:false,__st:r.status};}).catch(function(){return {__ok:false};});}
+  function esc(t){return String(t==null?'':t).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+  function ago(min){min=Math.max(0,Math.round(min));if(min<60)return min+'m';var h=Math.round(min/60);if(h<48)return h+'h';return Math.round(h/24)+'d';}
+  function light(a){var age=(a.age_min==null)?999999:a.age_min;var w=(a.backlog||0)+(a.open_msgs||0);
+    if(age>2880) return ['r','silent '+ago(age)+' — go check it'];
+    if(w>0) return ['y',(a.backlog||0)+' on the bus'+((a.open_msgs)?', '+a.open_msgs+' to answer':'')];
+    return ['g', a.last_action?('idle · last: '+a.last_action):'idle until you need it'];}
+
+  function themeSection(){
+    var mush=g('pc_mush','1')==='1', theme=g('pc_theme','purple');
+    var sec=document.createElement('div'); sec.className='dpsec'; sec.innerHTML='<h4>Settings</h4>';
+    var r1=document.createElement('div'); r1.className='dprow'; r1.innerHTML='<span>Mushroom theme</span>';
+    var sw=document.createElement('button'); sw.type='button'; sw.className='dpsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); sec.appendChild(r1);
+    var r2=document.createElement('div'); r2.className='dprow'; r2.style.display='block'; r2.innerHTML='<span>Color</span>';
+    var sm=document.createElement('div'); sm.className='dpsm';
+    function markSm(){[].forEach.call(sm.children,function(c){c.classList.toggle('on',c.getAttribute('data-t')===theme);});}
+    PAL.forEach(function(pp){var b=document.createElement('button');b.type='button';b.title=pp[0];b.setAttribute('data-t',pp[0]);b.style.background='linear-gradient(135deg,'+pp[1]+','+pp[2]+')';b.onclick=function(){theme=pp[0];s('pc_theme',theme);applyTheme(theme);markSm();};sm.appendChild(b);});
+    r2.appendChild(sm); sec.appendChild(r2); markSm();
+    sw.onclick=function(){mush=!mush;sw.classList.toggle('on',mush);s('pc_mush',mush?'1':'0');if(mush&&theme==='green')theme='purple';else if(!mush&&theme==='purple')theme='green';s('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();};
+    return sec;
+  }
+
+  async function render(){
+    var body=$('rdpBody'); if(!body) return;
+    var wrap=document.createElement('div'); wrap.className='dpwrap';
+    var hd=document.createElement('div'); hd.className='dphd'; hd.innerHTML='<span class="t">⚙️ Settings</span>';
+    var x=document.createElement('button'); x.className='x'; x.textContent='✕'; x.title='Close'; x.onclick=closeDash; hd.appendChild(x); wrap.appendChild(hd);
+    var fl=document.createElement('a'); fl.href='/flow'; fl.textContent='🍄 Open Fleet Flow'; fl.style.cssText='display:block;text-align:center;background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;font-weight:800;border-radius:11px;padding:.6rem;text-decoration:none;margin:.1rem 0 .3rem'; wrap.appendChild(fl);
+    var wk=document.createElement('a'); wk.href='/wiki'; wk.textContent='📖 Docs · internal wiki'; wk.style.cssText='display:block;text-align:center;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.22);color:#fff;font-weight:700;border-radius:11px;padding:.5rem;text-decoration:none;margin:0 0 .35rem;font-size:.82rem'; wk.title='Internal system wiki — every page carries a computed freshness badge'; wrap.appendChild(wk);
+    wrap.appendChild(themeSection());
+    var sum=await api('/api/dash/summary');
+    var asec=document.createElement('div'); asec.className='dpsec'; asec.innerHTML='<h4>Strains</h4>';
+    var inner=document.createElement('div');
+    if(sum&&sum.__ok&&sum.agents){
+      var list=sum.agents.filter(function(a){return a.agent!=='human_operator';});
+      list.forEach(function(a){var lt=light(a);var row=document.createElement('div');row.className='dpag';
+        row.innerHTML='<span class="dpdot '+lt[0]+'"></span><div><div class="nm">'+esc(a.agent.replace(/^fleet-/,''))+'</div><div class="wt">'+esc(lt[1])+'</div></div><div class="meta">'+(a.last_ts?ago(a.age_min):'')+'</div>';
+        inner.appendChild(row);});
+      if(!list.length) inner.innerHTML='<div class="dpag"><div class="wt">no strains reporting</div></div>';
+    } else if(sum&&sum.__st===401){ inner.innerHTML='<div class="dpag"><div class="wt">Unlock at the Autoclave to see live fleet status.</div></div>'; }
+    else { inner.innerHTML='<div class="dpag"><div class="wt">—</div></div>'; }
+    asec.appendChild(inner); wrap.appendChild(asec);
+    body.innerHTML=''; body.appendChild(wrap);
+  }
+  function openDash(){var p=$('rdpPanel');if(!p)return; var _b=$('rdpBody'); if(_b) _b.innerHTML='<div class="dpwrap"><div class="dphd"><span class="t">⚙️ Settings</span></div></div>';
+    p.classList.remove('collapsed');
+    p.style.width=document.body.classList.contains('mobile')?'':'380px';
+    var rr=$('railR'); if(rr) rr.classList.remove('show');
+    render();}
+  function closeDash(){var p=$('rdpPanel');if(p){p.classList.add('collapsed');p.style.width='';}
+    var rr=$('railR'); if(rr) rr.classList.add('show');}
+  function toggleDash(){var p=$('rdpPanel'); if(!p) return; if(p.classList.contains('collapsed')) openDash(); else closeDash();}
+  window.openDash=openDash; window.closeDash=closeDash; window.toggleDash=toggleDash;
+  function wire(){
+    var btns=document.querySelectorAll('.hdr .rt button, .hbtn');
+    [].forEach.call(btns,function(b){ if((b.textContent||'').indexOf('Dashboard')>=0){ b.style.display='none'; } });
+    var p=$('rdpPanel'); if(p){ p.classList.add('collapsed'); p.style.width=''; }
+    var rr=$('railR'); if(rr){ rr.classList.add('show'); rr.innerHTML='\u2039'; rr.title='Settings'; rr.onclick=function(ev){ if(ev)ev.stopPropagation(); toggleDash(); }; }
+  }
+  if(document.readyState!=='loading') wire(); else document.addEventListener('DOMContentLoaded', wire);
+})();
+</script>
+
+<style id="pctighten">
+  /* model chips: show only the model name (the tier lives in the docs); smaller, one line */
+  .subtoggle button small{display:none!important}
+  .subtoggle button{font-size:.82rem!important;padding:.34rem .5rem!important;white-space:nowrap;line-height:1.15}
+  /* tight single-line strain rows (drop the redundant lowercase id) */
+  .agent{padding:.34rem .55rem!important;margin:.05rem 0!important}
+  .agent .nm{line-height:1.15}
+  .agent .rl{display:none!important}
+  @media(max-width:768px){
+    body.mobile .toggle button,body.mobile .subtoggle button{font-size:.78rem!important;padding:.3rem .35rem!important}
+    body.mobile .agent{padding:.3rem .5rem!important}
+    body.mobile .agent .nm{font-size:.86rem}
+  }
+</style>
+
+<!-- ===== Paracoding in-Flow-Hood Approvals drawer (advisor) — inject before </body> ===== -->
+<!-- LAYERS panel: Settings | Flow | Claude | Gate | Browser — resizable left slide-out -->
+<style id="pcl-css">
+#pcl-btn{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:99996;background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;font-weight:800;border:0;border-radius:11px 0 0 11px;padding:.85rem .32rem;cursor:pointer;box-shadow:0 3px 14px rgba(0,0,0,.45);font-size:.72rem;letter-spacing:.12em;writing-mode:vertical-rl;text-orientation:mixed;display:flex;align-items:center;gap:.35rem}
+#pcl-btn .dotp{width:8px;height:8px;border-radius:50%;background:#c0392b;display:none;box-shadow:0 0 7px #ff6b5b}
+#pcl-btn.hasjobs .dotp{display:inline-block}
+#pcl-ov{position:fixed;inset:0;background:rgba(5,3,15,.42);opacity:0;pointer-events:none;transition:opacity .18s;z-index:99997}
+#pcl-ov.on{opacity:1;pointer-events:auto}
+#pcl{position:fixed;right:0;top:0;height:100%;width:460px;min-width:300px;max-width:96vw;background:#0f0a1e;border-left:1px solid #3a2864;transform:translateX(104%);transition:transform .2s ease;z-index:99998;display:flex;flex-direction:column;box-shadow:-6px 0 26px rgba(0,0,0,.55)}
+#pcl.on{transform:translateX(0)} #pcl.notrans{transition:none!important}
+#pcl .tabs{display:flex;gap:.2rem;padding:.4rem .4rem;border-bottom:1px solid #3a2864;background:#160e2b;align-items:stretch}
+#pcl .tabs button.tb{flex:1;background:#241748;border:1px solid #3a2864;color:#bcaee6;border-radius:9px;padding:.4rem .1rem;font-size:.66rem;font-weight:700;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.1rem;line-height:1.05}
+#pcl .tabs button.tb .ic{font-size:1rem}
+#pcl .tabs button.tb.on{background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border-color:#ffe9a8}
+#pcl .tabs .cx{flex:0 0 auto;background:none;border:0;color:#8a78b6;font-size:1.3rem;padding:0 .3rem;cursor:pointer}
+#pcl .body{flex:1;position:relative;min-height:0}
+#pcl .pane{position:absolute;inset:0;display:none}
+#pcl .pane.on{display:block}
+#pcl .pane iframe{width:100%;height:100%;border:0;background:#0a0a0f;display:block}
+#pcl .withbar{display:flex;flex-direction:column;height:100%}
+#pcl .withbar iframe{flex:1}
+#pcl .popbar{display:flex;align-items:center;gap:.45rem;padding:.5rem .6rem;background:#160e2b;border-bottom:1px solid #3a2864;font-size:.75rem;color:#bcaee6}
+#pcl .popbar .sp{flex:1}
+#pcl .popbar button{background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border:0;border-radius:8px;padding:.32rem .6rem;font-weight:800;cursor:pointer;font-size:.74rem}
+#pcl .sset{padding:1.1rem;color:#efe9ff;overflow:auto;height:100%}
+#pcl .sset h4{margin:0 0 .7rem;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:#8a78b6}
+#pcl .srow{display:flex;align-items:center;justify-content:space-between;margin:.6rem 0;font-weight:700;font-size:.9rem}
+#pcl .ssw{width:46px;height:26px;border-radius:999px;background:rgba(255,255,255,.25);cursor:pointer;border:0;position:relative;flex:none}
+#pcl .ssw.on{background:#5fce9a} #pcl .ssw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s} #pcl .ssw.on i{left:23px}
+#pcl .ssm{display:flex;gap:.55rem;flex-wrap:wrap;margin-top:.5rem}
+#pcl .ssm button{width:32px;height:32px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
+#pcl .ssm button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
+#pcl-grip{position:absolute;top:0;left:-3px;width:9px;height:100%;cursor:ew-resize;z-index:6}
+#pcl-grip:hover{background:rgba(255,214,107,.25)}
+</style>
+<button id="pcl-btn" onclick="pclOpen()"><span class="dotp"></span>⧉ LAYERS</button>
+<div id="pcl-ov" onclick="pclClose()"></div>
+<div id="pcl">
+  <div class="tabs">
+    <button class="tb" data-t="settings" onclick="pclTab('settings')"><span class="ic">⚙️</span>Settings</button>
+    <button class="tb" data-t="flow" onclick="pclTab('flow')"><span class="ic">🍄</span>Flow</button>
+    <button class="tb" data-t="gate" onclick="pclTab('gate')"><span class="ic">🔑</span>Gate</button>
+    <button class="cx" title="Close" onclick="pclClose()">&times;</button>
+  </div>
+  <div class="body">
+    <div class="pane" data-p="settings"><div class="sset" id="pcl-set"></div></div>
+    <div class="pane" data-p="flow"><iframe data-src="/flow" title="Fleet Flow"></iframe></div>
+    <div class="pane" data-p="gate"><iframe data-src="/gate" title="Approvals Gate" allow="publickey-credentials-get; publickey-credentials-create"></iframe></div>
+  </div>
+  <div id="pcl-grip"></div>
+</div>
+<script id="pcl-js">
+(function(){
+  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e']];
+  function lg(k,d){try{var v=localStorage.getItem(k);return v==null?d:v;}catch(e){return d;}}
+  function ls(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+  var panel=document.getElementById('pcl'), ov=document.getElementById('pcl-ov');
+  function loadPane(name){ var p=document.querySelector('#pcl .pane[data-p="'+name+'"]'); if(!p)return; var f=p.querySelector('iframe'); if(f && !f.getAttribute('src') && f.getAttribute('data-src')) f.setAttribute('src', f.getAttribute('data-src')); if(name==='settings') buildSettings(); }
+  var PCL_TABS=['settings','flow','gate'];
+  function pclSafeTab(t){ return PCL_TABS.indexOf(String(t))>=0?String(t):'gate'; }
+  window.pclTab=function(name){ name=pclSafeTab(name); document.querySelectorAll('#pcl .tb').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-t')===name);}); document.querySelectorAll('#pcl .pane').forEach(function(p){p.classList.toggle('on',p.getAttribute('data-p')===name);}); loadPane(name); ls('pcl_tab',name); };
+  window.pclOpen=function(){ var w=lg('pcl_w',''); if(w){ panel.classList.add('notrans'); panel.style.width=w; setTimeout(function(){panel.classList.remove('notrans');},30); } panel.classList.add('on'); ov.classList.add('on'); pclTab(pclSafeTab(lg('pcl_tab','gate'))); };
+  window.pclClose=function(){ panel.classList.remove('on'); ov.classList.remove('on'); };
+  function buildSettings(){ var host=document.getElementById('pcl-set'); if(!host || host.getAttribute('data-built'))return; host.setAttribute('data-built','1');
+    var mush=lg('pc_mush','1')==='1', theme=lg('pc_theme','purple');
+    function applyTheme(t){document.documentElement.setAttribute('data-theme',t);}
+    function applyMush(on){document.body.classList.toggle('nomush',!on);}
+    host.innerHTML='<h4>Appearance</h4>';
+    var r1=document.createElement('div'); r1.className='srow'; r1.innerHTML='<span>Mushroom theme</span>';
+    var sw=document.createElement('button'); sw.className='ssw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); host.appendChild(r1);
+    var r2=document.createElement('div'); r2.innerHTML='<div class="srow"><span>Color</span></div>';
+    var sm=document.createElement('div'); sm.className='ssm';
+    function markSm(){[].forEach.call(sm.children,function(c){c.classList.toggle('on',c.getAttribute('data-t')===theme);});}
+    PAL.forEach(function(pp){var b=document.createElement('button');b.title=pp[0];b.setAttribute('data-t',pp[0]);b.style.background='linear-gradient(135deg,'+pp[1]+','+pp[2]+')';b.onclick=function(){theme=pp[0];ls('pc_theme',theme);applyTheme(theme);markSm();};sm.appendChild(b);});
+    r2.appendChild(sm); host.appendChild(r2); markSm();
+    sw.onclick=function(){mush=!mush;sw.classList.toggle('on',mush);ls('pc_mush',mush?'1':'0');if(mush&&theme==='green'){theme='purple';}else if(!mush&&theme==='purple'){theme='green';}ls('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();};
+    var note=document.createElement('div'); note.style.cssText='margin-top:1.2rem;color:#8a78b6;font-size:.76rem;line-height:1.5'; note.innerHTML='Drag the left edge to resize. Flow and the Gate are in the tabs above; everything configurable lives on this panel.'; host.appendChild(note);
+  }
+  var grip=document.getElementById('pcl-grip'), rz=false;
+  grip.addEventListener('mousedown',function(e){rz=true;panel.classList.add('notrans');document.body.style.userSelect='none';e.preventDefault();});
+  document.addEventListener('mousemove',function(e){ if(!rz)return; var w=Math.max(300,Math.min(window.innerWidth*0.96,window.innerWidth-e.clientX)); panel.style.width=w+'px'; });
+  document.addEventListener('mouseup',function(){ if(rz){rz=false;panel.classList.remove('notrans');document.body.style.userSelect='';ls('pcl_w',panel.style.width);} });
+  function hideLegacy(){ var rr=document.getElementById('railR'); if(rr) rr.style.display='none'; }
+  if(document.readyState!=='loading') hideLegacy(); else document.addEventListener('DOMContentLoaded',hideLegacy);
+  async function pollPending(){ try{ var r=await fetch('/api/webauthn/pending',{credentials:'include'}); if(r.ok){ var j=await r.json(); var b=document.getElementById('pcl-btn'); if(b) b.classList.toggle('hasjobs', Array.isArray(j)&&j.length>0); } }catch(e){} }
+  setInterval(pollPending,15000); setTimeout(pollPending,2500);
+})();
+</script>
+<!-- ===== end Approvals drawer ===== -->
+
+<!-- VERIFY-GREP: ADS-REMOVED-V1 (operator ruling 2026-07-29: no ads; donations instead) -->
+<style id="pcslim">
+/* the operator 2026-07-25: slim the chrome, give the chat the screen. (ads removed 2026-07-29 -- nothing left to hide) */
+.hdr{padding:.26rem .6rem!important;gap:.45rem!important}
+.hdr img{width:20px!important;height:20px!important}
+.hdr .sub{display:none!important}
+.hdr .ttl{font-size:.82rem!important;font-weight:700!important}
+#rdpBtn,#rdpBtn2,.hdr .divb,.hdr .rt button[onclick*="/dash"]{display:none!important}
+.hdr .rt{gap:.3rem!important}
+.hbtn{padding:.26rem .5rem!important;font-size:.76rem!important;border-radius:8px!important}
+.hdr .rt button[onclick*="/gate"]{opacity:.7;font-size:.72rem!important;padding:.22rem .44rem!important}
+.chat .cbar{padding:.3rem .7rem!important;gap:.5rem!important}
+.chat .cbar .via{font-size:.68rem!important;padding:.14rem .5rem!important}
+.stream{padding:.7rem .8rem!important}
+</style>
+<style id="pcwide">.msg{max-width:94%!important}.stream{padding:.6rem .5rem!important}.chat{min-width:0!important}</style><style id="pcbtn">.mic{padding:.4rem .5rem!important;font-size:.9rem!important}.send{padding:.45rem .75rem!important;font-size:.85rem!important}.cin{gap:.35rem!important}</style>
+<!-- ===== [HARNESSUI-V1] appended before </body>: DOM level and idempotent. =====
+     Anchored on </body> alone on purpose. These files change shape between sessions and a
+     line-anchored edit here has already failed once; a block that finds its own targets at
+     runtime and no-ops when they are absent survives that. Everything below is additive.  -->
+<style id="pcharnessui-css">
+/* the strains rail is the LEFT slide-out now; nothing else lives in it */
+#side .keys{display:none!important}
+#side .sec:has(#toggle){display:none!important}
+/* ...and when :has is unavailable the same elements are MOVED by script below, so the panel
+   is never merely hidden in one engine and present in another. */
+#pcusage{display:inline-flex;align-items:center;gap:.5rem;margin-left:auto;font-size:.66rem;
+  letter-spacing:.04em;color:var(--ink-soft);background:var(--glass);border:1px solid var(--glass-line);
+  border-radius:9px;padding:.16rem .5rem;white-space:nowrap}
+#pcusage b{color:#fff;font-weight:800}
+#pcusage .tag{font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;opacity:.7}
+#pcusage .dot{width:6px;height:6px;border-radius:50%;background:#4fd08a;box-shadow:0 0 6px #4fd08a}
+#pcusage.stale .dot{background:#f4c04e;box-shadow:0 0 6px #f4c04e}
+#pcstatuscard{margin:.4rem 0;padding:.6rem .75rem;border-radius:12px;background:var(--glass);
+  border:1px solid var(--glass-line);font-size:.8rem;line-height:1.5}
+#pcstatuscard h5{margin:0 0 .35rem;font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;opacity:.7}
+#pcstatuscard .row{display:flex;gap:.5rem;margin:.12rem 0}
+#pcstatuscard .k{opacity:.65;min-width:7.5rem}
+#pcstatuscard ul{margin:.3rem 0 0;padding-left:1.1rem}
+#pcl-set .pcmoved{margin-top:1.4rem}
+</style>
+<script id="pcharnessui-js">
+(function(){
+  if(window.__pcharnessui) return; window.__pcharnessui=true;
+  function $(id){return document.getElementById(id);}
+  function esc(t){return String(t==null?'':t).replace(/[&<>"]/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function jget(u){ return fetch(u,{credentials:'include'}).then(function(r){
+    return r.ok?r.json():null; }).catch(function(){return null;}); }
+  function ago(min){ if(min==null) return '—'; min=Math.max(0,Math.round(min));
+    if(min>=999999) return 'never'; if(min<60) return min+'m';
+    var h=Math.round(min/60); return h<48?(h+'h'):(Math.round(h/24)+'d'); }
+
+  /* ---- 1: Status. A LOCAL read of who the strain is and what it last did. -------------
+     The bubble used to compose a greeting and SEND it, which cost a model call to learn
+     something the control plane already knows. /api/dash/summary is a Firestore read: it
+     carries the strain's journal tail, its pending work items and its open messages. */
+  window.pcStatus=async function(){
+    var stream=$('stream'); if(!stream) return;
+    var sel=(window.SEL||null);
+    var card=$('pcstatuscard');
+    if(!card){ card=document.createElement('div'); card.id='pcstatuscard'; }
+    card.innerHTML='<h5>Status</h5><div class="row">reading…</div>';
+    var e=$('empty'); if(e) e.style.display='none';
+    stream.appendChild(card); stream.scrollTop=stream.scrollHeight;
+    if(!sel){ card.innerHTML='<h5>Status</h5><div class="row">Pick a strain on the left first.</div>'; return; }
+    var sum=await jget('/api/dash/summary');
+    var me=null;
+    if(sum&&Array.isArray(sum.agents)) me=sum.agents.filter(function(a){return a.agent===sel.id;})[0]||null;
+    var h='<h5>Status · '+esc(sel.name||sel.id)+'</h5>';
+    h+='<div class="row"><span class="k">identity</span><span>'+esc(sel.id)+
+       (sel.role&&sel.role!==sel.id?(' · '+esc(sel.role)):'')+'</span></div>';
+    if(!me){
+      h+='<div class="row"><span class="k">journal</span><span>no journal entry in the last 300 rows'+
+         '</span></div>';
+      h+='<div class="row"><span class="k">work items</span><span>'+
+         String((sel.backlog!=null)?sel.backlog:'—')+' pending (roster count)</span></div>';
+    } else {
+      h+='<div class="row"><span class="k">state</span><span>'+esc(me.status||'—')+
+         ' · last activity '+ago(me.age_min)+' ago</span></div>';
+      h+='<div class="row"><span class="k">work items</span><span>'+String(me.backlog||0)+
+         ' pending · '+String(me.open_msgs||0)+' message(s) to answer</span></div>';
+      h+='<div class="row"><span class="k">last action</span><span>'+esc(me.last_action||'—')+'</span></div>';
+      if(Array.isArray(me.tail)&&me.tail.length){
+        h+='<div class="row"><span class="k">journal</span><span></span></div><ul>';
+        me.tail.slice(0,5).forEach(function(t){
+          h+='<li>'+esc(t.action||'')+(t.msg?(' — '+esc(t.msg)):'')+'</li>'; });
+        h+='</ul>';
+      }
+    }
+    h+='<div class="row" style="opacity:.55;margin-top:.4rem"><span class="k"></span>'+
+       '<span>read from /api/dash/summary — no model call</span></div>';
+    card.innerHTML=h; stream.scrollTop=stream.scrollHeight;
+  };
+
+  /* ---- 4: [HARNESSUI-USAGE-V1] Usage &amp; Spend (7D) in the bar above chat. -----------
+     Two different costs behind one strip, so they refresh at two different rates:
+     /api/dash/usage is a Firestore read and is cheap -- 60s. /api/dash/gcp runs a BigQuery
+     query against the billing export; polling THAT every minute would bill for the privilege
+     of watching the bill, so it refreshes every 15 minutes. The dot goes amber when the strip
+     is showing figures older than two refresh intervals, because a live-looking widget that
+     has quietly stopped updating is worse than one that admits it. */
+  var USAGE_MS=60000, SPEND_MS=900000, lastOk=0;
+  function fmt(n){ n=Number(n)||0; return n>=1e6?(n/1e6).toFixed(1)+'M':(n>=1e3?(n/1e3).toFixed(0)+'K':String(n)); }
+  function mount(){
+    var bar=document.querySelector('.chat .cbar'); if(!bar) return null;
+    var el=$('pcusage');
+    if(!el){ el=document.createElement('span'); el.id='pcusage'; el.title=
+      'Usage & spend over the last 7 days. Tokens refresh every 60s from /api/dash/usage (a Firestore read). '+
+      'GCP spend refreshes every 15 minutes from /api/dash/gcp (a BigQuery query against the billing export).';
+      el.innerHTML='<span class="dot"></span><span class="tag">7D</span><span class="v">…</span>';
+      bar.appendChild(el); }
+    return el;
+  }
+  var val={inp:null,out:null,spend:null};
+  function paint(){
+    var el=mount(); if(!el) return;
+    var v=el.querySelector('.v'); if(!v) return;
+    var parts=[];
+    parts.push('in <b>'+(val.inp==null?'—':fmt(val.inp))+'</b>');
+    parts.push('out <b>'+(val.out==null?'—':fmt(val.out))+'</b>');
+    parts.push('spend <b>'+(val.spend==null?'—':('$'+val.spend))+'</b>');
+    v.innerHTML=parts.join(' · ');
+    el.classList.toggle('stale', !!lastOk && (Date.now()-lastOk)>(USAGE_MS*2));
+  }
+  async function pullUsage(){
+    var d=await jget('/api/dash/usage');
+    if(d&&d.totals){ val.inp=d.totals.input||0; val.out=d.totals.output||0; lastOk=Date.now(); }
+    paint();
+  }
+  async function pullSpend(){
+    var g=await jget('/api/dash/gcp');
+    if(g&&typeof g.total==='number') val.spend=g.total;
+    paint();
+  }
+  function startUsage(){ mount(); paint(); pullUsage(); pullSpend();
+    setInterval(pullUsage,USAGE_MS); setInterval(pullSpend,SPEND_MS); setInterval(paint,10000); }
+
+  /* ---- 3/5: everything configurable belongs on LAYERS > Settings. ---------------------
+     The provider toggle, the model chips and the API-keys row are MOVED, not rebuilt: they
+     keep their ids and their existing handlers, so renderModelToggle() and openKeys() go on
+     working and there is no second copy to drift. Idempotent -- a second call is a no-op. */
+  function relocate(){
+    var host=$('pcl-set'); if(!host) return;
+    if(host.querySelector('.pcmoved')) return;
+    var box=document.createElement('div'); box.className='pcmoved';
+    var h=document.createElement('h4'); h.textContent='Model'; box.appendChild(h);
+    var tog=$('toggle'); var sec=tog?tog.closest('.sec'):null;
+    if(sec) box.appendChild(sec);
+    var keys=document.querySelector('#side .keys'); if(keys){ keys.style.display='flex'; box.appendChild(keys); }
+    host.appendChild(box);
+  }
+  var origTab=window.pclTab;
+  if(typeof origTab==='function'){
+    window.pclTab=function(name){ origTab(name); if(name==='settings') relocate(); };
+  }
+
+  function boot(){ startUsage(); }
+  if(document.readyState!=='loading') boot(); else document.addEventListener('DOMContentLoaded',boot);
+})();
+</script>
+
+</body>
+</html>
+
+<!-- SEC-HTML-DEPERS-V1 no operator identity, no advertising, no external hosts -->

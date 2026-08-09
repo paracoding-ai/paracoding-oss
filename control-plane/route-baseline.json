@@ -1,0 +1,23 @@
+{
+  "note": "Routes that are PUBLIC (no auth guard found in the handler) as of the commit that created this file. A NEW public route not listed here fails the build. Removing an entry here is how you assert a route has been given a guard. Adding one is a deliberate decision to ship a public route -- say why in the commit message. | 2026-08-01: assertIdentity added to BOTH scanners (route-audit.mjs and gen-baseline.py, kept in step deliberately). 5 route(s) that were always bearer-token guarded are no longer listed public. Verified a strict subset of the previous baseline -- nothing newly blessed.",
+  "generated_from": "src/index.ts",
+  "public": [
+    "GET /.well-known/agent.json",
+    "GET /.well-known/agents",
+    "GET /.well-known/oauth-authorization-server",
+    "GET /.well-known/oauth-authorization-server/mcp",
+    "GET /.well-known/oauth-protected-resource",
+    "GET /.well-known/oauth-protected-resource/mcp",
+    "GET /.well-known/openid-configuration",
+    "GET /agents/:role/.well-known/agent-card.json",
+    "GET /agents/:role/.well-known/agent.json",
+    "GET /cockpit",
+    "GET /dash",
+    "POST /api/confirm/verify",
+    "POST /api/mcp",
+    "POST /api/webauthn/unlock/options",
+    "POST /api/webauthn/unlock/verify",
+    "POST /mcp",
+    "POST /oauth/register"
+  ]
+}

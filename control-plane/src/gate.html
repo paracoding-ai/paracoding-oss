@@ -1,0 +1,1424 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<!-- PC-PASSKEY-UX-v1 : passkey-neutral wording + truthful abort copy -->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0a0f">
+  <title>The Autoclave</title>
+  <!-- PCVENDOR-THIRDPARTY-A : the two remote script tags that used to sit here are gone. Both
+     libraries are now SELF HOSTED, inlined verbatim below, so no third party origin can
+     execute JavaScript on this page. Removed (CDN hostname DEFANGED on purpose: a plain
+     grep for the literal CDN host over this file must return ZERO hits, and the editor
+     post condition asserts exactly that, so nothing in this comment may spell it out):
+       https://cdn[.]jsdelivr[.]net/npm/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js
+         (version pinned, but no integrity attribute)
+       https://cdn[.]jsdelivr[.]net/gh/davidshimjs/qrcodejs/qrcode.min.js
+         (no integrity attribute AND floating default branch HEAD)
+     KEPT ON PURPOSE, directly below: https://accounts.google.com/gsi/client . It cannot be
+     vendored (Google Identity Services must run on accounts.google.com to reach the Google
+     session) and it must NOT be given an integrity attribute (Google rotates that loader
+     continuously and publishes no versioned URL, so a pinned hash is a guaranteed outage).
+     Google is already a trust root here: this page exists to obtain a Google OAuth token,
+     and the server binds that token audience to WA_GOOGLE_CLIENT_ID before honouring it.
+     Bytes below are unmodified upstream releases. Editor that produced this:
+     shared/state/advisor-lane/ed-vendor-thirdparty-A.py -->
+  <script id="pcvendor-simplewebauthn-10-0-0">
+/*! vendored: @simplewebauthn/browser@10.0.0  dist/bundle/index.umd.min.js
+    source        registry.npmjs.org/@simplewebauthn/browser/-/browser-10.0.0.tgz
+    tarball sha1  8305a57dacb35ab6a71a8b670c699ee7ef1c11c4   (equals npm dist.shasum)
+    tarball sha512
+      hG0JMZD+LiLUbpQcAjS4d+t4gbprE/dLYop/CkE01ugU/9sKXflxV5s0DRjdz3uNMFecatRfb4ZLG3XvF8m5zg==
+      (equals npm dist.integrity)
+    file          7684 bytes
+    file sha256   ec0394d3d7adb7bdbff02139fd84779fddf989453a06b0613da5f9adcc12ed5f
+    file sha384   SijkeUvZZs1bto8G/GPfjLDAg4FRZB5yGFAdMT5T7n3bMnkfFMEhE/h11ClJPNFR
+    That sha384 IS the correct integrity= value for the URL this block replaced, recorded
+    here so nobody has to re derive it if they ever go back to the remote form. */
+/* [@simplewebauthn/browser@10.0.0] */
+!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?t(exports):"function"==typeof define&&define.amd?define(["exports"],t):t((e="undefined"!=typeof globalThis?globalThis:e||self).SimpleWebAuthnBrowser={})}(this,(function(e){"use strict";function t(e){const t=new Uint8Array(e);let r="";for(const e of t)r+=String.fromCharCode(e);return btoa(r).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"")}function r(e){const t=e.replace(/-/g,"+").replace(/_/g,"/"),r=(4-t.length%4)%4,n=t.padEnd(t.length+r,"="),o=atob(n),i=new ArrayBuffer(o.length),a=new Uint8Array(i);for(let e=0;e<o.length;e++)a[e]=o.charCodeAt(e);return i}function n(){return void 0!==window?.PublicKeyCredential&&"function"==typeof window.PublicKeyCredential}function o(e){const{id:t}=e;return{...e,id:r(t),transports:e.transports}}function i(e){return"localhost"===e||/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i.test(e)}class a extends Error{constructor({message:e,code:t,cause:r,name:n}){super(e,{cause:r}),this.name=n??r.name,this.code=t}}const s=new class{createNewAbortSignal(){if(this.controller){const e=new Error("Cancelling existing WebAuthn API call for new one");e.name="AbortError",this.controller.abort(e)}const e=new AbortController;return this.controller=e,e.signal}cancelCeremony(){if(this.controller){const e=new Error("Manually cancelling existing WebAuthn API call");e.name="AbortError",this.controller.abort(e),this.controller=void 0}}},c=["cross-platform","platform"];function l(e){if(e&&!(c.indexOf(e)<0))return e}function u(e,t){console.warn(`The browser extension that intercepted this WebAuthn API call incorrectly implemented ${e}. You should report this error to them.\n`,t)}function d(){if(!n())return new Promise((e=>e(!1)));const e=window.PublicKeyCredential;return void 0===e.isConditionalMediationAvailable?new Promise((e=>e(!1))):e.isConditionalMediationAvailable()}e.WebAuthnAbortService=s,e.WebAuthnError=a,e.base64URLStringToBuffer=r,e.browserSupportsWebAuthn=n,e.browserSupportsWebAuthnAutofill=d,e.bufferToBase64URLString=t,e.platformAuthenticatorIsAvailable=function(){return n()?PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable():new Promise((e=>e(!1)))},e.startAuthentication=async function(e,c=!1){if(!n())throw new Error("WebAuthn is not supported in this browser");let u;0!==e.allowCredentials?.length&&(u=e.allowCredentials?.map(o));const h={...e,challenge:r(e.challenge),allowCredentials:u},f={};if(c){if(!await d())throw Error("Browser does not support WebAuthn autofill");if(document.querySelectorAll("input[autocomplete$='webauthn']").length<1)throw Error('No <input> with "webauthn" as the only or last value in its `autocomplete` attribute was detected');f.mediation="conditional",h.allowCredentials=[]}let p;f.publicKey=h,f.signal=s.createNewAbortSignal();try{p=await navigator.credentials.get(f)}catch(e){throw function({error:e,options:t}){const{publicKey:r}=t;if(!r)throw Error("options was missing required publicKey property");if("AbortError"===e.name){if(t.signal instanceof AbortSignal)return new a({message:"Authentication ceremony was sent an abort signal",code:"ERROR_CEREMONY_ABORTED",cause:e})}else{if("NotAllowedError"===e.name)return new a({message:e.message,code:"ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY",cause:e});if("SecurityError"===e.name){const t=window.location.hostname;if(!i(t))return new a({message:`${window.location.hostname} is an invalid domain`,code:"ERROR_INVALID_DOMAIN",cause:e});if(r.rpId!==t)return new a({message:`The RP ID "${r.rpId}" is invalid for this domain`,code:"ERROR_INVALID_RP_ID",cause:e})}else if("UnknownError"===e.name)return new a({message:"The authenticator was unable to process the specified options, or could not create a new assertion signature",code:"ERROR_AUTHENTICATOR_GENERAL_ERROR",cause:e})}return e}({error:e,options:f})}if(!p)throw new Error("Authentication was not completed");const{id:R,rawId:w,response:E,type:g}=p;let A;return E.userHandle&&(A=t(E.userHandle)),{id:R,rawId:t(w),response:{authenticatorData:t(E.authenticatorData),clientDataJSON:t(E.clientDataJSON),signature:t(E.signature),userHandle:A},type:g,clientExtensionResults:p.getClientExtensionResults(),authenticatorAttachment:l(p.authenticatorAttachment)}},e.startRegistration=async function(e){if(!n())throw new Error("WebAuthn is not supported in this browser");const c={publicKey:{...e,challenge:r(e.challenge),user:{...e.user,id:r(e.user.id)},excludeCredentials:e.excludeCredentials?.map(o)}};let d;c.signal=s.createNewAbortSignal();try{d=await navigator.credentials.create(c)}catch(e){throw function({error:e,options:t}){const{publicKey:r}=t;if(!r)throw Error("options was missing required publicKey property");if("AbortError"===e.name){if(t.signal instanceof AbortSignal)return new a({message:"Registration ceremony was sent an abort signal",code:"ERROR_CEREMONY_ABORTED",cause:e})}else if("ConstraintError"===e.name){if(!0===r.authenticatorSelection?.requireResidentKey)return new a({message:"Discoverable credentials were required but no available authenticator supported it",code:"ERROR_AUTHENTICATOR_MISSING_DISCOVERABLE_CREDENTIAL_SUPPORT",cause:e});if("required"===r.authenticatorSelection?.userVerification)return new a({message:"User verification was required but no available authenticator supported it",code:"ERROR_AUTHENTICATOR_MISSING_USER_VERIFICATION_SUPPORT",cause:e})}else{if("InvalidStateError"===e.name)return new a({message:"The authenticator was previously registered",code:"ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED",cause:e});if("NotAllowedError"===e.name)return new a({message:e.message,code:"ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY",cause:e});if("NotSupportedError"===e.name)return 0===r.pubKeyCredParams.filter((e=>"public-key"===e.type)).length?new a({message:'No entry in pubKeyCredParams was of type "public-key"',code:"ERROR_MALFORMED_PUBKEYCREDPARAMS",cause:e}):new a({message:"No available authenticator supported any of the specified pubKeyCredParams algorithms",code:"ERROR_AUTHENTICATOR_NO_SUPPORTED_PUBKEYCREDPARAMS_ALG",cause:e});if("SecurityError"===e.name){const t=window.location.hostname;if(!i(t))return new a({message:`${window.location.hostname} is an invalid domain`,code:"ERROR_INVALID_DOMAIN",cause:e});if(r.rp.id!==t)return new a({message:`The RP ID "${r.rp.id}" is invalid for this domain`,code:"ERROR_INVALID_RP_ID",cause:e})}else if("TypeError"===e.name){if(r.user.id.byteLength<1||r.user.id.byteLength>64)return new a({message:"User ID was not between 1 and 64 characters",code:"ERROR_INVALID_USER_ID_LENGTH",cause:e})}else if("UnknownError"===e.name)return new a({message:"The authenticator was unable to process the specified options, or could not create a new credential",code:"ERROR_AUTHENTICATOR_GENERAL_ERROR",cause:e})}return e}({error:e,options:c})}if(!d)throw new Error("Registration was not completed");const{id:h,rawId:f,response:p,type:R}=d;let w,E,g,A;if("function"==typeof p.getTransports&&(w=p.getTransports()),"function"==typeof p.getPublicKeyAlgorithm)try{E=p.getPublicKeyAlgorithm()}catch(e){u("getPublicKeyAlgorithm()",e)}if("function"==typeof p.getPublicKey)try{const e=p.getPublicKey();null!==e&&(g=t(e))}catch(e){u("getPublicKey()",e)}if("function"==typeof p.getAuthenticatorData)try{A=t(p.getAuthenticatorData())}catch(e){u("getAuthenticatorData()",e)}return{id:h,rawId:t(f),response:{attestationObject:t(p.attestationObject),clientDataJSON:t(p.clientDataJSON),transports:w,publicKeyAlgorithm:E,publicKey:g,authenticatorData:A},type:R,clientExtensionResults:d.getClientExtensionResults(),authenticatorAttachment:l(d.authenticatorAttachment)}},Object.defineProperty(e,"__esModule",{value:!0})}));
+
+  </script>
+  <script id="pcvendor-qrcodejs-c541ef06">
+/*! vendored: davidshimjs/qrcodejs  qrcode.min.js
+    The URL this block replaced was a FLOATING default branch HEAD with no integrity=.
+    These are the exact bytes the browser was already executing; inlining them freezes that
+    artifact and removes the third party origin. Cross verified, byte identical, from two
+    independent origins:
+      A  raw.githubusercontent.com/davidshimjs/qrcodejs/master/qrcode.min.js
+      B  registry.npmjs.org qrcodejs2@0.0.2, member package/qrcode.min.js, same repo
+    file          19927 bytes
+    file sha256   c541ef06327885a8415bca8df6071e14189b4855336def4f36db54bde8484f36
+    file sha384   3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU
+    That sha384 IS the correct integrity= value for the URL this block replaced. */
+var QRCode;!function(){function a(a){this.mode=c.MODE_8BIT_BYTE,this.data=a,this.parsedData=[];for(var b=[],d=0,e=this.data.length;e>d;d++){var f=this.data.charCodeAt(d);f>65536?(b[0]=240|(1835008&f)>>>18,b[1]=128|(258048&f)>>>12,b[2]=128|(4032&f)>>>6,b[3]=128|63&f):f>2048?(b[0]=224|(61440&f)>>>12,b[1]=128|(4032&f)>>>6,b[2]=128|63&f):f>128?(b[0]=192|(1984&f)>>>6,b[1]=128|63&f):b[0]=f,this.parsedData=this.parsedData.concat(b)}this.parsedData.length!=this.data.length&&(this.parsedData.unshift(191),this.parsedData.unshift(187),this.parsedData.unshift(239))}function b(a,b){this.typeNumber=a,this.errorCorrectLevel=b,this.modules=null,this.moduleCount=0,this.dataCache=null,this.dataList=[]}function i(a,b){if(void 0==a.length)throw new Error(a.length+"/"+b);for(var c=0;c<a.length&&0==a[c];)c++;this.num=new Array(a.length-c+b);for(var d=0;d<a.length-c;d++)this.num[d]=a[d+c]}function j(a,b){this.totalCount=a,this.dataCount=b}function k(){this.buffer=[],this.length=0}function m(){return"undefined"!=typeof CanvasRenderingContext2D}function n(){var a=!1,b=navigator.userAgent;return/android/i.test(b)&&(a=!0,aMat=b.toString().match(/android ([0-9]\.[0-9])/i),aMat&&aMat[1]&&(a=parseFloat(aMat[1]))),a}function r(a,b){for(var c=1,e=s(a),f=0,g=l.length;g>=f;f++){var h=0;switch(b){case d.L:h=l[f][0];break;case d.M:h=l[f][1];break;case d.Q:h=l[f][2];break;case d.H:h=l[f][3]}if(h>=e)break;c++}if(c>l.length)throw new Error("Too long data");return c}function s(a){var b=encodeURI(a).toString().replace(/\%[0-9a-fA-F]{2}/g,"a");return b.length+(b.length!=a?3:0)}a.prototype={getLength:function(){return this.parsedData.length},write:function(a){for(var b=0,c=this.parsedData.length;c>b;b++)a.put(this.parsedData[b],8)}},b.prototype={addData:function(b){var c=new a(b);this.dataList.push(c),this.dataCache=null},isDark:function(a,b){if(0>a||this.moduleCount<=a||0>b||this.moduleCount<=b)throw new Error(a+","+b);return this.modules[a][b]},getModuleCount:function(){return this.moduleCount},make:function(){this.makeImpl(!1,this.getBestMaskPattern())},makeImpl:function(a,c){this.moduleCount=4*this.typeNumber+17,this.modules=new Array(this.moduleCount);for(var d=0;d<this.moduleCount;d++){this.modules[d]=new Array(this.moduleCount);for(var e=0;e<this.moduleCount;e++)this.modules[d][e]=null}this.setupPositionProbePattern(0,0),this.setupPositionProbePattern(this.moduleCount-7,0),this.setupPositionProbePattern(0,this.moduleCount-7),this.setupPositionAdjustPattern(),this.setupTimingPattern(),this.setupTypeInfo(a,c),this.typeNumber>=7&&this.setupTypeNumber(a),null==this.dataCache&&(this.dataCache=b.createData(this.typeNumber,this.errorCorrectLevel,this.dataList)),this.mapData(this.dataCache,c)},setupPositionProbePattern:function(a,b){for(var c=-1;7>=c;c++)if(!(-1>=a+c||this.moduleCount<=a+c))for(var d=-1;7>=d;d++)-1>=b+d||this.moduleCount<=b+d||(this.modules[a+c][b+d]=c>=0&&6>=c&&(0==d||6==d)||d>=0&&6>=d&&(0==c||6==c)||c>=2&&4>=c&&d>=2&&4>=d?!0:!1)},getBestMaskPattern:function(){for(var a=0,b=0,c=0;8>c;c++){this.makeImpl(!0,c);var d=f.getLostPoint(this);(0==c||a>d)&&(a=d,b=c)}return b},createMovieClip:function(a,b,c){var d=a.createEmptyMovieClip(b,c),e=1;this.make();for(var f=0;f<this.modules.length;f++)for(var g=f*e,h=0;h<this.modules[f].length;h++){var i=h*e,j=this.modules[f][h];j&&(d.beginFill(0,100),d.moveTo(i,g),d.lineTo(i+e,g),d.lineTo(i+e,g+e),d.lineTo(i,g+e),d.endFill())}return d},setupTimingPattern:function(){for(var a=8;a<this.moduleCount-8;a++)null==this.modules[a][6]&&(this.modules[a][6]=0==a%2);for(var b=8;b<this.moduleCount-8;b++)null==this.modules[6][b]&&(this.modules[6][b]=0==b%2)},setupPositionAdjustPattern:function(){for(var a=f.getPatternPosition(this.typeNumber),b=0;b<a.length;b++)for(var c=0;c<a.length;c++){var d=a[b],e=a[c];if(null==this.modules[d][e])for(var g=-2;2>=g;g++)for(var h=-2;2>=h;h++)this.modules[d+g][e+h]=-2==g||2==g||-2==h||2==h||0==g&&0==h?!0:!1}},setupTypeNumber:function(a){for(var b=f.getBCHTypeNumber(this.typeNumber),c=0;18>c;c++){var d=!a&&1==(1&b>>c);this.modules[Math.floor(c/3)][c%3+this.moduleCount-8-3]=d}for(var c=0;18>c;c++){var d=!a&&1==(1&b>>c);this.modules[c%3+this.moduleCount-8-3][Math.floor(c/3)]=d}},setupTypeInfo:function(a,b){for(var c=this.errorCorrectLevel<<3|b,d=f.getBCHTypeInfo(c),e=0;15>e;e++){var g=!a&&1==(1&d>>e);6>e?this.modules[e][8]=g:8>e?this.modules[e+1][8]=g:this.modules[this.moduleCount-15+e][8]=g}for(var e=0;15>e;e++){var g=!a&&1==(1&d>>e);8>e?this.modules[8][this.moduleCount-e-1]=g:9>e?this.modules[8][15-e-1+1]=g:this.modules[8][15-e-1]=g}this.modules[this.moduleCount-8][8]=!a},mapData:function(a,b){for(var c=-1,d=this.moduleCount-1,e=7,g=0,h=this.moduleCount-1;h>0;h-=2)for(6==h&&h--;;){for(var i=0;2>i;i++)if(null==this.modules[d][h-i]){var j=!1;g<a.length&&(j=1==(1&a[g]>>>e));var k=f.getMask(b,d,h-i);k&&(j=!j),this.modules[d][h-i]=j,e--,-1==e&&(g++,e=7)}if(d+=c,0>d||this.moduleCount<=d){d-=c,c=-c;break}}}},b.PAD0=236,b.PAD1=17,b.createData=function(a,c,d){for(var e=j.getRSBlocks(a,c),g=new k,h=0;h<d.length;h++){var i=d[h];g.put(i.mode,4),g.put(i.getLength(),f.getLengthInBits(i.mode,a)),i.write(g)}for(var l=0,h=0;h<e.length;h++)l+=e[h].dataCount;if(g.getLengthInBits()>8*l)throw new Error("code length overflow. ("+g.getLengthInBits()+">"+8*l+")");for(g.getLengthInBits()+4<=8*l&&g.put(0,4);0!=g.getLengthInBits()%8;)g.putBit(!1);for(;;){if(g.getLengthInBits()>=8*l)break;if(g.put(b.PAD0,8),g.getLengthInBits()>=8*l)break;g.put(b.PAD1,8)}return b.createBytes(g,e)},b.createBytes=function(a,b){for(var c=0,d=0,e=0,g=new Array(b.length),h=new Array(b.length),j=0;j<b.length;j++){var k=b[j].dataCount,l=b[j].totalCount-k;d=Math.max(d,k),e=Math.max(e,l),g[j]=new Array(k);for(var m=0;m<g[j].length;m++)g[j][m]=255&a.buffer[m+c];c+=k;var n=f.getErrorCorrectPolynomial(l),o=new i(g[j],n.getLength()-1),p=o.mod(n);h[j]=new Array(n.getLength()-1);for(var m=0;m<h[j].length;m++){var q=m+p.getLength()-h[j].length;h[j][m]=q>=0?p.get(q):0}}for(var r=0,m=0;m<b.length;m++)r+=b[m].totalCount;for(var s=new Array(r),t=0,m=0;d>m;m++)for(var j=0;j<b.length;j++)m<g[j].length&&(s[t++]=g[j][m]);for(var m=0;e>m;m++)for(var j=0;j<b.length;j++)m<h[j].length&&(s[t++]=h[j][m]);return s};for(var c={MODE_NUMBER:1,MODE_ALPHA_NUM:2,MODE_8BIT_BYTE:4,MODE_KANJI:8},d={L:1,M:0,Q:3,H:2},e={PATTERN000:0,PATTERN001:1,PATTERN010:2,PATTERN011:3,PATTERN100:4,PATTERN101:5,PATTERN110:6,PATTERN111:7},f={PATTERN_POSITION_TABLE:[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,134],[6,34,60,86,112,138],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]],G15:1335,G18:7973,G15_MASK:21522,getBCHTypeInfo:function(a){for(var b=a<<10;f.getBCHDigit(b)-f.getBCHDigit(f.G15)>=0;)b^=f.G15<<f.getBCHDigit(b)-f.getBCHDigit(f.G15);return(a<<10|b)^f.G15_MASK},getBCHTypeNumber:function(a){for(var b=a<<12;f.getBCHDigit(b)-f.getBCHDigit(f.G18)>=0;)b^=f.G18<<f.getBCHDigit(b)-f.getBCHDigit(f.G18);return a<<12|b},getBCHDigit:function(a){for(var b=0;0!=a;)b++,a>>>=1;return b},getPatternPosition:function(a){return f.PATTERN_POSITION_TABLE[a-1]},getMask:function(a,b,c){switch(a){case e.PATTERN000:return 0==(b+c)%2;case e.PATTERN001:return 0==b%2;case e.PATTERN010:return 0==c%3;case e.PATTERN011:return 0==(b+c)%3;case e.PATTERN100:return 0==(Math.floor(b/2)+Math.floor(c/3))%2;case e.PATTERN101:return 0==b*c%2+b*c%3;case e.PATTERN110:return 0==(b*c%2+b*c%3)%2;case e.PATTERN111:return 0==(b*c%3+(b+c)%2)%2;default:throw new Error("bad maskPattern:"+a)}},getErrorCorrectPolynomial:function(a){for(var b=new i([1],0),c=0;a>c;c++)b=b.multiply(new i([1,g.gexp(c)],0));return b},getLengthInBits:function(a,b){if(b>=1&&10>b)switch(a){case c.MODE_NUMBER:return 10;case c.MODE_ALPHA_NUM:return 9;case c.MODE_8BIT_BYTE:return 8;case c.MODE_KANJI:return 8;default:throw new Error("mode:"+a)}else if(27>b)switch(a){case c.MODE_NUMBER:return 12;case c.MODE_ALPHA_NUM:return 11;case c.MODE_8BIT_BYTE:return 16;case c.MODE_KANJI:return 10;default:throw new Error("mode:"+a)}else{if(!(41>b))throw new Error("type:"+b);switch(a){case c.MODE_NUMBER:return 14;case c.MODE_ALPHA_NUM:return 13;case c.MODE_8BIT_BYTE:return 16;case c.MODE_KANJI:return 12;default:throw new Error("mode:"+a)}}},getLostPoint:function(a){for(var b=a.getModuleCount(),c=0,d=0;b>d;d++)for(var e=0;b>e;e++){for(var f=0,g=a.isDark(d,e),h=-1;1>=h;h++)if(!(0>d+h||d+h>=b))for(var i=-1;1>=i;i++)0>e+i||e+i>=b||(0!=h||0!=i)&&g==a.isDark(d+h,e+i)&&f++;f>5&&(c+=3+f-5)}for(var d=0;b-1>d;d++)for(var e=0;b-1>e;e++){var j=0;a.isDark(d,e)&&j++,a.isDark(d+1,e)&&j++,a.isDark(d,e+1)&&j++,a.isDark(d+1,e+1)&&j++,(0==j||4==j)&&(c+=3)}for(var d=0;b>d;d++)for(var e=0;b-6>e;e++)a.isDark(d,e)&&!a.isDark(d,e+1)&&a.isDark(d,e+2)&&a.isDark(d,e+3)&&a.isDark(d,e+4)&&!a.isDark(d,e+5)&&a.isDark(d,e+6)&&(c+=40);for(var e=0;b>e;e++)for(var d=0;b-6>d;d++)a.isDark(d,e)&&!a.isDark(d+1,e)&&a.isDark(d+2,e)&&a.isDark(d+3,e)&&a.isDark(d+4,e)&&!a.isDark(d+5,e)&&a.isDark(d+6,e)&&(c+=40);for(var k=0,e=0;b>e;e++)for(var d=0;b>d;d++)a.isDark(d,e)&&k++;var l=Math.abs(100*k/b/b-50)/5;return c+=10*l}},g={glog:function(a){if(1>a)throw new Error("glog("+a+")");return g.LOG_TABLE[a]},gexp:function(a){for(;0>a;)a+=255;for(;a>=256;)a-=255;return g.EXP_TABLE[a]},EXP_TABLE:new Array(256),LOG_TABLE:new Array(256)},h=0;8>h;h++)g.EXP_TABLE[h]=1<<h;for(var h=8;256>h;h++)g.EXP_TABLE[h]=g.EXP_TABLE[h-4]^g.EXP_TABLE[h-5]^g.EXP_TABLE[h-6]^g.EXP_TABLE[h-8];for(var h=0;255>h;h++)g.LOG_TABLE[g.EXP_TABLE[h]]=h;i.prototype={get:function(a){return this.num[a]},getLength:function(){return this.num.length},multiply:function(a){for(var b=new Array(this.getLength()+a.getLength()-1),c=0;c<this.getLength();c++)for(var d=0;d<a.getLength();d++)b[c+d]^=g.gexp(g.glog(this.get(c))+g.glog(a.get(d)));return new i(b,0)},mod:function(a){if(this.getLength()-a.getLength()<0)return this;for(var b=g.glog(this.get(0))-g.glog(a.get(0)),c=new Array(this.getLength()),d=0;d<this.getLength();d++)c[d]=this.get(d);for(var d=0;d<a.getLength();d++)c[d]^=g.gexp(g.glog(a.get(d))+b);return new i(c,0).mod(a)}},j.RS_BLOCK_TABLE=[[1,26,19],[1,26,16],[1,26,13],[1,26,9],[1,44,34],[1,44,28],[1,44,22],[1,44,16],[1,70,55],[1,70,44],[2,35,17],[2,35,13],[1,100,80],[2,50,32],[2,50,24],[4,25,9],[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12],[2,86,68],[4,43,27],[4,43,19],[4,43,15],[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14],[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15],[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13],[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16],[4,101,81],[1,80,50,4,81,51],[4,50,22,4,51,23],[3,36,12,8,37,13],[2,116,92,2,117,93],[6,58,36,2,59,37],[4,46,20,6,47,21],[7,42,14,4,43,15],[4,133,107],[8,59,37,1,60,38],[8,44,20,4,45,21],[12,33,11,4,34,12],[3,145,115,1,146,116],[4,64,40,5,65,41],[11,36,16,5,37,17],[11,36,12,5,37,13],[5,109,87,1,110,88],[5,65,41,5,66,42],[5,54,24,7,55,25],[11,36,12],[5,122,98,1,123,99],[7,73,45,3,74,46],[15,43,19,2,44,20],[3,45,15,13,46,16],[1,135,107,5,136,108],[10,74,46,1,75,47],[1,50,22,15,51,23],[2,42,14,17,43,15],[5,150,120,1,151,121],[9,69,43,4,70,44],[17,50,22,1,51,23],[2,42,14,19,43,15],[3,141,113,4,142,114],[3,70,44,11,71,45],[17,47,21,4,48,22],[9,39,13,16,40,14],[3,135,107,5,136,108],[3,67,41,13,68,42],[15,54,24,5,55,25],[15,43,15,10,44,16],[4,144,116,4,145,117],[17,68,42],[17,50,22,6,51,23],[19,46,16,6,47,17],[2,139,111,7,140,112],[17,74,46],[7,54,24,16,55,25],[34,37,13],[4,151,121,5,152,122],[4,75,47,14,76,48],[11,54,24,14,55,25],[16,45,15,14,46,16],[6,147,117,4,148,118],[6,73,45,14,74,46],[11,54,24,16,55,25],[30,46,16,2,47,17],[8,132,106,4,133,107],[8,75,47,13,76,48],[7,54,24,22,55,25],[22,45,15,13,46,16],[10,142,114,2,143,115],[19,74,46,4,75,47],[28,50,22,6,51,23],[33,46,16,4,47,17],[8,152,122,4,153,123],[22,73,45,3,74,46],[8,53,23,26,54,24],[12,45,15,28,46,16],[3,147,117,10,148,118],[3,73,45,23,74,46],[4,54,24,31,55,25],[11,45,15,31,46,16],[7,146,116,7,147,117],[21,73,45,7,74,46],[1,53,23,37,54,24],[19,45,15,26,46,16],[5,145,115,10,146,116],[19,75,47,10,76,48],[15,54,24,25,55,25],[23,45,15,25,46,16],[13,145,115,3,146,116],[2,74,46,29,75,47],[42,54,24,1,55,25],[23,45,15,28,46,16],[17,145,115],[10,74,46,23,75,47],[10,54,24,35,55,25],[19,45,15,35,46,16],[17,145,115,1,146,116],[14,74,46,21,75,47],[29,54,24,19,55,25],[11,45,15,46,46,16],[13,145,115,6,146,116],[14,74,46,23,75,47],[44,54,24,7,55,25],[59,46,16,1,47,17],[12,151,121,7,152,122],[12,75,47,26,76,48],[39,54,24,14,55,25],[22,45,15,41,46,16],[6,151,121,14,152,122],[6,75,47,34,76,48],[46,54,24,10,55,25],[2,45,15,64,46,16],[17,152,122,4,153,123],[29,74,46,14,75,47],[49,54,24,10,55,25],[24,45,15,46,46,16],[4,152,122,18,153,123],[13,74,46,32,75,47],[48,54,24,14,55,25],[42,45,15,32,46,16],[20,147,117,4,148,118],[40,75,47,7,76,48],[43,54,24,22,55,25],[10,45,15,67,46,16],[19,148,118,6,149,119],[18,75,47,31,76,48],[34,54,24,34,55,25],[20,45,15,61,46,16]],j.getRSBlocks=function(a,b){var c=j.getRsBlockTable(a,b);if(void 0==c)throw new Error("bad rs block @ typeNumber:"+a+"/errorCorrectLevel:"+b);for(var d=c.length/3,e=[],f=0;d>f;f++)for(var g=c[3*f+0],h=c[3*f+1],i=c[3*f+2],k=0;g>k;k++)e.push(new j(h,i));return e},j.getRsBlockTable=function(a,b){switch(b){case d.L:return j.RS_BLOCK_TABLE[4*(a-1)+0];case d.M:return j.RS_BLOCK_TABLE[4*(a-1)+1];case d.Q:return j.RS_BLOCK_TABLE[4*(a-1)+2];case d.H:return j.RS_BLOCK_TABLE[4*(a-1)+3];default:return void 0}},k.prototype={get:function(a){var b=Math.floor(a/8);return 1==(1&this.buffer[b]>>>7-a%8)},put:function(a,b){for(var c=0;b>c;c++)this.putBit(1==(1&a>>>b-c-1))},getLengthInBits:function(){return this.length},putBit:function(a){var b=Math.floor(this.length/8);this.buffer.length<=b&&this.buffer.push(0),a&&(this.buffer[b]|=128>>>this.length%8),this.length++}};var l=[[17,14,11,7],[32,26,20,14],[53,42,32,24],[78,62,46,34],[106,84,60,44],[134,106,74,58],[154,122,86,64],[192,152,108,84],[230,180,130,98],[271,213,151,119],[321,251,177,137],[367,287,203,155],[425,331,241,177],[458,362,258,194],[520,412,292,220],[586,450,322,250],[644,504,364,280],[718,560,394,310],[792,624,442,338],[858,666,482,382],[929,711,509,403],[1003,779,565,439],[1091,857,611,461],[1171,911,661,511],[1273,997,715,535],[1367,1059,751,593],[1465,1125,805,625],[1528,1190,868,658],[1628,1264,908,698],[1732,1370,982,742],[1840,1452,1030,790],[1952,1538,1112,842],[2068,1628,1168,898],[2188,1722,1228,958],[2303,1809,1283,983],[2431,1911,1351,1051],[2563,1989,1423,1093],[2699,2099,1499,1139],[2809,2213,1579,1219],[2953,2331,1663,1273]],o=function(){var a=function(a,b){this._el=a,this._htOption=b};return a.prototype.draw=function(a){function g(a,b){var c=document.createElementNS("http://www.w3.org/2000/svg",a);for(var d in b)b.hasOwnProperty(d)&&c.setAttribute(d,b[d]);return c}var b=this._htOption,c=this._el,d=a.getModuleCount();Math.floor(b.width/d),Math.floor(b.height/d),this.clear();var h=g("svg",{viewBox:"0 0 "+String(d)+" "+String(d),width:"100%",height:"100%",fill:b.colorLight});h.setAttributeNS("http://www.w3.org/2000/xmlns/","xmlns:xlink","http://www.w3.org/1999/xlink"),c.appendChild(h),h.appendChild(g("rect",{fill:b.colorDark,width:"1",height:"1",id:"template"}));for(var i=0;d>i;i++)for(var j=0;d>j;j++)if(a.isDark(i,j)){var k=g("use",{x:String(i),y:String(j)});k.setAttributeNS("http://www.w3.org/1999/xlink","href","#template"),h.appendChild(k)}},a.prototype.clear=function(){for(;this._el.hasChildNodes();)this._el.removeChild(this._el.lastChild)},a}(),p="svg"===document.documentElement.tagName.toLowerCase(),q=p?o:m()?function(){function a(){this._elImage.src=this._elCanvas.toDataURL("image/png"),this._elImage.style.display="block",this._elCanvas.style.display="none"}function d(a,b){var c=this;if(c._fFail=b,c._fSuccess=a,null===c._bSupportDataURI){var d=document.createElement("img"),e=function(){c._bSupportDataURI=!1,c._fFail&&_fFail.call(c)},f=function(){c._bSupportDataURI=!0,c._fSuccess&&c._fSuccess.call(c)};return d.onabort=e,d.onerror=e,d.onload=f,d.src="data:image/gif;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==",void 0}c._bSupportDataURI===!0&&c._fSuccess?c._fSuccess.call(c):c._bSupportDataURI===!1&&c._fFail&&c._fFail.call(c)}if(this._android&&this._android<=2.1){var b=1/window.devicePixelRatio,c=CanvasRenderingContext2D.prototype.drawImage;CanvasRenderingContext2D.prototype.drawImage=function(a,d,e,f,g,h,i,j){if("nodeName"in a&&/img/i.test(a.nodeName))for(var l=arguments.length-1;l>=1;l--)arguments[l]=arguments[l]*b;else"undefined"==typeof j&&(arguments[1]*=b,arguments[2]*=b,arguments[3]*=b,arguments[4]*=b);c.apply(this,arguments)}}var e=function(a,b){this._bIsPainted=!1,this._android=n(),this._htOption=b,this._elCanvas=document.createElement("canvas"),this._elCanvas.width=b.width,this._elCanvas.height=b.height,a.appendChild(this._elCanvas),this._el=a,this._oContext=this._elCanvas.getContext("2d"),this._bIsPainted=!1,this._elImage=document.createElement("img"),this._elImage.style.display="none",this._el.appendChild(this._elImage),this._bSupportDataURI=null};return e.prototype.draw=function(a){var b=this._elImage,c=this._oContext,d=this._htOption,e=a.getModuleCount(),f=d.width/e,g=d.height/e,h=Math.round(f),i=Math.round(g);b.style.display="none",this.clear();for(var j=0;e>j;j++)for(var k=0;e>k;k++){var l=a.isDark(j,k),m=k*f,n=j*g;c.strokeStyle=l?d.colorDark:d.colorLight,c.lineWidth=1,c.fillStyle=l?d.colorDark:d.colorLight,c.fillRect(m,n,f,g),c.strokeRect(Math.floor(m)+.5,Math.floor(n)+.5,h,i),c.strokeRect(Math.ceil(m)-.5,Math.ceil(n)-.5,h,i)}this._bIsPainted=!0},e.prototype.makeImage=function(){this._bIsPainted&&d.call(this,a)},e.prototype.isPainted=function(){return this._bIsPainted},e.prototype.clear=function(){this._oContext.clearRect(0,0,this._elCanvas.width,this._elCanvas.height),this._bIsPainted=!1},e.prototype.round=function(a){return a?Math.floor(1e3*a)/1e3:a},e}():function(){var a=function(a,b){this._el=a,this._htOption=b};return a.prototype.draw=function(a){for(var b=this._htOption,c=this._el,d=a.getModuleCount(),e=Math.floor(b.width/d),f=Math.floor(b.height/d),g=['<table style="border:0;border-collapse:collapse;">'],h=0;d>h;h++){g.push("<tr>");for(var i=0;d>i;i++)g.push('<td style="border:0;border-collapse:collapse;padding:0;margin:0;width:'+e+"px;height:"+f+"px;background-color:"+(a.isDark(h,i)?b.colorDark:b.colorLight)+';"></td>');g.push("</tr>")}g.push("</table>"),c.innerHTML=g.join("");var j=c.childNodes[0],k=(b.width-j.offsetWidth)/2,l=(b.height-j.offsetHeight)/2;k>0&&l>0&&(j.style.margin=l+"px "+k+"px")},a.prototype.clear=function(){this._el.innerHTML=""},a}();QRCode=function(a,b){if(this._htOption={width:256,height:256,typeNumber:4,colorDark:"#000000",colorLight:"#ffffff",correctLevel:d.H},"string"==typeof b&&(b={text:b}),b)for(var c in b)this._htOption[c]=b[c];"string"==typeof a&&(a=document.getElementById(a)),this._android=n(),this._el=a,this._oQRCode=null,this._oDrawing=new q(this._el,this._htOption),this._htOption.text&&this.makeCode(this._htOption.text)},QRCode.prototype.makeCode=function(a){this._oQRCode=new b(r(a,this._htOption.correctLevel),this._htOption.correctLevel),this._oQRCode.addData(a),this._oQRCode.make(),this._el.title=a,this._oDrawing.draw(this._oQRCode),this.makeImage()},QRCode.prototype.makeImage=function(){"function"==typeof this._oDrawing.makeImage&&(!this._android||this._android>=3)&&this._oDrawing.makeImage()},QRCode.prototype.clear=function(){this._oDrawing.clear()},QRCode.CorrectLevel=d}();
+  </script>
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <style>
+    :root{--panel:rgba(255,255,255,.08);--panel2:rgba(255,255,255,.12);--line:rgba(255,255,255,.26);--tx:#fff;--mut:rgba(255,255,255,.72);--gold:#ffd66b}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--tx);margin:0 auto;padding:1.2rem;max-width:640px;min-height:100vh;background:linear-gradient(135deg,#123a56 0%,#0f4a47 52%,#175339 100%) fixed}
+    .brand{text-align:center;margin:.6rem 0 .5rem}
+    .brand img{width:80px;height:80px;object-fit:contain;border-radius:50%;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05);box-shadow:0 0 18px 2px rgba(240,194,74,.5)}
+    .brand .sub{font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);margin-top:.5rem}
+    .brand h1{margin:.2rem 0 0;font-size:1.4rem;font-weight:800;background:linear-gradient(90deg,#ffe9a8,#e0982e);-webkit-background-clip:text;background-clip:text;color:transparent}
+    button{width:100%;padding:.9rem 1rem;margin:.4rem 0;border-radius:12px;border:1px solid var(--line);background:var(--panel2);color:var(--tx);font-size:1rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.6rem;justify-content:center;backdrop-filter:blur(6px)}
+    button:hover{background:rgba(255,255,255,.18)} button:disabled{opacity:.45}
+    .link{background:rgba(255,255,255,.06);border:1px dashed var(--line);color:#eafaff}
+    .primary{background:linear-gradient(135deg,#fff,#dff6ff);color:#0e3a52;border:0;font-weight:800}
+    .primary:hover{filter:brightness(1.03)}
+    #loginbar{display:none;text-align:center;font-size:.8rem;color:var(--mut);margin:.2rem 0 .7rem}
+    #loginbar b{color:#c6ffe4;font-weight:600}
+    #loginbar a{color:#eafaff;text-decoration:underline;cursor:pointer;margin-left:.4rem;opacity:.85}
+    #gstatus{font-size:.82rem;margin:.3rem 0;font-weight:600;text-align:center}
+    #timerbar{display:none;text-align:center;font-weight:800;color:#c6ffe4;margin:.5rem 0;padding:.6rem;border:1px solid rgba(120,255,190,.4);border-radius:12px;background:rgba(60,200,140,.14);font-variant-numeric:tabular-nums}
+    #timerbar .warn{color:var(--gold)}
+    #busy{display:none;align-items:center;gap:.5rem;justify-content:center;color:#c6ffe4;font-weight:600;margin:.4rem 0}
+    .spin{width:1em;height:1em;border:2px solid rgba(255,255,255,.25);border-top-color:#c6ffe4;border-radius:50%;animation:sp .7s linear infinite;display:inline-block}
+    @keyframes sp{to{transform:rotate(360deg)}}
+    #msg{color:var(--mut);min-height:1.4em;white-space:pre-wrap;font-size:.9rem;text-align:center;margin:.6rem 0}
+    .batchbar{display:none;align-items:center;gap:.6rem;margin:.7rem 0 .3rem;padding:.6rem .7rem;border:1px solid var(--line);border-radius:12px;background:var(--panel2)}
+    .batchbar.show{display:flex}
+    .batchbar label{display:flex;align-items:center;gap:.45rem;font-size:.9rem;color:var(--mut);font-weight:600;white-space:nowrap;cursor:pointer}
+    .batchbar .grow{flex:1} .batchbar button{width:auto;margin:0;padding:.6rem .9rem;font-size:.92rem}
+    input[type=checkbox]{width:1.15rem;height:1.15rem;accent-color:#39d98a;cursor:pointer}
+    .job{border:1px solid var(--line);border-radius:14px;padding:.9rem;margin:.55rem 0;background:var(--panel)}
+    .job .hd{display:flex;align-items:flex-start;gap:.6rem}
+    .job .t{font-weight:700}.job .r{color:var(--mut);font-size:.8rem}.job .jid{font-family:ui-monospace,Menlo,monospace;font-size:1.02rem;font-weight:800;color:var(--gold);letter-spacing:.02em;word-break:break-all}.job .jt{font-size:1.04rem;font-weight:700;line-height:1.32;margin:.28rem 0 .12rem;color:#fff}.job .jby{font-size:.8rem;color:var(--mut)}.job .jcode{margin:.5rem 0 .1rem}.job .jcode summary{cursor:pointer;color:#9fd6ff;font-size:.8rem;list-style:none;user-select:none}.job .jcode summary::-webkit-details-marker{display:none}.job .jcode summary:before{content:'▸  show command'}.job .jcode[open] summary:before{content:'▾  hide command'}
+    code{display:block;background:rgba(0,0,0,.3);padding:.5rem .6rem;border-radius:8px;word-break:break-all;font-size:.82rem;color:#d7ecff;margin:.4rem 0;max-height:6.5em;overflow:auto}
+    .appr{background:rgba(60,200,140,.22);border-color:rgba(120,255,190,.5);color:#c6ffe4}.deny{background:rgba(200,80,80,.22);border-color:rgba(255,150,140,.5);color:#ffd7d0}
+    .job button{width:auto;flex:1}.jbtns{display:flex;gap:.5rem}.job .wscount{display:inline-block;font-size:.74rem;font-weight:700;color:#0e3a52;background:#c6ffe4;border-radius:999px;padding:.05rem .55rem;margin-left:.4rem;vertical-align:middle}.job .wsteps{margin:.5rem 0 .2rem}.job .wsteps>summary{cursor:pointer;color:#9fd6ff;font-size:.82rem;list-style:none;user-select:none;font-weight:600}.job .wsteps>summary::-webkit-details-marker{display:none}.job .wsteps>summary:before{content:'\25b8  '}.job .wsteps[open]>summary:before{content:'\25be  '}.job .wsub{border-left:2px solid var(--line);padding:.15rem 0 .15rem .6rem;margin:.45rem 0 .45rem .2rem}.job .wsubt{font-size:.94rem;font-weight:600;color:#eafaff;line-height:1.3}
+    .setup{border:1px solid var(--line);border-radius:16px;background:var(--panel);padding:1.2rem;text-align:center}
+    .setup input{background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--tx);border-radius:10px;padding:.7rem;width:100%;margin:.6rem 0;font-size:1rem}
+    .setup p{color:var(--mut);font-size:.85rem}
+    hr.sep{border:0;border-top:1px solid var(--line);margin:1rem 0 .4rem;opacity:.6}
+    #closed{display:none;position:fixed;inset:0;background:#0a0a0f;z-index:90;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:2rem}
+    #closed.on{display:flex}
+    #closed img{width:96px;height:96px;object-fit:contain;border-radius:50%;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05);box-shadow:0 0 22px 3px rgba(240,194,74,.45);margin-bottom:1.1rem}
+    #closed .t{font-size:1.15rem;font-weight:800;color:#efe6cf;letter-spacing:.02em}
+    #closed .s{color:rgba(255,255,255,.5);font-size:.82rem;margin:.5rem 0 1.6rem;max-width:24rem}
+    #closed button{width:auto;padding:1rem 1.6rem;background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border:0;font-weight:800;font-size:1.05rem;border-radius:14px}
+    #closed .cbusy{display:none;color:#c6ffe4;font-weight:600;margin-top:1rem;align-items:center;gap:.5rem;justify-content:center}
+    #closed .cbusy.on{display:flex}
+  
+.brief{margin:.45rem 0 .3rem;border-left:3px solid var(--gold);padding:.35rem 0 .35rem .6rem}.brief .brow{display:flex;gap:.5rem;font-size:.82rem;line-height:1.45}.brief .k{flex:0 0 6.2rem;color:var(--mut);font-weight:700;letter-spacing:.02em}.brief .k.hot{color:var(--gold)}.brief .v{color:#fff;word-break:break-word}.nobrief{margin:.45rem 0;padding:.4rem .6rem;border-left:3px solid #c66;color:#f0c0c0;font-size:.82rem}
+</style>
+<style id="pcapprovelock-css">
+  /* GATE-UI-approval-feedback  PCLOCK-VERIFY-SENTINEL-v1
+     Injected at the head close tag so it wins on source order against the base style block (which is where
+     patch-gate-ux and patch-gatev2 append their rules). Touches no patcher anchor. */
+  .job.pcsub{opacity:.42;pointer-events:none;position:relative}
+  .job.pcsub:after{content:'';position:absolute;top:.8rem;right:.8rem;width:1.05em;height:1.05em;border:2px solid rgba(255,255,255,.25);border-top-color:#c6ffe4;border-radius:50%;animation:sp .7s linear infinite}
+  #pcresults{margin:.2rem 0 .6rem}
+  .pcres{border:1px solid var(--line);border-radius:14px;padding:.7rem .9rem;margin:.5rem 0;background:var(--panel);font-size:.9rem;line-height:1.42}
+  .pcres .pcjid{font-family:ui-monospace,Menlo,monospace;font-weight:800;font-size:.84rem;opacity:.85;word-break:break-all;margin-bottom:.2rem}
+  .pcres.ok{border-color:rgba(120,255,190,.55);background:rgba(60,200,140,.18);color:#c6ffe4}
+  .pcres.wait{border-color:rgba(255,214,107,.5);background:rgba(255,214,107,.12);color:var(--gold)}
+  .pcres.bad{border-color:rgba(255,140,130,.7);background:rgba(200,60,60,.24);color:#ffd7d0;font-weight:700}
+  /* GATE-BANNER-TRUTH-A-v1 the THIRD state, and deliberately BLUE, not red. No reply reached this
+     page, so nothing is known -- the job may well have run to completion. It must not
+     look like the failure it is not. */
+  .pcres.unknown{border-color:rgba(130,190,255,.75);background:rgba(38,92,150,.30);color:#dceaff;font-weight:700}
+  /* [GATE-UNKNOWN-LOCK-V1] */
+  .pcres.notsent{border-color:rgba(200,200,200,.55);background:rgba(90,90,90,.28);color:#eaeaea;font-weight:700}
+  .job.pcheld{opacity:.62;position:relative}
+  .job.pcheld button{cursor:not-allowed}
+  /* (e) the global button{display:flex;gap:.6rem} makes "(", the count span and ")" three separate
+     flex items, so at 390px the label wraps and the count is orphaned. Make it an inline box again. */
+  .batchbar button,.batchbar.show button{display:inline-block;text-align:center;white-space:nowrap;gap:0;flex:0 1 auto;min-width:0}
+  .batchbar,.batchbar.show{flex-wrap:wrap;row-gap:.45rem}
+  .jbtns{flex-wrap:wrap;row-gap:.45rem}
+  .jbtns button{white-space:nowrap}
+  @media(max-width:430px){
+    .batchbar,.batchbar.show{gap:.4rem}
+    .batchbar label{flex:1 1 100%}
+    .batchbar .grow{display:none}
+    .batchbar button{flex:1 1 auto;padding:.75rem .55rem;font-size:.9rem}
+    .jbtns button{flex:1 1 100%}
+  }
+</style>
+<style id="pcgconnect-css">
+  /* GATE-UI-google-connect-guard  PCGCONNECT-SENTINEL-v1
+     New element appended at the head close tag. Adds only #pcgchip / #pcgbanner rules plus one
+     body top-padding bump to clear the fixed chip. Rewrites no existing selector, so none of the
+     five patchers' CSS anchors move. */
+  body{padding-top:2.5rem}
+  #pcgchip{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:120;display:none;
+    max-width:97vw;padding:.42rem .85rem;border-radius:0 0 13px 13px;font-size:.76rem;font-weight:800;
+    letter-spacing:.01em;text-align:center;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.42);
+    line-height:1.25}
+  #pcgchip.ok{background:rgba(52,196,136,.94);color:#052a1e;border:1px solid rgba(160,255,214,.85)}
+  #pcgchip.bad{background:#c22a26;color:#fff;border:1px solid #ff9d94;animation:pcgpulse 1.3s ease-in-out infinite}
+  @keyframes pcgpulse{0%,100%{opacity:1}50%{opacity:.66}}
+  #pcgbanner{display:none;border:2px solid #ff9d94;background:rgba(196,58,54,.26);color:#ffd7d0;
+    border-radius:14px;padding:.85rem .9rem;margin:.15rem 0 .85rem;text-align:left}
+  #pcgbanner.hard{border-color:#fff;background:rgba(196,40,36,.52);
+    box-shadow:0 0 0 3px rgba(255,124,112,.38)}
+  #pcgbanner .pcgttl{font-weight:800;font-size:1rem;line-height:1.3;margin-bottom:.35rem;color:#fff}
+  #pcgbanner .pcgtxt{font-size:.87rem;line-height:1.48;margin-bottom:.65rem}
+  #pcgbanner button{margin:.1rem 0 0}
+  #pcgmismatch{border:2px solid #fff;background:rgba(196,40,36,.55);color:#fff;font-weight:700;
+    border-radius:12px;padding:.8rem .9rem;margin:.4rem 0;font-size:.88rem;line-height:1.45}
+</style>
+</head>
+<body>
+
+  <div id="closed" class="on">
+    <img src="/assets/brain.png" alt="" onerror="this.style.display='none'">
+    <div class="t" id="closedttl">The Autoclave</div>
+    <div class="s" id="closedsub">Tap the key to open your window: Google, then your passkey, then your jobs.</div>
+    <button id="openbtn" onclick="openFlow()">🔑 Open the Autoclave</button>
+    <div class="cbusy" id="cbusy"><span class="spin"></span><span>Opening…</span></div>
+  </div>
+
+  <div class="brand">
+    <img src="/assets/brain.png" alt="Paracoding logo" onerror="this.style.display='none'">
+    <div class="sub">Paracoding.ai</div>
+    <h1>The Autoclave</h1>
+  </div>
+
+  <div id="setup" class="setup" style="display:none">
+    <p><b>Set up this device</b> — no passkeys registered yet. Enter the one-time setup password to register the first device with its passkey — your PIN, fingerprint, face, or security key. After this, the password is disabled and any new device must be added from this one.</p>
+    <input id="bs" type="password" placeholder="one-time setup password">
+    <button class="primary" onclick="register()">🔐 Set up this device</button>
+    <div id="msg2" style="color:var(--mut);font-size:.85rem;margin-top:.5rem"></div>
+  </div>
+
+  <div id="gatepanel" style="display:none">
+    <div id="loginbar">Logged in as <b id="who"></b> <a onclick="logout()">Log out</a></div>
+    <div id="gstatus" style="color:var(--mut)"></div>
+    <div id="timerbar"></div>
+    <div id="unlockedbar" style="display:none"></div>
+
+    <button id="gbtn" class="primary" style="display:none" onclick="gsignin()">🔗 Connect Google</button>
+    <button id="unlockbtn" class="primary" style="display:none" onclick="doUnlock()">🔓 Unlock with your passkey</button>
+
+    <div id="busy"><span class="spin"></span><span id="busytxt">Working…</span></div>
+    <div id="msg"></div>
+
+    <div id="batchbar" class="batchbar">
+      <label><input type="checkbox" id="selall" checked onchange="toggleAll(this.checked)"> Select All</label>
+      <span class="grow"></span>
+      <button class="appr" onclick="approveSelected()">✅ Approve Selected (<span id="seln">0</span>)</button>
+      <button class="link" onclick="preapproveSelected()">⏳ Pre-approve Selected</button>
+    </div>
+    <div id="jobshint" style="display:none;text-align:center;color:var(--mut);border:1px dashed var(--line);border-radius:12px;padding:1.1rem;margin:.6rem 0;background:rgba(0,0,0,.14);line-height:1.55">🔒 Your approval jobs are hidden.<br><b style="color:#eafaff">Tap 🔓 Unlock above</b> — one passkey check reveals what’s waiting for you.</div>
+    <div id="jobs"></div>
+
+    <div id="pcsbox" style="display:none;margin:.55rem 0">
+      <div class="job">
+        <div class="t">Strain session pastes</div>
+        <div class="r">One connector serves every Cowork chat, so a chat has no identity until you give it one. Minting a key here is what makes a chat actually be that strain.</div>
+        <div id="pcsroles" style="margin:.55rem 0"></div>
+        <div id="pcsout" style="display:none">
+          <div class="r" id="pcsfor" style="margin:.4rem 0"></div>
+          <textarea id="pcstext" readonly style="width:100%;height:11em;background:rgba(0,0,0,.3);color:#d7ecff;border:1px solid var(--line);border-radius:8px;padding:.5rem .6rem;font-family:ui-monospace,Menlo,monospace;font-size:.78rem"></textarea>
+          <div class="r" style="color:var(--gold)">Shown once. Only its hash is stored, so it cannot be recovered later.</div>
+          <div class="jbtns" style="margin-top:.4rem">
+            <button class="primary" style="width:auto;flex:1" onclick="pcsCopy()">Copy paste</button>
+            <button class="link" style="width:auto;flex:1" onclick="pcsDone()">Done</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="link" onclick="pcsToggle()">Strain session pastes</button>
+    <hr class="sep">
+    <button class="link" onclick="window.open('/harness','_blank'); return false;">🍄 Open Flow Hood</button>
+    <button class="link" onclick="addDevice('phone')">➕ Add iPhone / Android (QR)</button>
+    <button class="link" onclick="addDevice('computer')">➕ Add a computer (link)</button>
+    <div id="pairbox" style="display:none;text-align:center;margin:.6rem 0;padding:.8rem;border:1px solid var(--line);border-radius:12px;background:var(--panel)">
+      <div id="qrbox" style="display:none;justify-content:center;margin:.4rem auto;background:#fff;padding:.5rem;border-radius:8px;width:max-content"></div>
+      <div id="pairlink" style="font-size:.78rem;word-break:break-all;color:#eafaff;margin:.5rem 0"></div>
+      <div style="font-size:.78rem;color:var(--mut)">Scan on the new phone (camera), or open this link there. Expires in 5 min.</div>
+    </div>
+  </div>
+
+  <script>
+
+    /* PC-PASSKEY-UX-v1 a cancelled ceremony is reported once, in one place, and it names the
+       cause. Declared here, ABOVE every use: this is a const, and a const read above
+       its declaration is a TDZ ReferenceError that no string count can see. */
+    const PC_PASSKEY_ABORT = 'Passkey check cancelled - nothing was approved and the job is untouched. Windows submits your PIN by itself at 6 digits; an Enter after that hits Cancel in the Windows dialog. Tap again and do not press Enter.';
+    const { startRegistration, startAuthentication } = SimpleWebAuthnBrowser;
+    const CLIENT_ID = '__WA_GOOGLE_CLIENT_ID__';
+    let SESSION_MS = 30 * 60 * 1000;
+    const $ = (id) => document.getElementById(id);
+    const msg = (t) => $('msg').textContent = t;
+    const msg2 = (t) => $('msg2').textContent = t;
+    window.__gtoken=''; window.__godmode=false; window.__unlocked=false; window.__afterGoogle=null;
+    let tokenClient=null; window.__poll=null; window.__refresh=null; window.__cd=null;
+
+    function nextParam(){ try{ const n=new URLSearchParams(location.search).get('next'); return (n && /^\/(?![/\\])[a-zA-Z0-9/_-]*$/.test(n)) ? n : ''; }catch(e){ return ''; } }
+    function gotoNext(){ const n=nextParam(); if(n){ location.href=n; return true; } return false; }
+    function enrollTokenParam(){ try{ return new URLSearchParams(location.search).get('enroll')||''; }catch(e){ return ''; } }
+
+    function showScreen(s){ $('closed').classList.toggle('on', s==='closed'); $('setup').style.display = s==='setup'?'block':'none'; $('gatepanel').style.display = s==='gate'?'block':'none'; }
+    function cbusy(on){ $('cbusy').classList.toggle('on',!!on); $('openbtn').style.display=on?'none':'flex'; }
+    function busy(on, txt){ const b=$('busy'); $('busytxt').textContent=txt||'Working…'; b.style.display=on?'flex':'none'; document.querySelectorAll('#jobs button,.batchbar button').forEach(el=>el.disabled=!!on); }
+    function setG(txt,good){ const el=$('gstatus'); el.textContent = txt?('● '+txt):''; el.style.color=good?'#c6ffe4':'var(--mut)'; }
+    async function jp(u,b){ const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(b||{})}); return {ok:r.ok,status:r.status,data:await r.json().catch(()=>({}))}; }
+
+    function showConnected(email){ window.__godmode=true; setG('Google: '+(email||'connected'),true); $('gbtn').style.display='none'; $('loginbar').style.display='block'; $('who').textContent=email||'you'; }
+    function showDisconnected(){ window.__gtoken=''; window.__godmode=false; $('loginbar').style.display='none'; setG('',false); }
+    async function whoAmI(token){ try{ const r=await fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+token}}); const j=await r.json(); return (j&&j.email)||'you'; }catch(e){ return 'you'; } }
+    async function onGoogle(resp){ if(!(resp&&resp.access_token)){ cbusy(false); setG('Google: no token',false); return; } window.__gtoken=resp.access_token; const email=await whoAmI(resp.access_token); showConnected(email); pushOps(resp); const f=window.__afterGoogle; window.__afterGoogle=null; if(f) f(); }
+    function ensureTokenClient(){ if(tokenClient) return true; if(!CLIENT_ID){ msg('Google client not configured on the server.'); return false; }
+      tokenClient=google.accounts.oauth2.initTokenClient({client_id:CLIENT_ID,scope:'openid email https://www.googleapis.com/auth/cloud-platform',callback:onGoogle,error_callback:(err)=>{ cbusy(false); window.__afterGoogle=null; setG('Google: connect failed',false); $('gbtn').style.display='flex'; showScreen('gate'); msg('Google connect failed — tap Connect Google to retry.'); }}); return true; }
+    function gsignin(){ if(!ensureTokenClient()) return; window.__gtoken=''; window.__afterGoogle=autoUnlock; tokenClient.requestAccessToken({prompt:'consent'}); }
+    function trySilent(){ if(!ensureTokenClient()) return; try{ window.__afterGoogle=null; tokenClient.requestAccessToken({prompt:''}); }catch(e){} }
+    function logout(){ try{ if(window.__gtoken) google.accounts.oauth2.revoke(window.__gtoken); }catch(e){} fetch('/api/ops/end',{method:'POST',credentials:'include'}).catch(()=>{}); closeGate('Logged out. Reopen to start a new window.'); }
+    async function pushOps(resp){ try{ await fetch('/api/ops/token',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({access_token:resp.access_token,expires_in:resp.expires_in||3600})}); }catch(e){}
+      const secs=Math.max(60,(resp.expires_in||3600)-120); if(window.__refresh)clearTimeout(window.__refresh); window.__refresh=setTimeout(()=>{ try{ window.__afterGoogle=null; tokenClient&&tokenClient.requestAccessToken({prompt:''}); }catch(e){} }, secs*1000); }
+
+    /* GATE-STALE-DOM-A-v1 empty state FIRST, then show. The panel is only ever populated by a
+       fetch that just succeeded -- never by whatever the last window painted. */
+    function openFlow(){ pcClearJobsCache(); pcJobsPanelState('loading'); showScreen('gate'); msg('Pick your Google account…'); if(!ensureTokenClient()){ showScreen('closed'); cbusy(false); return; } cbusy(true); window.__gtoken=''; window.__afterGoogle=autoUnlock; try{ tokenClient.requestAccessToken({prompt:''}); }catch(e){ cbusy(false); showScreen('gate'); $('gbtn').style.display='flex'; msg('Tap Connect Google.'); } }
+    async function autoUnlock(){ cbusy(false); try{
+        busy(true,'Passkey…'); let r=await jp('/api/webauthn/unlock/options',{}); if(!r.ok){ busy(false); return showUnlockFallback('unlock: '+(r.data.error||r.status)); }
+        const asr=await startAuthentication(r.data); r=await jp('/api/webauthn/unlock/verify',{response:asr}); busy(false);
+        if(!r.ok) return showUnlockFallback('unlock: '+(r.data.error||r.status));
+        try{ window.__iap = !!(r && r.data && r.data.iap); }catch(e){} onUnlocked(false);
+      }catch(e){ busy(false); showUnlockFallback('Tap to finish with your passkey.'); } }
+    function showUnlockFallback(m){ $('unlockbtn').style.display='flex'; msg(m||'Tap to finish with your passkey.'); }
+    async function doUnlock(){ $('unlockbtn').style.display='none'; try{ busy(true,'Passkey…'); let r=await jp('/api/webauthn/unlock/options',{}); if(!r.ok){ busy(false); return showUnlockFallback('unlock: '+(r.data.error||r.status)); } const asr=await startAuthentication(r.data); r=await jp('/api/webauthn/unlock/verify',{response:asr}); busy(false); if(!r.ok) return showUnlockFallback('unlock: '+(r.data.error||r.status)); try{ window.__iap = !!(r && r.data && r.data.iap); }catch(e){} onUnlocked(false); }catch(e){ busy(false); showUnlockFallback('unlock error: '+e); } }
+
+    function setUnlocked(on){ window.__unlocked=on; $('unlockbtn').style.display=on?'none':'flex'; $('unlockedbar').style.display=on?'block':'none'; const jh=$('jobshint'); if(jh) jh.style.display=on?'none':'block'; }
+    function onUnlocked(fromReload){ setUnlocked(true); $('gbtn').style.display='none'; showScreen('gate');
+      if(!fromReload){ try{ sessionStorage.setItem('pc_unlockAt', String(Date.now())); }catch(e){} }
+      if(gotoNext()) return; msg(''); startCountdown(); load(); startPoll(); }
+
+    function startCountdown(){ let at=0; try{ at=Number(sessionStorage.getItem('pc_unlockAt'))||0; }catch(e){}
+      if(!at || (Date.now()-at)>=SESSION_MS){ at=Date.now(); try{ sessionStorage.setItem('pc_unlockAt',String(at)); }catch(e){} }
+      window.__unlockAt=at; $('timerbar').style.display='block'; if(window.__cd) clearInterval(window.__cd);
+      const t=()=>{ const left=SESSION_MS-(Date.now()-window.__unlockAt); if(left<=0){ closeGate('Your session window ended. Reopen to connect and approve again.'); return; }
+        const tot=Math.floor(left/1000), h=Math.floor(tot/3600), m=Math.floor((tot%3600)/60), s=tot%60, warn=left<5*60000;
+        $('timerbar').innerHTML='🔓 Unlocked · <span'+(warn?' class="warn"':'')+'>'+(h?h+':'+(m<10?'0':'')+m:m)+':'+(s<10?'0':'')+s+'</span> left'; };
+      t(); window.__cd=setInterval(t,1000); }
+    function stopTimers(){ if(window.__poll){clearInterval(window.__poll);window.__poll=null;} if(window.__cd){clearInterval(window.__cd);window.__cd=null;} if(window.__refresh){clearTimeout(window.__refresh);window.__refresh=null;} }
+    /* ---- GATE-STALE-DOM-A-v1 the jobs panel may never show anything it did not just receive -------
+       closeGate() left #jobs painted and openFlow() re-showed #gatepanel without
+       re-rendering, so the panel kept the PREVIOUS authenticated paint. load() also had
+       no catch around its fetch, so a mobile 'TypeError: Load failed' left that stale
+       paint up while the 4s poll failed just as silently. Three states, deliberately
+       different to look at, so a queue we could not READ can never be mistaken for a
+       queue that is EMPTY:
+         'loading' -> we are asking, nothing below is confirmed
+         'error'   -> we could not read it, jobs may be waiting and are not shown
+         'closed'  -> blank, the window is shut
+       A confirmed-empty queue is painted by renderJobs() and says so in words. */
+    function pcJobsPanelState(state, detail){
+      var bar=document.getElementById('batchbar'); if(bar) bar.classList.remove('show');
+      var sn=document.getElementById('seln'); if(sn) sn.textContent='0';
+      var sa=document.getElementById('selall'); if(sa) sa.checked=false;
+      var el=document.getElementById('jobs'); if(!el) return;
+      if(state==='closed'){ el.innerHTML=''; return; }
+      if(state==='loading'){ el.innerHTML='<div class="job"><div class="r">Checking with the server for jobs awaiting approval\u2026 nothing here is confirmed yet.</div></div>'; return; }
+      var d=String(detail||'').replace(/[<>&]/g,' ').slice(0,160);
+      el.innerHTML='<div class="pcres bad"><b>QUEUE UNKNOWN \u2014 this list is NOT up to date.</b><br>The gate could not read the pending queue'+(d?(' ('+d+')'):'')+'. This is NOT the same as an empty queue: there may be jobs waiting for your approval that are not shown here. Retry, or reopen the window, before you stage anything.</div>';
+    }
+    /* the DOM is not the only stale copy: pc_recent_jobs survives a closed window and is
+       replayed into the next render by load(). Drop it whenever the window shuts or reopens. */
+    function pcClearJobsCache(){
+      try{ sessionStorage.removeItem('pc_recent_jobs'); }catch(e){}
+      var sn=document.getElementById('seln'); if(sn) sn.textContent='0';
+    }
+    function closeGate(reason){ pcJobsPanelState('closed'); pcClearJobsCache(); setUnlocked(false); window.__godmode=false; window.__gtoken=''; stopTimers(); try{ sessionStorage.removeItem('pc_unlockAt'); }catch(e){} $('timerbar').style.display='none'; showDisconnected(); $('closedsub').textContent=reason||'Your session window ended. Reopen to connect and approve again.'; cbusy(false); showScreen('closed'); }
+    function reopen(){ openFlow(); }
+
+    async function addDevice(kind){ try{ const r=await jp('/api/webauthn/enroll/link',{}); if(!r.ok) return msg('add device: '+(r.data.error||r.status)+(r.status===401?' - unlock first':'')); const url=r.data.url; $('pairlink').textContent=url; const qb=$('qrbox'); qb.innerHTML=''; $('pairbox').style.display='block'; if(kind==='phone' && window.QRCode){ new QRCode(qb,{text:url,width:220,height:220,correctLevel:QRCode.CorrectLevel.M}); qb.style.display='flex'; msg('Scan this on the new phone with its camera.'); } else { qb.style.display='none'; msg('Open this link on the computer you want to add.'); } }catch(e){ msg('add device error: '+e); } }
+    async function pairEnroll(tok){ try{ showScreen('gate'); msg('Pairing this device — your passkey is next: PIN, fingerprint, or face...'); let r=await jp('/api/webauthn/enroll/options',{enrollToken:tok}); if(!r.ok) return msg('pair failed: '+(r.data.error||r.status)); const att=await startRegistration(r.data); r=await jp('/api/webauthn/enroll/verify',{enrollToken:tok,response:att}); if(r.ok){ msg('Paired! Reloading...'); setTimeout(function(){ location.href=location.pathname; }, 1400); } else msg('pair failed: '+(r.data.error||r.status)); }catch(e){ msg('pair error: '+e); } }
+
+    async function init(){
+      const _et=enrollTokenParam(); if(_et){ return pairEnroll(_et); }
+      let registered=true, setupEnabled=false;
+      try{ const r=await fetch('/api/webauthn/status',{credentials:'include'}); const s=await r.json(); try{ window.__iap = !!s.iap; if (window.__pcgsync) window.__pcgsync(); }catch(e){} registered=!!s.registered; setupEnabled=!!s.setupEnabled; if(s.sessionMin>0) SESSION_MS=s.sessionMin*60*1000; }catch(e){}
+      if(!registered){ showScreen('setup'); if(!setupEnabled) msg2('Setup password not enabled on the server yet (WA_BOOTSTRAP_SECRET).'); return; }
+      try{ const r=await fetch('/api/webauthn/pending',{credentials:'include'}); if(r.ok){ onUnlocked(true); return; } }catch(e){}
+      showScreen('closed');
+    }
+    function startPoll(){ if(window.__poll) clearInterval(window.__poll); window.__poll=setInterval(()=>{ if($('busy').style.display!=='flex' && !document.querySelector('.jcode[open]')) load(); }, 4000); }
+
+    function register(){ (async()=>{ try{ const bs=$('bs').value; let r=await jp('/api/webauthn/register/options',{bootstrapSecret:bs}); if(!r.ok) return msg2('setup: '+(r.data.error||r.status)); const att=await startRegistration(r.data); r=await jp('/api/webauthn/register/verify',{bootstrapSecret:bs,response:att}); if(r.ok){ msg2('Device registered ✅'); closeGate('Registered. Tap the key to open your first window.'); } else msg2('setup: '+(r.data.error||r.status)); }catch(e){ msg2('setup error: '+e); } })(); }
+
+    function getRecentJobs() { try { return JSON.parse(sessionStorage.getItem('pc_recent_jobs')||'[]'); }catch(e){ return []; } }
+    function addRecentJob(id) {
+      let j = getRecentJobs(); j = j.filter(x => x !== id); j.push(id);
+      if(j.length > 10) j.shift();
+      try{ sessionStorage.setItem('pc_recent_jobs', JSON.stringify(j)); }catch(e){}
+    }
+    
+    function updateSelN(){ $('seln').textContent=document.querySelectorAll('.jsel:checked').length; }
+    function toggleAll(on){ document.querySelectorAll('.jsel').forEach(c=>c.checked=on); updateSelN(); }
+    async function elevate(jobId,action){ try{ busy(true,jobId?'Passkey for this job…':'Passkey…'); let r=await jp('/api/webauthn/elevate/options',{jobId:jobId||'',action:action||'approve'}); if(!r.ok){ busy(false); msg('Passkey: '+(r.data.error||r.status)); return false; } const asr=await startAuthentication(r.data); r=await jp('/api/webauthn/elevate/verify',{response:asr,jobId:jobId||'',action:action||'approve'}); busy(false); if(!r.ok){ msg('Passkey: '+(r.data.error||r.status)); return false; } return true; }catch(e){ busy(false); msg(PC_PASSKEY_ABORT); return false; } }
+    async function approveSelected(){ const ids=[...document.querySelectorAll('.jsel:checked')].map(c=>c.value);
+      if(!ids.length) return msg('Nothing selected. Tick jobs (or Select All) first.');
+      if(window.__godmode&&!window.__gtoken) return msg('⚠️ Reconnecting Google — tap a job to approve.');
+      let ok=0, fail=0; for(let i=0;i<ids.length;i++){ const r=await act(ids[i],'approve',true); if(r) ok++; else fail++; }
+      msg('Batch done — '+ok+' approved'+(fail?', '+fail+' need attention':'')+'.'); load(); }
+    async function preapprove(jobId){ try{
+      if(window.__godmode&&!window.__gtoken){ msg('⚠️ Reconnecting Google…'); trySilent(); return false; }
+      busy(true,'Pre-approving…');
+      const r=await jp('/api/webauthn/preapprove',{jobId,googleAccessToken:window.__gtoken||''});
+      busy(false); const d=r.data||{};
+      if(r.ok){ msg('Job '+jobId+' pre-approved ⏳ — it will run later when fired'+(d.expiry?' (expires '+new Date(d.expiry).toLocaleString()+')':'')+'.'); load(); return true; }
+      if(r.status===401){ closeGate('Session expired. Reopen to connect and approve again.'); return false; }
+      msg('pre-approve failed: '+(d.error||r.status)); return false;
+    }catch(e){ busy(false); msg('pre-approve error: '+e); return false; } }
+    async function preapproveSelected(){ const ids=[...document.querySelectorAll('.jsel:checked')].map(c=>c.value);
+      if(!ids.length) return msg('Nothing selected. Tick jobs (or Select All) first.');
+      if(window.__godmode&&!window.__gtoken) return msg('⚠️ Connect Google first so pre-approvals are attributed to you.');
+      let ok=0, fail=0;
+      busy(true,'Pre-approving '+ids.length+' job'+(ids.length>1?'s':'')+'…');
+      for(const id of ids){ const r=await jp('/api/webauthn/preapprove',{jobId:id,googleAccessToken:window.__gtoken||''}); if(r.ok) ok++; else if(r.status===401){ setUnlocked(false); break; } else fail++; }
+      busy(false);
+      msg('Batch done — '+ok+' pre-approved'+(fail?', '+fail+' need attention':'')+'.'); load(); }
+    async function load(){
+      if(!window.__unlocked) return;
+      /* GATE-STALE-DOM-A-v1 every exit from here used to `return` with the previous render still on
+         screen. A rejected fetch (mobile 'TypeError: Load failed'), a non-401 error status,
+         an unreadable body and an unexpected shape now all repaint QUEUE UNKNOWN. */
+      var r=null;
+      try{ r=await fetch('/api/webauthn/pending',{credentials:'include'}); }
+      catch(e){ pcJobsPanelState('error','network: '+((e&&e.message)||e)); return; }
+      if(!r.ok){ if(r.status===401){ pcClearJobsCache(); closeGate('Session expired. Reopen to connect and approve again.'); } else { pcJobsPanelState('error','the server replied '+r.status); } return; }
+      let jobs=null;
+      try{ jobs=await r.json(); }
+      catch(e){ pcJobsPanelState('error','unreadable reply from the server'); return; }
+      if(!Array.isArray(jobs)){ pcJobsPanelState('error','unexpected reply shape from the server'); return; }
+      const rj = getRecentJobs();
+      for (const jid of rj) {
+        if (!jobs.find(x => x.job_id === jid)) {
+           try {
+             const rr = await fetch('/api/webauthn/job/' + jid, {credentials:'include'});
+             if (rr.ok) {
+               const j = await rr.json();
+               if (j.status === 'executed' || j.status === 'executing' || j.status === 'pending') {
+                 jobs.push(j);
+               }
+             }
+           } catch(e){}
+        }
+      }
+      renderGrouped(jobs);
+    }
+    
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && window.__unlocked) load(); });
+    window.addEventListener('focus', () => { if (window.__unlocked) load(); });
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+    function friendlyRole(r){ if(!r) return 'the fleet'; var mp={'fleet-archivist':'Fleet Archivist','fleet-mechanic':'Fleet Mechanic','fleet-engineer':'Fleet Engineer','fleet-inspector':'Fleet Inspector','fleet-analyst':'Fleet Analyst','fleet-drafter':'Fleet Drafter','fleet-librarian':'Fleet Librarian','fleet-herald':'Fleet Herald','fleet-courier':'Fleet Courier','work-runner':'Work Runner','human_operator':'You'}; return mp[r] || String(r).replace(/^fleet-/,'Fleet ').replace(/\b\w/g,function(c){return c.toUpperCase();}); }
+    function jobBrief(j){
+      var cmd=(j.arguments&&(j.arguments.command||j.arguments.cmd))||'';
+      var rows=[];
+      String(cmd).split('\n').forEach(function(l){
+        var m=l.match(/^[ \t]*#[ \t]*([A-Z][A-Z ]{2,14}):[ \t]*(.*)$/);
+        if(m && m[1].trim()!=='DESC') rows.push([m[1].trim(), m[2].trim()]);
+      });
+      if(!rows.length) return '<div class="nobrief">No brief supplied by the staging agent. '
+        + 'Read the full command below before approving.</div>';
+      return '<div class="brief">'+rows.map(function(r){
+        var k=r[0], v=esc(r[1]);
+        var cls = (k==='TRAFFIC'||k==='REVERSIBLE') ? ' class="k hot"' : ' class="k"';
+        return '<div class="brow"><span'+cls+'>'+esc(k)+'</span><span class="v">'+v+'</span></div>';
+      }).join('')+'</div>';
+    }
+    function jobTitle(j){ var cmd=(j.arguments&&(j.arguments.command||j.arguments.cmd))||''; var mm=String(cmd).match(/^[ \t]*#DESC:[ \t]*(.+)$/m); if(mm) return mm[1].trim(); if(j.description) return String(j.description); return String(j.command_type||'job').replace(/[_-]+/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase();}); }
+    function jobsByWorkstream(jobs){ var groups={}, order=[];
+      for(var i=0;i<jobs.length;i++){ var j=jobs[i]; var w=((j.workstream==null?'':j.workstream)+'').trim()||'Ungrouped';
+        if(!groups[w]){ groups[w]={ workstream:w, jobs:[] }; order.push(w); } groups[w].jobs.push(j); }
+      return order.map(function(w){ return groups[w]; }); }
+    async function actGroup(ids,action){ if(!ids||!ids.length) return false;
+      if(action==='approve'&&window.__godmode&&!window.__gtoken){ msg('\u26a0\ufe0f Reconnecting Google\u2026'); trySilent(); return false; }
+      let ok=0, fail=0; for(let i=0;i<ids.length;i++){ const r=await act(ids[i],action,true); if(r) ok++; else fail++; }
+      msg('Workstream '+action+' \u2014 '+ok+' ok'+(fail?', '+fail+' need attention':'')+'.'); load(); return fail===0; }
+    async function preapproveGroup(ids){ if(!ids||!ids.length) return false;
+      let ok=0, fail=0; for(let i=0;i<ids.length;i++){ const r=await preapprove(ids[i]); if(r) ok++; else fail++; }
+      msg('Workstream pre-approved \u2014 '+ok+' ok'+(fail?', '+fail+' need attention':'')+'.'); load(); return fail===0; }
+    function renderGrouped(payload){ const el=$('jobs'); const bar=$('batchbar');
+      var jobs = Array.isArray(payload) ? payload : ((payload && (payload.jobs || payload.pending)) || []);
+      el.innerHTML='';
+      if(!jobs || !jobs.length){ el.innerHTML='<div class="job"><div class="r">No jobs awaiting approval.</div></div>'; bar.classList.remove('show'); $('selall').checked=true; updateSelN(); return; }
+      bar.classList.add('show');
+      var groups = (payload && Array.isArray(payload.groups) && payload.groups.length) ? payload.groups : jobsByWorkstream(jobs);
+      for(const grp of groups){ const gjobs=grp.jobs||[]; if(!gjobs.length) continue;
+        const ids=gjobs.map(function(j){ return j.job_id; });
+        const d=document.createElement('div'); d.className='job';
+        const hd=document.createElement('div'); hd.className='hd';
+        const cb=document.createElement('input'); cb.type='checkbox'; cb.className='wsel'; cb.checked=true;
+        cb.onchange=function(){ d.querySelectorAll('.jsel').forEach(function(x){ x.checked=cb.checked; }); updateSelN(); };
+        const meta=document.createElement('div'); meta.style.flex='1';
+        const summary = grp.summary ? String(grp.summary) : jobTitle(gjobs[0]);
+        var subs='';
+        for(var k=0;k<gjobs.length;k++){ var sj=gjobs[k];
+          subs+='<div class="wsub"><input type="checkbox" class="jsel" value="'+esc(sj.job_id)+'" checked style="display:none">'
+              + '<div class="wsubt">'+esc(jobTitle(sj))+'</div>'
+              + '<div class="jby">'+esc(sj.job_id)+' \u00b7 from '+esc(friendlyRole(sj.staged_by))+'</div>'
+              + '<details class="jcode"><summary></summary><code>'+esc(JSON.stringify(sj.arguments,null,1))+'</code></details></div>'; }
+        meta.innerHTML='<div class="jid">'+esc(grp.workstream)+'<span class="wscount">'+ids.length+' step'+(ids.length>1?'s':'')+'</span></div>'
+          + '<div class="jt">'+esc(summary)+'</div>'
+          + '<div class="jby">One consolidated approval for the '+esc(grp.workstream)+' workstream.</div>'
+          + '<details class="wsteps"'+(ids.length>1?'':' open')+'><summary>show the '+ids.length+' step'+(ids.length>1?'s':'')+' this covers</summary>'+subs+'</details>';
+        hd.appendChild(cb); hd.appendChild(meta); d.appendChild(hd);
+        const bt=document.createElement('div'); bt.className='jbtns';
+        const a=document.createElement('button'); a.className='appr'; a.textContent='\u2705 Approve workstream'; a.onclick=function(){ return actGroup(ids,'approve'); };
+        const pa=document.createElement('button'); pa.className='link'; pa.textContent='\u23f3 Pre-approve'; pa.onclick=function(){ return preapproveGroup(ids); };
+        const n=document.createElement('button'); n.className='deny'; n.textContent='\u26d4 Deny'; n.onclick=function(){ return actGroup(ids,'deny'); };
+        bt.appendChild(a); bt.appendChild(pa); bt.appendChild(n); d.appendChild(bt); el.appendChild(d); }
+      $('selall').checked=true; updateSelN();
+    }
+    function renderJobs(jobs){ const el=$('jobs'); const bar=$('batchbar'); el.innerHTML='';
+      const pendingJobs = jobs.filter(j => j.status === 'pending' || !j.status);
+      if(!pendingJobs.length){ el.innerHTML='<div class="job"><div class="r"><b>No jobs awaiting approval.</b><br>Confirmed empty by the server just now.</div></div>'; /* GATE-STALE-DOM-A-v1 confirmed-empty, and never the same words as QUEUE UNKNOWN */ bar.classList.remove('show'); $('selall').checked=true; updateSelN(); } else { bar.classList.add('show'); }
+      for(const j of jobs){ const d=document.createElement('div'); d.className='job';
+        const hd=document.createElement('div'); hd.className='hd';
+        const isPending = j.status === 'pending' || !j.status;
+        const isExecuting = j.status === 'executing';
+        const isExecuted = j.status === 'executed';
+        if (isPending) {
+          const cb=document.createElement('input'); cb.type='checkbox'; cb.className='jsel'; cb.value=j.job_id; cb.checked=true; cb.onchange=updateSelN;
+          hd.appendChild(cb);
+        }
+        const meta=document.createElement('div'); meta.style.flex='1'; 
+        meta.innerHTML='<div class="jid">'+esc(j.job_id)+'</div><div class="jt">'+esc(jobTitle(j))+'</div><div class="jby">from '+esc(friendlyRole(j.staged_by))+'</div>'+jobBrief(j)+'<details class="jcode"><summary></summary><code>'+esc(JSON.stringify(j.arguments,null,1))+'</code></details><div class="r">'+ (isExecuting ? ' — <b>Executing...</b>' : (isExecuted ? ' — <b>Executed</b> (exit ' + j.exit_code + ')' : '')) +'</div>';
+        if (isExecuted && j.stdout_tail) {
+           meta.innerHTML += '<code style="background:rgba(20,40,60,.8);color:#a8e6cf">' + j.stdout_tail.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</code>';
+        }
+        if (isExecuted && j.stderr_tail) {
+           meta.innerHTML += '<code style="background:rgba(60,20,20,.8);color:#ffb3b3">' + j.stderr_tail.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</code>';
+        }
+        hd.appendChild(meta); d.appendChild(hd);
+        if (isPending) {
+          const bt=document.createElement('div'); bt.className='jbtns';
+          const a=document.createElement('button'); a.className='appr'; a.textContent='✅ Approve'; a.onclick=()=>act(j.job_id,'approve');
+          const pa=document.createElement('button'); pa.className='link'; pa.textContent='⏳ Pre-approve'; pa.onclick=()=>preapprove(j.job_id);
+          const n=document.createElement('button'); n.className='deny'; n.textContent='⛔ Deny'; n.onclick=()=>act(j.job_id,'deny');
+          bt.appendChild(a); bt.appendChild(pa); bt.appendChild(n); d.appendChild(bt);
+        }
+        el.appendChild(d); }
+      if (pendingJobs.length) { $('selall').checked=true; updateSelN(); }
+    }
+    async function postConfirm(jobId,action,assertion,dangerConfirmed){ const body={jobId,action,googleAccessToken:window.__gtoken||''}; if(assertion)body.response=assertion; if(dangerConfirmed)body.dangerConfirmed=true; const rr=await fetch('/api/webauthn/confirm/verify',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)}); return {status:rr.status,data:await rr.json().catch(()=>({}))}; }
+    async function act(jobId,action,quiet){ try{
+      if(action==='approve'&&window.__godmode&&!window.__gtoken){ msg('⚠️ Reconnecting Google…'); trySilent(); return false; }
+      addRecentJob(jobId);
+      busy(true,action==='approve'?'Running as you…':'Denying…');
+      let res=await postConfirm(jobId,action,null,false);
+      if(res.status===428&&res.data.needFaceID){ busy(false); if(!confirm('⚠️ DESTRUCTIVE — runs as YOU:\n\n'+(res.data.command||'')+'\n\nRun it?')){ msg('cancelled'); return false; } const e=await elevate(jobId,action); if(!e) return false; busy(true,'Running as you…'); res=await postConfirm(jobId,action,null,false); }
+      busy(false); const d=res.data||{}; const good=(res.status>=200&&res.status<300);
+      if(!quiet){ if(good){ let line='Job '+jobId+' '+action+' ✅'; if(d.mode==='godmode') line+=' — RAN AS '+d.ran_as+' (exit '+d.exit_code+')'+(d.stdout?'\n'+d.stdout:'')+(d.exit_code!==0&&d.stderr?'\n'+d.stderr:''); else if(d.mode) line+=' ('+d.mode+')'; msg(line); }
+        else if(res.status===401){ closeGate('Session expired. Reopen to connect and approve again.'); }
+        else msg('failed: '+(d.error||res.status)); load(); }
+      return good;
+    }catch(e){ busy(false); if(!quiet) msg('confirm error: '+e); return false; } }
+
+    // ---- strain session pastes (PC-SESSION-PANEL-V1) ----
+    var pcsKey = '';
+    function pcsToggle(){
+      var b = $('pcsbox');
+      if (b.style.display === 'none') { b.style.display = 'block'; pcsRoles(); }
+      else { b.style.display = 'none'; }
+    }
+    function pcsDone(){ $('pcsout').style.display = 'none'; $('pcstext').value = ''; pcsKey = ''; }
+    async function pcsRoles(){
+      var host = $('pcsroles');
+      host.textContent = 'loading...';
+      var r = await fetch('/api/sessions/roles', { credentials: 'include' });
+      if (!r.ok) {
+        if (r.status === 401) { closeGate('Session expired. Reopen to connect and approve again.'); return; }
+        host.textContent = 'could not load roles (' + r.status + ')'; return;
+      }
+      var d = await r.json().catch(function(){ return {}; });
+      var list = (d && d.roles) || [];
+      host.textContent = '';
+      if (!list.length) { host.textContent = 'no pasteable strains'; return; }
+      var note = document.createElement('div');
+      note.className = 'r';
+      note.textContent = d.enforcing
+        ? 'Enforcing: a chat with no key gets no tools.'
+        : 'NOT enforcing yet: unbound chats still work. Set PC_SESSION_ENFORCE=1 when you are ready.';
+      host.appendChild(note);
+      for (var i = 0; i < list.length; i++) {
+        (function(role){
+          var b = document.createElement('button');
+          b.className = 'link';
+          b.style.marginTop = '.35rem';
+          b.textContent = role;
+          b.onclick = function(){ pcsMint(role, b); };
+          host.appendChild(b);
+        })(list[i].role);
+      }
+    }
+    async function pcsMint(role, btn){
+      btn.disabled = true; var was = btn.textContent; btn.textContent = 'minting ' + role + '...';
+      var r = await jp('/api/sessions/mint', { role: role, label: 'autoclave' });
+      btn.disabled = false; btn.textContent = was;
+      if (!r.ok) {
+        if (r.status === 401) { closeGate('Session expired. Reopen to connect and approve again.'); return; }
+        msg('mint failed: ' + ((r.data && r.data.error) || r.status)); return;
+      }
+      pcsKey = (r.data && r.data.key) || '';
+      if (!pcsKey) { msg('mint returned no key'); return; }
+      $('pcsfor').textContent = 'Paste this into a NEW Cowork chat to make it ' + role + '.';
+      $('pcstext').value = pcsText(role, pcsKey);
+      $('pcsout').style.display = 'block';
+      $('pcstext').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    function pcsText(role, key){
+      return [
+        'You are ' + role.toUpperCase() + ' in the operator\'s Paracoding.AI fleet, running as a Cowork',
+        'session on the Max plan. Read this whole brief before your first tool call.',
+        '',
+        'PC-SESSION-KEY: ' + key,
+        '',
+        'IDENTITY -- THIS IS THE PART THAT IS NOT OBVIOUS.',
+        'MCP connectors in Claude are ACCOUNT-level, not chat-level. The same connector serves',
+        'every Cowork chat, so without the key above every chat resolves to the same role and',
+        'all of them look like fleet-archivist. Pass the key as the "agent" argument on EVERY',
+        'tool call and you are ' + role + ': staged_by, journal attribution, agents/' + role + '/',
+        'lake scoping and your chat history all follow from it.',
+        '',
+        'FIRST THING YOU DO: call whoami with agent set to the key. If it does not come back',
+        '' + role + ', STOP and tell the operator. Do not work under the wrong identity.',
+        '',
+        'The role is resolved from the key on the SERVER. Editing this text to name a',
+        'different strain does nothing -- a role name is not a key.',
+        '',
+        'LAWS -- these are how you avoid doing real damage:',
+        '  * ANY strain may stage, and several jobs can wait in the gate at once.',
+        '    Supersede keys on staged_by|command_type. staged_by is your RESOLVED ROLE,',
+        '    so a different role cannot clobber you -- but two chats of the SAME role',
+        '    sharing a command_type WILL silently destroy each other. Newest wins, it',
+        '    fires on ANY load of the pending list rather than on approval, and it writes',
+        '    no journal entry. Stage with stage_privileged_job and a DISTINCT command_type',
+        '    per stream (e.g. run_cmd my-stream). Check list_pending_confirm first anyway.',
+        '  * There is NO delete tool anywhere in this fleet. A stray lake write cannot be',
+        '    undone by you or anyone. Write only to files you were asked to produce.',
+        '  * Never print a secret. A document id from oauth_tokens IS a live bearer token.',
+        '    Counts and shapes only.',
+        '  * Use `gcloud storage`, NEVER `gsutil` -- gsutil ignores the injected approver',
+        '    token, falls back to a service account with no access, and dies 403.',
+        '  * THE GATE UI LIES. Always read_job_log. Exit 0 does not prove a fix landed, and a',
+        '    browser fetch timeout renders as REFUSED on a job that actually ran.',
+        '  * A work item records what someone INTENDED when it was written, not what is true',
+        '    now. Check the actual bytes before you believe any status, including "done".',
+        '',
+        'ORIENT: read shared/fleet/LAWS.md, then shared/state/advisor-state.md, then',
+        'list_work_items with role=' + role + ' and read the PAYLOADS -- they carry the detail.',
+        '',
+        'Verify before you claim. Delegate heavy reading to subagents (forbid them lake writes',
+        'and staging). Say plainly when something is wrong, including when it is your own work.'
+      ].join('\n');
+    }
+    function pcsCopy(){
+      var t = $('pcstext');
+      t.select(); t.setSelectionRange(0, 999999);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t.value).then(function(){ msg('paste copied'); },
+                                                    function(){ msg('select and copy manually'); });
+      } else { try { document.execCommand('copy'); msg('paste copied'); } catch (e) { msg('select and copy manually'); } }
+    }
+    init();
+  </script>
+<script id="pcapprovelock">
+/* ===== GATE-UI-approval-feedback  PCLOCK-VERIFY-SENTINEL-v1 =========================
+   Injected at the body close tag, so this is the LAST script in the document -- every one of the
+   five in-chain patchers edits the INTERIOR of the main inline script block, none of them
+   append after it. At the time this runs, patch-gate-batch's elevate(),
+   patch-preapprove's preapprove()/preapproveSelected() and patch-gatev2's
+   renderGrouped()/actGroup()/preapproveGroup() are all defined.
+
+   It WRAPS the page's own top-level function declarations (writable properties of the
+   global object in a classic script) instead of editing them, so the four/five patchers
+   that rewrite this file's interior cannot break it and it cannot break them.
+
+   (a) optimistic lock  (b) truthful banner  (c) authoritative re-render
+   (d) terminal-status watch  (e) mobile layout lives in pcapprovelock-css
+   =================================================================================== */
+(function(){
+  'use strict';
+  if (window.__pclock) return;
+  window.__pclock = true;
+
+  /* PCLOCK-CALIB-v2: a chain deploy takes ~2 min and the executor has a ~3-4 min hard timeout, so a
+     60s watch window abandoned healthy jobs before they finished and left them stuck on amber.
+     Watch for 10 minutes instead. */
+  var POLL_MS = 2500, POLL_MAX = 240;  /* 10 min of watching before we stop and say so */
+  /* Terminal states. Anything not listed is treated as "still working" -> amber, never green. */
+  var TERM = {executed:1, completed:1, denied:1, security_blocked:1, quarantined:1, expired:1, superseded:1, fire_failed:1, failed:1, blocked:1, refused:1};
+  /* Terminal states that mean IT DID NOT RUN (or ran and failed). Shown RED and loud. */
+  var BAD  = {denied:1, security_blocked:1, quarantined:1, expired:1, superseded:1, fire_failed:1, failed:1, blocked:1, refused:1};
+  /* Terminal SUCCESS: the server says the job ran to completion. exit_code decides green vs red. */
+  var DONE = {executed:1, completed:1};
+  /* IN PROGRESS: the server has taken the job and is working on it. Amber, and KEEP POLLING.
+     A normal job passes through confirmed -> executing on its way to executed, so none of these
+     may ever resolve to "need attention" -- that is the calibration bug this block fixes. */
+  var INPROGRESS = {confirmed:1, executing:1, running:1, started:1, accepted:1, queued:1, preapproved:1};
+
+  var inflight = {};   /* job_id -> 1 while a POST for it is outstanding */
+  var res = {};        /* job_id -> {cls:'ok'|'wait'|'bad', text:'...'} */
+  var order = [];      /* stable display order for the result strip */
+
+  function $i(id){ return document.getElementById(id); }
+  function say(t){ var m = $i('msg'); if (m) m.textContent = t; }
+  function esc2(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function anyInflight(){ for (var k in inflight){ if (inflight[k]) return true; } return false; }
+
+  function cardOf(id){
+    var list = document.querySelectorAll('.jsel'), i;
+    for (i=0;i<list.length;i++){ if (list[i].value === String(id)) return list[i].closest('.job'); }
+    return null;
+  }
+  function lockCard(id, on){
+    var card = cardOf(id); if (!card) return;
+    if (on){ card.classList.add('pcsub'); card.setAttribute('aria-busy','true'); }
+    else   { card.classList.remove('pcsub'); card.removeAttribute('aria-busy'); }
+    var b = card.querySelectorAll('button,input'), i;
+    for (i=0;i<b.length;i++) b[i].disabled = !!on;
+  }
+  function lockAll(on){
+    var b = document.querySelectorAll('.batchbar button, #jobs button'), i;
+    for (i=0;i<b.length;i++) b[i].disabled = !!on;
+    var bb = $i('batchbar');
+    if (bb){ if (on) bb.setAttribute('aria-busy','true'); else bb.removeAttribute('aria-busy'); }
+  }
+  /* ===== [GATE-UNKNOWN-LOCK-V1] ==================================================================
+     THE RE-APPROVE HOLD. A job whose outcome this page does not know must not be
+     re-approvable from this page, because a re-approval is a second execution on one
+     human intent. The hold is taken in mark() and re-applied here after every render:
+     reloadAuthoritative() calls the page's own load(), which rebuilds #jobs from
+     /api/webauthn/pending -- and a job that is EXECUTING is still listed as pending, so
+     without this the operator gets a live Approve button under the word UNKNOWN.
+     A MutationObserver is used rather than a hook on one render function because this
+     file has two render paths (renderJobs and renderGrouped) and has changed shape
+     between builds; the DOM is the one thing both of them agree on.
+     ================================================================================ */
+  var pcHold = {};
+  var PC_DEADLINE_MS = 330000;   /* > the control plane's own 300s ceiling, then we give up and SAY SO */
+  function pcLikelySent(){
+    /* The ONLY defensible 'it never left' signal available in a browser. Anything else --
+       including a bare TypeError -- is reported as SENT, i.e. unknown, i.e. do not retry. */
+    try { return (navigator && navigator.onLine === false) ? false : true; } catch(e){ return true; }
+  }
+  function pcDeadline(p, ms){
+    return new Promise(function(resolve, reject){
+      var done = false;
+      var t = setTimeout(function(){
+        if (done) return; done = true;
+        reject(new Error('no reply from the server within ' + Math.round(ms/1000) + 's'));
+      }, ms);
+      Promise.resolve(p).then(function(v){ if (done) return; done = true; clearTimeout(t); resolve(v); },
+                              function(e){ if (done) return; done = true; clearTimeout(t); reject(e); });
+    });
+  }
+  var pcHeldApplied = {};
+  function pcApplyHolds(){
+    var any = false, id, card, b, i;
+    for (id in pcHold){
+      if (!pcHold[id]) continue;
+      any = true;
+      pcHeldApplied[id] = 1;
+      card = cardOf(id);
+      if (!card) continue;
+      card.classList.add('pcheld');
+      card.setAttribute('aria-disabled', 'true');
+      b = card.querySelectorAll('button');
+      for (i=0;i<b.length;i++){
+        b[i].disabled = true;
+        b[i].title = 'Locked: this page does not yet know whether job ' + id + ' ran. Re-approving could run it twice.';
+      }
+    }
+    /* RELEASE. A hold that is never released is a bricked page: watchOne() resolving a job to
+       executed/exit 0 must hand the card back. Only cards THIS layer locked are unlocked, and
+       never one with a request still in flight. */
+    for (id in pcHeldApplied){
+      if (pcHold[id] || inflight[id]) continue;
+      delete pcHeldApplied[id];
+      card = cardOf(id);
+      if (!card) continue;
+      card.classList.remove('pcheld');
+      card.removeAttribute('aria-disabled');
+      b = card.querySelectorAll('button');
+      for (i=0;i<b.length;i++){ b[i].disabled = false; b[i].title = ''; }
+    }
+    var bar = document.querySelectorAll('.batchbar button'), j;
+    for (j=0;j<bar.length;j++){
+      if (any) { bar[j].disabled = true; bar[j].title = 'Locked while an outcome is unknown. Check the log first.'; }
+      else if (bar[j].title && bar[j].title.indexOf('Locked while an outcome is unknown') === 0) { bar[j].disabled = false; bar[j].title = ''; }
+    }
+  }
+  function pcWatchDom(){
+    try {
+      var host = document.getElementById('jobs') || document.body;
+      if (!host || !window.MutationObserver) return;
+      new MutationObserver(function(){ pcApplyHolds(); }).observe(host, {childList:true, subtree:true});
+    } catch(e){}
+  }
+  function selectedIds(){
+    var out = [], list = document.querySelectorAll('.jsel:checked'), i;
+    for (i=0;i<list.length;i++) out.push(list[i].value);
+    return out;
+  }
+
+  /* ===== GATE-UI-THREE-STATE  PCLOCK-THREE-STATE-SENTINEL-v1 ========================
+     Three distinct approve outcomes. "REFUSED" is reserved for a real server refusal.
+       A SERVER REFUSED - a response arrived, with a real HTTP status.
+       B JOB FAILED     - 2xx, the job RAN, exit != 0 (handled in the 2xx branch, untouched).
+       C NO RESPONSE    - the fetch promise REJECTED: no response object, no HTTP status.
+     Before this, state C was rendered as 'REFUSED (0): TypeError: Load failed' - which asserts
+     the SERVER rejected the job, exactly backwards: the server never answered and the job may
+     still be running. Confirmed live on jobs IZqV174Hrh8xY3fnDNdC and KlBgddI0E3Fo03izzipw,
+     both of which exited 0 while the banner called them refusals.
+     =============================================================================== */
+  function pcRefusalText(status, reason){
+    /* 'REFUSED (0)' is unreachable BY ASSERTION: a refusal REQUIRES a real HTTP status. */
+    if (typeof status !== 'number' || !isFinite(status) ||
+        Math.floor(status) !== status || status < 100 || status > 599){
+      throw new Error('pcRefusalText: a refusal requires a real HTTP status, got ' + String(status));
+    }
+    return 'REFUSED (' + status + '): ' + String(reason || 'no reason given');
+  }
+  /* [GATE-UNKNOWN-LOCK-V1] GATEWAY statuses are NOT refusals. paracoding-control-plane has
+     timeout=300s while the executor runs to 870s, so a long job 504s at the proxy while the
+     job document is written status=executed exit_code=0. 504 is a real HTTP status, so the
+     old else-branch rendered it 'REFUSED (504)' on a job that RAN. */
+  var PC_GATEWAY = {502:1, 503:1, 504:1, 522:1, 524:1, 598:1, 599:1};
+  function pcIsGateway(status){ return !!PC_GATEWAY[status]; }
+  /* [GATE-UNKNOWN-LOCK-V1] Three states, three sentences. 'sent' is false ONLY when the browser
+     reported no network at dispatch; anything ambiguous stays UNKNOWN, which is the side
+     that does not invite a second execution. */
+  function pcUnknownText(id, why){
+    return 'OUTCOME UNKNOWN - NOT a refusal. ' + why + ' The job ' + String(id) + ' may be '
+         + 'RUNNING right now, and re-approving it would run it a SECOND time on one approval. '
+         + 'DO NOT RE-APPROVE. Read the log for ' + String(id) + ' (read_job_log). This page is '
+         + 'still polling the server and will replace this line with the real outcome.';
+  }
+  function pcNotSentText(id){
+    return 'NOT SENT - this device had no network when the approval was dispatched, so the '
+         + 'request never left the browser and the server never saw it. Job ' + String(id)
+         + ' is untouched and was NOT approved. Reconnect and approve again - that is safe.';
+  }
+  function pcOutcomeText(status, lostConnection, d, id, sent){
+    d = d || {};
+    if (sent === false) return pcNotSentText(id);
+    /* State (b) first, and again on any falsy status: two independent guards, so no path
+       reaches the refusal renderer without a real code. */
+    if (lostConnection || !status){
+      return pcUnknownText(id, 'No reply reached this page (' + String(d.error || 'connection lost') + ').');
+    }
+    if (pcIsGateway(status)){
+      return pcUnknownText(id, 'The proxy answered ' + status + ' before the executor finished '
+                             + '- that is a gateway timeout, not a decision by the gate.');
+    }
+    return pcRefusalText(status, d.error);
+  }
+  function mark(id, cls, text){
+    if (!res[id]) order.push(id);
+    res[id] = {cls: cls, text: text};
+    /* [GATE-UNKNOWN-LOCK-V1] mark() is the ONE funnel every outcome passes through, so the
+       re-approve hold is taken and released here and nowhere else. HELD while the outcome is
+       'wait' (the server has it) or 'unknown' (we do not know). RELEASED only by a resolved
+       'ok'/'bad', or by 'notsent', where the request provably never left the device. */
+    if (cls === 'wait' || cls === 'unknown') pcHold[id] = 1; else delete pcHold[id];
+    paint();
+    pcApplyHolds();
+  }
+  function strip(){
+    var el = $i('pcresults');
+    if (!el){
+      var j = $i('jobs'); if (!j || !j.parentNode) return null;
+      el = document.createElement('div'); el.id = 'pcresults';
+      j.parentNode.insertBefore(el, j.nextSibling);
+    }
+    return el;
+  }
+  function paint(){
+    var el = strip(); if (!el) return;
+    el.innerHTML = '';
+    for (var i=0;i<order.length;i++){
+      var id = order[i], r = res[id]; if (!r) continue;
+      var d = document.createElement('div');
+      d.className = 'pcres ' + r.cls;
+      d.innerHTML = '<div class="pcjid">' + esc2(id) + '</div><div>' + esc2(r.text) + '</div>';
+      el.appendChild(d);
+    }
+    banner();
+  }
+  /* (b) the count comes from what the SERVER confirmed. The words "Batch done" are refused
+     while anything is still unresolved. */
+  function banner(){
+    /* GATE-BANNER-TRUTH-A-v1 THREE outcomes, counted separately and named separately.
+       'unknown' is a job whose fetch never came back: there is no HTTP status, the server
+       was never heard from, and the job may well have run to completion. Folding it into
+       the failure count is what told the operator six exit-0 jobs had FAILED. It now has its own
+       count, its own colour and its own sentence -- and watchOne() keeps re-reading the
+       server for it, so it is a waypoint, not a verdict. */
+    /* [GATE-UNKNOWN-LOCK-V1] FOUR counters. 'notsent' used to fall through to wait++ and be reported
+       as 'still running', which is the exact opposite of the truth: nothing was sent. */
+    var ran=0, bad=0, wait=0, unk=0, ns=0, names=[], unames=[], nsnames=[], k;
+    for (k in res){
+      if (!res[k]) continue;
+      if (res[k].cls === 'ok') ran++;
+      else if (res[k].cls === 'bad'){ bad++; names.push(k); }
+      else if (res[k].cls === 'unknown'){ unk++; unames.push(k); }
+      else if (res[k].cls === 'notsent'){ ns++; nsnames.push(k); }
+      else wait++;
+    }
+    if (!ran && !bad && !wait && !unk && !ns) return;
+    var tail = (bad ? (', ' + bad + ' REFUSED by the server: ' + names.join(', ')) : '')
+             + (unk ? (', ' + unk + ' UNKNOWN - no usable reply reached this page. These are NOT refusals, they may be RUNNING, and they are locked against a second approval until the server answers: ' + unames.join(', ')) : '')
+             + (ns ? (', ' + ns + ' NOT SENT - no network at dispatch, the server never saw these and they were NOT approved: ' + nsnames.join(', ')) : '');
+    if (wait || unk) say('Working - ' + ran + ' confirmed by the server, ' + (wait + unk) + ' not resolved yet' + tail + '. Do not tap again.');
+    else say('Batch done - ' + ran + ' confirmed by the server' + tail + '.');
+  }
+
+  /* ---- (a)+(b) one locked, truthful path for every approve/deny/pre-approve click ---- */
+  async function runBatch(ids, action){
+    ids = (ids || []).filter(function(x){ return !!x; });
+    var fresh = [], i;
+    for (i=0;i<ids.length;i++){ if (!inflight[ids[i]]) fresh.push(ids[i]); }
+    if (!fresh.length){ say('Already submitting - ignoring the extra tap.'); return {ok:0, bad:0}; }
+    if (action === 'approve' && window.__godmode && !window.__gtoken){
+      say('Reconnecting Google - wait a second and tap once.');
+      try { if (typeof trySilent === 'function') trySilent(); } catch(e){}
+      return {ok:0, bad:0};
+    }
+    /* synchronous, before the first await: grey the card, disable everything, claim the ids */
+    for (i=0;i<fresh.length;i++){
+      inflight[fresh[i]] = 1;
+      lockCard(fresh[i], true);
+      mark(fresh[i], 'wait', 'submitting...');
+      try { if (typeof addRecentJob === 'function') addRecentJob(fresh[i]); } catch(e){}
+    }
+    lockAll(true);
+
+    var okN=0, badN=0, unkN=0, nsN=0, elevated=false;   /* [GATE-UNKNOWN-LOCK-V1] nsN = NOT SENT */
+    try {
+      for (i=0;i<fresh.length;i++){
+        var id = fresh[i], r = null;
+        try {
+          if (action === 'preapprove'){
+            var pr = await jp('/api/webauthn/preapprove', {jobId:id, googleAccessToken: window.__gtoken || ''});
+            r = {status: pr.status, data: pr.data};
+          } else {
+            r = await postConfirm(id, action, null, false);
+            if (r && r.status === 428 && r.data && r.data.needFaceID){
+              if (typeof elevate !== 'function'){
+                /* GATE-BANNER-TRUTH-A-v1 elevate() really is missing from this build -- patch-gate-batch
+                   never landed here. The page's OWN act() carries the working escalation
+                   (confirm + startAuthentication + postConfirm-with-assertion), so hand the
+                   job to it instead of inventing a failure. What is SENT to the server is
+                   exactly what is sent today; only the reporting comes back through here. */
+                var okAct = false;
+                try { okAct = await origAct(id, action, true); } catch(e3){ okAct = false; }
+                r = okAct ? {status:200, data:{}}
+                          : {noResponse:true, status:0, data:{error:'the passkey step did not complete'}};
+              } else if (elevated !== id){
+                var e = await elevate(id, action);
+                if (!e){ mark(id, 'bad', PC_PASSKEY_ABORT); badN++; continue; }
+                elevated = id;
+                lockAll(true);
+                r = await postConfirm(id, action, null, false);
+              } else {
+                r = await postConfirm(id, action, null, false);
+              }
+            }
+          }
+        /* [GATE-UNKNOWN-LOCK-V1] sent=false ONLY when the browser says it had no network. Everything
+           else -- including a rejection we cannot explain -- is treated as SENT, i.e. unknown. */
+        } catch(err){ r = {noResponse:true, status:0, sent: pcLikelySent(), data:{error:String(err)}}; }
+
+        var d = (r && r.data) || {}, st = (r && typeof r.status === 'number') ? r.status : 0, lost = !!(r && r.noResponse);
+        var sent = (r && r.sent === false) ? false : true;   /* [GATE-UNKNOWN-LOCK-V1] */
+        if (st >= 200 && st < 300){
+          if (typeof d.exit_code === 'number' && d.exit_code !== 0){
+            mark(id, 'bad', 'ran as ' + (d.ran_as || 'you') + ' and FAILED (exit ' + d.exit_code + ')' + (d.stderr ? (' - ' + String(d.stderr).slice(-300)) : ''));
+            badN++;
+          } else if (typeof d.exit_code === 'number'){
+            mark(id, 'ok', 'ran as ' + (d.ran_as || 'you') + ' (exit 0)');
+            okN++;
+          } else {
+            mark(id, 'wait', action === 'preapprove' ? 'pre-approved - waiting for the run' : 'accepted by the server - waiting for the final status');
+          }
+        } else if (st === 401){
+          mark(id, 'bad', 'session expired - NOT approved.');
+          badN++;
+          try { if (typeof closeGate === 'function') closeGate('Session expired. Reopen to connect and approve again.'); } catch(e){}
+          break;
+        } else if (sent === false){
+          /* [GATE-UNKNOWN-LOCK-V1] (c) the request never left the device. The job is untouched, so this
+             card MAY re-arm -- it is the only one of the three that is safe to retry. */
+          mark(id, 'notsent', pcOutcomeText(st, lost, d, id, false));
+          nsN++;
+        } else if (lost || !st || pcIsGateway(st)){
+          /* [GATE-UNKNOWN-LOCK-V1] (b) the request went out and no usable answer came back: a fetch
+             rejection, our own deadline, or a GATEWAY status. A gateway status used to land in
+             the else branch below and print 'REFUSED (504)' on a job that ran to exit 0.
+             Not a failure, not a refusal. watchOne() re-reads /api/webauthn/job for these --
+             that is where truth is -- and the card stays LOCKED until it answers. */
+          mark(id, 'unknown', pcOutcomeText(st, lost, d, id, true));
+          unkN++;
+        } else {
+          mark(id, 'bad', pcOutcomeText(st, lost, d, id, true));
+          badN++;
+        }
+      }
+    } finally {
+      /* [GATE-UNKNOWN-LOCK-V1] the unconditional unlock was the double-execution hazard: it re-armed
+         Approve on cards that had just been marked 'unknown', directly under the words 'may
+         still be running'. A held card stays locked; pcApplyHolds() re-locks it after every
+         re-render too, because reloadAuthoritative() rebuilds the DOM from scratch. */
+      for (i=0;i<fresh.length;i++){ inflight[fresh[i]] = 0; if (!pcHold[fresh[i]]) lockCard(fresh[i], false); }
+      lockAll(false);
+      pcApplyHolds();
+    }
+
+    await reloadAuthoritative(fresh);   /* (c) */
+    watch(fresh);                       /* (d) */
+    return {ok:okN, bad:badN, unknown:unkN, notsent:nsN};   /* [GATE-UNKNOWN-LOCK-V1] */
+  }
+
+  /* ---- (c) the server decides what is still pending, not us ---- */
+  async function reloadAuthoritative(ids){
+    try { if (typeof origLoad === 'function') await origLoad(); } catch(e){}
+    var still = {}, list = document.querySelectorAll('.jsel'), i;
+    for (i=0;i<list.length;i++) still[list[i].value] = 1;
+    for (i=0;i<ids.length;i++){
+      /* Deliberately NOT marked 'bad' here. /api/webauthn/pending can lag the status write by a
+         beat, and load() returns silently on a non-ok response -- calling it failed at this point
+         would (1) show a false RED and (2) trip watchOne()'s "already resolved" guard, which would
+         permanently suppress the terminal-status watch, the one check that matters most. Leave it
+         'wait'; watchOne() makes the authoritative call and marks a genuinely stuck job bad after
+         two polls of status=='pending'. */
+      if (still[ids[i]] && res[ids[i]] && res[ids[i]].cls === 'wait'){
+        mark(ids[i], 'wait', 'the server still lists this job as awaiting approval - confirming...');
+      }
+    }
+    paint();
+  }
+
+  /* ---- (d) read the final status back. Silent refusal after approval must be visible. ---- */
+  function watch(ids){ for (var i=0;i<ids.length;i++) watchOne(ids[i], 0); }
+  async function watchOne(id, n){
+    /* GATE-BANNER-TRUTH-A-v1 'unknown' is NOT resolved. It is precisely the state where the client
+       knows nothing and only the server can say -- keep polling it exactly like 'wait'. */
+    if (res[id] && res[id].cls !== 'wait' && res[id].cls !== 'unknown') return;   /* already resolved */
+    if (n >= POLL_MAX){
+      mark(id, 'wait', 'still no final status after ' + Math.round(POLL_MS*POLL_MAX/60000) + ' min - the server has not refused it, so treat it as still running. Check the Flow Hood.');
+      return;
+    }
+    var st = '', j = null;
+    try {
+      var r = await fetch('/api/webauthn/job/' + encodeURIComponent(id), {credentials:'include'});
+      if (r.status === 404){ mark(id, 'bad', 'job record is GONE from pending_confirms - nothing ran that we can prove.'); return; }
+      if (r.ok){ j = await r.json(); st = String((j && j.status) || ''); }
+    } catch(e){}
+
+    if (st && TERM[st]){
+      if (DONE[st]){
+        /* GREEN on executed/completed. Only an EXPLICIT non-zero exit code makes this red -- a
+           missing exit_code on a terminal-success status is a reporting gap, not a failure. */
+        var ex = (j && typeof j.exit_code === 'number') ? j.exit_code : null;
+        if (ex === null) mark(id, 'ok', st + ' by ' + ((j && j.ran_as) || 'the executor') + ' (server reported no exit code)');
+        else if (ex === 0) mark(id, 'ok', st + ' by ' + ((j && j.ran_as) || 'the executor') + ' (exit 0)');
+        else mark(id, 'bad', st + ' and FAILED (exit ' + ex + ')' + ((j && j.stderr_tail) ? (' - ' + String(j.stderr_tail).slice(-300)) : ''));
+      } else if (BAD[st]){
+        mark(id, 'bad', 'REFUSED AFTER APPROVAL - final status "' + st + '". It did NOT run.');
+      } else {
+        mark(id, 'ok', 'final status "' + st + '"');
+      }
+      return;
+    }
+    /* IN PROGRESS -> amber and keep polling. Never a failure: this is what a healthy job looks like. */
+    if (st === 'executing' || st === 'running' || st === 'started') mark(id, 'wait', 'approved - running on the executor now.');
+    else if (st === 'confirmed' || st === 'accepted' || st === 'queued') mark(id, 'wait', 'approved and confirmed by the server - waiting for the executor to pick it up.');
+    else if (st === 'preapproved') mark(id, 'wait', 'pre-approved - will run when fired.');
+    else if (INPROGRESS[st])       mark(id, 'wait', 'in progress on the server (status "' + st + '").');
+    else if (st === 'pending' && n >= 2){ mark(id, 'bad', 'still PENDING on the server - the approval did not stick.'); return; }
+    else if (st)                   mark(id, 'wait', 'status "' + st + '" - not a state this page knows, still watching. Never assumed good.');
+    setTimeout(function(){ watchOne(id, n + 1); }, POLL_MS);
+  }
+
+  /* ---- install: verify, then wrap. Never attach silently to nothing. ---- */
+  /* GATE-BANNER-TRUTH-A-v1 renderGrouped was never a function here. It is created by this very IIFE,
+     below, long after this guard has returned -- and the identifier renderGrouped occurs zero
+     times in this file. So missing===[renderGrouped] on every load, this layer inserted a
+     'DO NOT TRUST THE BANNER' div and returned, and the truthful banner, the authoritative
+     re-render and the terminal-status watch have never once installed. It is now an
+     OPTIONAL wrap, checked where it is used. The other six are real page functions and
+     stay required: a genuine mismatch must still be loud. */
+  var needed = ['load','postConfirm','jp','updateSelN','act','approveSelected'], missing = [], i2;
+  for (i2=0;i2<needed.length;i2++){ if (typeof window[needed[i2]] !== 'function') missing.push(needed[i2]); }
+  if (missing.length){
+    var w = document.createElement('div');
+    w.className = 'pcres bad';
+    w.textContent = 'GATE UI MISMATCH - the approval-feedback patch could not attach (missing: ' + missing.join(', ') +
+                    '). Approvals may report success without being confirmed. DO NOT TRUST THE BANNER.';
+    if (document.body) document.body.insertBefore(w, document.body.firstChild);
+    try { console.error('[pclock] not attached; missing:', missing.join(',')); } catch(e){}
+    return;
+  }
+
+  /* [GATE-UNKNOWN-LOCK-V1] THE APPROVE POST HAD NO DEADLINE AT ALL. postConfirm() is a bare fetch,
+     so how long the page waits was whatever the browser felt like, and an indefinite hang
+     left the operator with a spinner and no statement either way. Wrapped -- not edited --
+     the same way every other layer in this file wraps a global function declaration.
+     This wrap sits AFTER the mismatch guard above, which has already proven postConfirm is a
+     function; wrapping before it would capture undefined and throw at approve time. */
+  var origPostConfirm = window.postConfirm;
+  window.postConfirm = function(){ return pcDeadline(origPostConfirm.apply(this, arguments), PC_DEADLINE_MS); };
+  pcWatchDom();
+  var origLoad = window.load;
+  /* GATE-BANNER-TRUTH-A-v1 the page's own act(), captured BEFORE this layer rebinds it, so the
+     Face-ID escalation survives the revival. */
+  var origAct = window.act;
+  var origRenderGrouped = window.renderGrouped;
+
+  /* the focus/visibilitychange handlers must not re-arm the buttons mid-request */
+  window.load = async function(){
+    if (anyInflight()) return;
+    return origLoad.apply(this, arguments);
+  };
+
+  function absorb(j){
+    var id = j.job_id, st = String(j.status || '');
+    if (res[id] && res[id].cls !== 'wait') return;
+    if (DONE[st]){
+      var ex = (typeof j.exit_code === 'number') ? j.exit_code : null;
+      if (ex === null) mark(id, 'ok', st + ' (server reported no exit code)');
+      else if (ex === 0) mark(id, 'ok', st + ' (exit 0)');
+      else mark(id, 'bad', st + ' and FAILED (exit ' + ex + ')');
+    } else if (BAD[st]){
+      mark(id, 'bad', 'final status "' + st + '" - it did NOT run.');
+    } else {
+      mark(id, 'wait', 'status "' + st + '"...');
+    }
+  }
+  /* (c) a card is rendered only for jobs the SERVER still lists as pending. Anything with an
+     explicit non-pending status becomes a read-only result, never an armed card. */
+  /* GATE-BANNER-TRUTH-A-v1 optional: this build has no renderGrouped, and defining a wrapper around
+     an undefined original would only create a new way to throw. */
+  if (typeof origRenderGrouped === 'function') window.renderGrouped = function(payload){
+    if (Object.prototype.toString.call(payload) === '[object Array]'){
+      var keep = [], done = [], i3;
+      for (i3=0;i3<payload.length;i3++){
+        var j = payload[i3];
+        if (j && j.status && j.status !== 'pending') done.push(j); else keep.push(j);
+      }
+      origRenderGrouped(keep);
+      for (i3=0;i3<done.length;i3++) absorb(done[i3]);
+    } else {
+      origRenderGrouped(payload);
+    }
+    for (var k in inflight){ if (inflight[k]) lockCard(k, true); }
+    if (anyInflight()) lockAll(true);
+    paint();
+  };
+
+  window.actGroup           = function(ids, action){ return runBatch(ids, action); };
+  window.preapproveGroup    = function(ids){ return runBatch(ids, 'preapprove'); };
+  window.act                = function(jobId, action){ return runBatch([jobId], action).then(function(r){ return r.ok > 0; }); };
+  window.preapprove         = function(jobId){ return runBatch([jobId], 'preapprove').then(function(r){ return r.bad === 0; }); };
+  window.approveSelected    = function(){ var ids = selectedIds(); if (!ids.length){ say('Nothing selected. Tick jobs (or Select All) first.'); return; } return runBatch(ids, 'approve'); };
+  window.preapproveSelected = function(){ var ids = selectedIds(); if (!ids.length){ say('Nothing selected. Tick jobs (or Select All) first.'); return; } return runBatch(ids, 'preapprove'); };
+
+  try { console.error('[pclock] attached: optimistic lock + truthful banner + authoritative re-render + terminal-status watch'); } catch(e){}
+})();
+</script>
+<script id="pcgconnect">
+/* ===== GATE-UI-google-connect-guard  PCGCONNECT-SENTINEL-v1 ==========================
+   Runs LAST in the document: after the main inline script (and every patcher edit inside it)
+   and after the pcapprovelock wrapper. It re-binds global function declarations rather than
+   editing them, so the five in-chain patchers cannot break it and it cannot break them.
+
+   FIX 1  approve guard keyed on the TOKEN, not on __godmode. __godmode is only ever true after
+          a successful grant, so the shipped guard was dead exactly when it was needed. A
+          tokenless approve now runs trySilent() first and, if no token arrives, is BLOCKED with
+          a visible message naming the consequence. It is never sent.
+   FIX 2  the Connect Google control is reachable whenever the token is empty, including the
+          unlocked-session-restored state where init() short-circuits and onUnlocked() hides
+          #gbtn. Done by reconciling with showConnected/showDisconnected/onUnlocked rather than
+          fighting them, plus a banner at the top of the unlocked view carrying its own connect
+          button.
+   FIX 3  a persistent chip states which of the two modes the page is in: connected (approvals
+          execute) or not connected (approvals will be refused). The bad state is loud. The
+          operator's only previous signal was the ABSENCE of a "Google: <email>" header line.
+   ==================================================================================== */
+(function(){
+  'use strict';
+  if (window.__pcgconnect) return;
+  window.__pcgconnect = true;
+
+  var WAIT_MS = 250, WAIT_N = 28;          /* ~7s of polling for a silent grant */
+
+  var TXT_OK    = 'Google (IAP) — approvals will execute';
+  var TXT_BAD   = 'GOOGLE NOT CONNECTED — approvals will be refused';
+  var TXT_BLOCK = 'Google is not connected. Approving now would be silently discarded — the job ' +
+                  'would be refused after approval and never run. Connect Google first.';
+  var TXT_WARN  = 'Approvals will not execute until Google is connected. The server drops a ' +
+                  'tokenless approval onto the legacy path, where it is marked refused and never runs.';
+
+  function $g(id){ return document.getElementById(id); }
+  function tok(){ return window.__gtoken || ''; }
+  /* [SEC-IAP-GODMODE-V1] Authority to approve, not the token itself. tok() stays the raw
+     Google token for anything that must SEND one. __iap is set only from a verify response
+     whose IAP JWT the server checked for signature and audience -- the page cannot self-assert it. */
+  function pcAuthOk(){ return !!(window.__gtoken || window.__iap); }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  function say(t){ var m = $g('msg'); if (m) m.textContent = t; }
+  function panelOn(){ var p = $g('gatepanel'); return !!p && p.style.display !== 'none'; }
+
+  /* ---- FIX 2: connect without re-running Face ID on an already-unlocked session -------------
+     gsignin() sets window.__afterGoogle = autoUnlock, which would drive a second Face ID prompt
+     on a session that is already unlocked. gsignin() sets that synchronously and the popup
+     callback can only land later, so overriding it right after the call is safe. */
+  function connect(){
+    if (typeof window.gsignin !== 'function'){
+      say('Connect Google is unavailable in this build — reload the gate.');
+      return;
+    }
+    var wasUnlocked = !!window.__unlocked;
+    try { window.gsignin(); }
+    catch(e){ say('Google connect failed: ' + e); return; }
+    if (wasUnlocked){
+      window.__afterGoogle = function(){
+        try { sync(); } catch(e){}
+        try { if (typeof window.load === 'function') window.load(); } catch(e){}
+        say('Google (IAP) — approvals will now execute.');
+      };
+    }
+    say('Pick your Google account…');
+  }
+
+  /* ---- FIX 3: the persistent chip ---------------------------------------------------------- */
+  function chip(){
+    var c = $g('pcgchip');
+    if (!c){
+      c = document.createElement('div');
+      c.id = 'pcgchip';
+      c.setAttribute('role', 'status');
+      c.onclick = function(){ if (!pcAuthOk()) connect(); };
+      var host = document.body || document.documentElement;
+      if (!host) return null;
+      host.appendChild(c);
+    }
+    return c;
+  }
+
+  /* ---- FIX 2: the unlocked-view banner, with the connect control right there ---------------- */
+  function banner(){
+    var b = $g('pcgbanner');
+    if (!b){
+      var host = $g('gatepanel');
+      if (!host) return null;
+      b = document.createElement('div');
+      b.id = 'pcgbanner';
+      b.setAttribute('role', 'alert');
+      var h = document.createElement('div');
+      h.className = 'pcgttl';
+      h.textContent = 'Approvals will NOT run — Google is not connected';
+      var p = document.createElement('div');
+      p.className = 'pcgtxt';
+      p.textContent = TXT_WARN;
+      var btn = document.createElement('button');
+      btn.id = 'pcgbtn';
+      btn.className = 'primary';
+      btn.textContent = 'Connect Google';
+      btn.onclick = connect;
+      b.appendChild(h);
+      b.appendChild(p);
+      b.appendChild(btn);
+      host.insertBefore(b, host.firstChild);
+    }
+    return b;
+  }
+
+  /* ---- the reconciler. Works WITH showConnected/showDisconnected/onUnlocked, never around --- */
+  function sync(){
+    var t = pcAuthOk(), on = panelOn();
+    var c = chip();
+    if (c){
+      c.className = t ? 'ok' : 'bad';
+      c.textContent = t ? ('● ' + TXT_OK) : ('▲ ' + TXT_BAD + ' — tap to connect');
+      c.style.display = on ? 'block' : 'none';
+    }
+    var b = banner();
+    var show = (!t) && on && !!window.__unlocked;
+    if (b){
+      if (t){
+        b.classList.remove('hard');
+        var h2 = b.querySelector('.pcgttl');
+        if (h2) h2.textContent = 'Approvals will NOT run — Google is not connected';
+        var p2 = b.querySelector('.pcgtxt');
+        if (p2) p2.textContent = TXT_WARN;
+      }
+      b.style.display = show ? 'block' : 'none';
+    }
+    /* [GATE-ONE-CONNECT-V1] ONE control at a time. onUnlocked() hides #gbtn
+       unconditionally, so it is put back whenever there is no token -- but when the
+       banner is on screen the banner's own button IS that control, and showing both
+       is just two identical buttons on one page.
+       The test is `show && b`, NOT `show`: banner() returns null if its host markup
+       is missing, and then #gbtn is the ONLY way to connect. Hiding it on `show`
+       alone would remove the last control exactly when the other failed to render. */
+    var gb = $g('gbtn');
+    if (gb){
+      if (t) gb.style.display = 'none';
+      else if (on) gb.style.display = (show && b) ? 'none' : 'flex';
+    }
+  }
+  window.__pcgsync = sync;
+
+  /* ---- the blocking notice shown when a tokenless approve is refused locally ---------------- */
+  function block(){
+    var b = banner();
+    if (b){
+      b.classList.add('hard');
+      b.style.display = 'block';
+      var h = b.querySelector('.pcgttl');
+      if (h) h.textContent = 'NOT APPROVED — Google is not connected';
+      var p = b.querySelector('.pcgtxt');
+      if (p) p.textContent = TXT_BLOCK;
+      try { b.scrollIntoView({block: 'nearest'}); } catch(e){}
+    }
+    say('NOT APPROVED — ' + TXT_BLOCK);
+    try { console.error('[pcgconnect] tokenless approve BLOCKED locally; nothing was sent.'); } catch(e){}
+  }
+
+  /* ---- FIX 1: token gate. trySilent() first, hard stop second. ------------------------------
+     Deliberately does NOT consult window.__godmode. That flag is set only by showConnected(),
+     i.e. only once a token already exists, and showDisconnected() clears it together with the
+     token -- so the shipped condition (__godmode && !__gtoken) is false in every state where a
+     token is actually missing. */
+  async function ensureToken(){
+    if (pcAuthOk()) return true;
+    say('Google is not connected — reconnecting before this approval…');
+    try { if (typeof window.trySilent === 'function') window.trySilent(); } catch(e){}
+    for (var i = 0; i < WAIT_N; i++){
+      await sleep(WAIT_MS);
+      if (pcAuthOk()){
+        say('Google reconnected — sending the approval.');
+        try { sync(); } catch(e){}
+        return true;
+      }
+    }
+    try { sync(); } catch(e){}
+    return false;
+  }
+
+  /* ---- install: verify first, then wrap. Never attach silently to nothing. ------------------ */
+  var missing = [];
+  if (typeof window.act !== 'function') missing.push('act');
+  if (typeof window.approveSelected !== 'function') missing.push('approveSelected');
+
+  if (missing.length){
+    var w = document.createElement('div');
+    w.id = 'pcgmismatch';
+    w.textContent = 'GATE UI MISMATCH — the Google-connect approval guard could not attach ' +
+                    '(missing: ' + missing.join(', ') + '). An approval made without Google ' +
+                    'connected will be accepted by this page and then silently refused by the ' +
+                    'server. DO NOT APPROVE until the Google chip is green.';
+    if (document.body) document.body.insertBefore(w, document.body.firstChild);
+    try { console.error('[pcgconnect] approve guard NOT attached; missing:', missing.join(',')); } catch(e){}
+  } else {
+    var origAct = window.act;
+    window.act = async function(jobId, action){
+      if (action === 'approve'){
+        var ok = await ensureToken();
+        if (!ok){ block(); return false; }
+      }
+      return origAct.apply(this, arguments);
+    };
+
+    var origApproveSelected = window.approveSelected;
+    window.approveSelected = async function(){
+      var ok = await ensureToken();
+      if (!ok){ block(); return false; }
+      return origApproveSelected.apply(this, arguments);
+    };
+
+    if (typeof window.actGroup === 'function'){
+      var origActGroup = window.actGroup;
+      window.actGroup = async function(ids, action){
+        if (action === 'approve'){
+          var ok = await ensureToken();
+          if (!ok){ block(); return {ok: 0, bad: 0}; }
+        }
+        return origActGroup.apply(this, arguments);
+      };
+    }
+    try { console.error('[pcgconnect] approve guard attached: token-keyed, __godmode ignored.'); } catch(e){}
+  }
+
+  /* ---- keep the UI honest through every state transition the page already drives ------------ */
+  function hook(name){
+    var f = window[name];
+    if (typeof f !== 'function') return false;
+    window[name] = function(){
+      var r = f.apply(this, arguments);
+      try { sync(); } catch(e){}
+      return r;
+    };
+    return true;
+  }
+  var hooks = ['showConnected', 'showDisconnected', 'onUnlocked', 'setUnlocked',
+               'closeGate', 'showScreen', 'showUnlockFallback'];
+  for (var hi = 0; hi < hooks.length; hi++) hook(hooks[hi]);
+
+  /* belt and braces: any path we did not hook still gets reconciled within a second */
+  try { sync(); } catch(e){}
+  setInterval(function(){ try { sync(); } catch(e){} }, 1000);
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', function(){ try { sync(); } catch(e){} });
+  }
+})();
+</script>
+
+<style id="pcreadable-css">
+.pcrd{margin:8px 0 4px 0}
+.pcrd .pcrdlbl{font-size:11px;letter-spacing:.12em;text-transform:uppercase;opacity:.75;margin-bottom:4px}
+.pcrd pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:1.5;background:#0b1418;color:#dfe9ec;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:10px 12px;margin:0;max-height:46vh;overflow:auto}
+.pcrd .pcrdkv{font-size:12px;opacity:.8;margin-top:6px}
+</style>
+<script id="pcreadable-js">
+(function(){
+  function args(node){
+    var c=node.querySelector('code'); if(!c) return null;
+    try{ return JSON.parse(c.textContent); }catch(e){ return {__raw:c.textContent}; }
+  }
+  function build(a){
+    var wrap=document.createElement('div'); wrap.className='pcrd';
+    var cmd = a && (a.command || a.cmd || a.script || a.__raw);
+    var lbl=document.createElement('div'); lbl.className='pcrdlbl'; lbl.textContent='command';
+    var pre=document.createElement('pre');
+    if(cmd==null){ lbl.textContent='arguments'; pre.textContent=JSON.stringify(a,null,2); }
+    else { pre.textContent=String(cmd); }
+    wrap.appendChild(lbl); wrap.appendChild(pre);
+    if(a && cmd!=null){
+      var rest={}; var n=0;
+      for(var k in a){ if(k==='command'||k==='cmd'||k==='script'||k==='__raw') continue; rest[k]=a[k]; n++; }
+      if(n){ var kv=document.createElement('div'); kv.className='pcrdkv';
+             kv.textContent=Object.keys(rest).map(function(k){return k+': '+(typeof rest[k]==='string'?rest[k]:JSON.stringify(rest[k]));}).join('  |  ');
+             wrap.appendChild(kv); }
+    }
+    return wrap;
+  }
+  function expand(root){
+    var list=(root||document).querySelectorAll('details.jcode');
+    for(var i=0;i<list.length;i++){
+      var d=list[i];
+      var w=build(args(d));
+      if(d.parentNode) d.parentNode.replaceChild(w,d);
+    }
+  }
+  function boot(){
+    expand(document);
+    var mo=new MutationObserver(function(){ expand(document); });
+    mo.observe(document.body,{childList:true,subtree:true});
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot); else boot();
+})();
+</script>
+</body>
+</html>
+
+<!-- SEC-HTML-DEPERS-V1 no operator identity, no advertising, no external hosts -->

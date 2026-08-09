@@ -1,0 +1,229 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  [SEC-GATE-STAGES-V1]  THE LOCKED STAGE.
+
+  What this is: the ONLY document /gate serves to a caller with no valid session.
+  It carries the four flows that must work before a session can exist, and nothing
+  else. No pending jobs. No commands. No strain pastes. No mint. No approve buttons.
+  No QR generator. Those live in gate.html and gate.html is now served only to an
+  authenticated session.
+
+  Why it exists: GET /gate returned 111,618 bytes to anyone who asked. It could not
+  populate -- every data API checks the session and 401s -- but it handed a stranger
+  the full route map, the enrollment design and the approval flow for free. The
+  operator's instruction was exact: the gate should hand out the bare minimum HTML
+  for each stage.
+
+  THE FOUR FLOWS, and every one of them is load-bearing. Removing any of them locks
+  the operator out of his own gate with no way back except a manual Cloud Shell
+  bootstrap, so do not "simplify" this file without testing all four:
+
+    1. UNLOCK      POST /api/webauthn/unlock/options  {}
+                   POST /api/webauthn/unlock/verify   {response}
+       The normal path. A registered passkey, an assertion, a session cookie.
+
+    2. FIRST SETUP POST /api/webauthn/register/options {bootstrapSecret}
+                   POST /api/webauthn/register/verify  {bootstrapSecret,response}
+       install.sh sends a brand-new operator to  /gate?setup=<secret> .
+       If this is missing, every fresh install is bricked at step 8 of 9.
+
+    3. ADD A DEVICE POST /api/webauthn/enroll/options {enrollToken}
+                    POST /api/webauthn/enroll/verify  {enrollToken,response}
+       Consumed from  /gate?enrollToken=<token> . This page CONSUMES an enroll
+       token; it never MINTS one. Minting (/api/webauthn/enroll/link) stays in the
+       authenticated document, because handing out an enrolment link is a
+       privileged act and must not be reachable from the locked stage.
+
+    4. STATUS      GET /api/webauthn/status
+       Chooses which of the three to show.
+
+  KNOWN AND DELIBERATE: /api/webauthn/status is anonymous and reports
+  {registered, setupEnabled, sessionMin}. setupEnabled is !!WA_BOOTSTRAP_SECRET,
+  so an anonymous poller can watch for the first-registration window opening. That
+  is a real finding, filed separately -- it is NOT introduced here, and this page
+  needs the endpoint. Fixing it means moving the branch server-side, which is a
+  larger change than this one.
+
+  Google is NOT part of this page. Unlocking is passkey-only; the Google token is
+  for executing approved work and is obtained inside the authenticated document.
+  That is why no third-party script tag appears below.
+
+  The simplewebauthn browser bundle is spliced in at PCVENDOR-SLOT by the deploy
+  job, copied byte-identically out of gate.html so the two documents can never
+  drift to different library versions.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0a0f">
+  <meta name="referrer" content="no-referrer">
+  <title>The Autoclave</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           background:#0a0a0f; color:#e8e8ea;
+           font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+    .card { width:min(92vw,420px); padding:32px 28px; border:1px solid #1e2430; border-radius:14px;
+            background:#0e1116; text-align:center; }
+    .brand { letter-spacing:.28em; font-size:11px; color:#8a8f98; text-transform:uppercase; }
+    h1 { margin:6px 0 22px; font-size:22px; font-weight:600; color:#d8b45a; }
+    button { width:100%; padding:13px 18px; font-size:15px; font-weight:600; cursor:pointer;
+             border:0; border-radius:9px; background:#d8b45a; color:#14100a; }
+    button:disabled { opacity:.5; cursor:default; }
+    input { width:100%; padding:12px; margin-bottom:12px; border-radius:9px;
+            border:1px solid #2a3140; background:#0a0d12; color:#e8e8ea; font-size:15px; }
+    .msg { margin-top:16px; font-size:14px; min-height:20px; }
+    .err { color:#ef6b6b; }
+    .ok  { color:#5fd08a; }
+    .hint { margin-top:18px; font-size:12px; color:#6f757e; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">Paracoding.AI</div>
+    <h1>The Autoclave</h1>
+    <div id="pane"><button id="go" disabled>Checking…</button></div>
+    <div class="msg" id="msg"></div>
+    <div class="hint" id="hint"></div>
+  </div>
+
+<script id="pcvendor-simplewebauthn-10-0-0">
+/*! vendored: @simplewebauthn/browser@10.0.0  dist/bundle/index.umd.min.js
+    source        registry.npmjs.org/@simplewebauthn/browser/-/browser-10.0.0.tgz
+    tarball sha1  8305a57dacb35ab6a71a8b670c699ee7ef1c11c4   (equals npm dist.shasum)
+    tarball sha512
+      hG0JMZD+LiLUbpQcAjS4d+t4gbprE/dLYop/CkE01ugU/9sKXflxV5s0DRjdz3uNMFecatRfb4ZLG3XvF8m5zg==
+      (equals npm dist.integrity)
+    file          7684 bytes
+    file sha256   ec0394d3d7adb7bdbff02139fd84779fddf989453a06b0613da5f9adcc12ed5f
+    file sha384   SijkeUvZZs1bto8G/GPfjLDAg4FRZB5yGFAdMT5T7n3bMnkfFMEhE/h11ClJPNFR
+    That sha384 IS the correct integrity= value for the URL this block replaced, recorded
+    here so nobody has to re derive it if they ever go back to the remote form. */
+/* [@simplewebauthn/browser@10.0.0] */
+!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?t(exports):"function"==typeof define&&define.amd?define(["exports"],t):t((e="undefined"!=typeof globalThis?globalThis:e||self).SimpleWebAuthnBrowser={})}(this,(function(e){"use strict";function t(e){const t=new Uint8Array(e);let r="";for(const e of t)r+=String.fromCharCode(e);return btoa(r).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"")}function r(e){const t=e.replace(/-/g,"+").replace(/_/g,"/"),r=(4-t.length%4)%4,n=t.padEnd(t.length+r,"="),o=atob(n),i=new ArrayBuffer(o.length),a=new Uint8Array(i);for(let e=0;e<o.length;e++)a[e]=o.charCodeAt(e);return i}function n(){return void 0!==window?.PublicKeyCredential&&"function"==typeof window.PublicKeyCredential}function o(e){const{id:t}=e;return{...e,id:r(t),transports:e.transports}}function i(e){return"localhost"===e||/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i.test(e)}class a extends Error{constructor({message:e,code:t,cause:r,name:n}){super(e,{cause:r}),this.name=n??r.name,this.code=t}}const s=new class{createNewAbortSignal(){if(this.controller){const e=new Error("Cancelling existing WebAuthn API call for new one");e.name="AbortError",this.controller.abort(e)}const e=new AbortController;return this.controller=e,e.signal}cancelCeremony(){if(this.controller){const e=new Error("Manually cancelling existing WebAuthn API call");e.name="AbortError",this.controller.abort(e),this.controller=void 0}}},c=["cross-platform","platform"];function l(e){if(e&&!(c.indexOf(e)<0))return e}function u(e,t){console.warn(`The browser extension that intercepted this WebAuthn API call incorrectly implemented ${e}. You should report this error to them.\n`,t)}function d(){if(!n())return new Promise((e=>e(!1)));const e=window.PublicKeyCredential;return void 0===e.isConditionalMediationAvailable?new Promise((e=>e(!1))):e.isConditionalMediationAvailable()}e.WebAuthnAbortService=s,e.WebAuthnError=a,e.base64URLStringToBuffer=r,e.browserSupportsWebAuthn=n,e.browserSupportsWebAuthnAutofill=d,e.bufferToBase64URLString=t,e.platformAuthenticatorIsAvailable=function(){return n()?PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable():new Promise((e=>e(!1)))},e.startAuthentication=async function(e,c=!1){if(!n())throw new Error("WebAuthn is not supported in this browser");let u;0!==e.allowCredentials?.length&&(u=e.allowCredentials?.map(o));const h={...e,challenge:r(e.challenge),allowCredentials:u},f={};if(c){if(!await d())throw Error("Browser does not support WebAuthn autofill");if(document.querySelectorAll("input[autocomplete$='webauthn']").length<1)throw Error('No <input> with "webauthn" as the only or last value in its `autocomplete` attribute was detected');f.mediation="conditional",h.allowCredentials=[]}let p;f.publicKey=h,f.signal=s.createNewAbortSignal();try{p=await navigator.credentials.get(f)}catch(e){throw function({error:e,options:t}){const{publicKey:r}=t;if(!r)throw Error("options was missing required publicKey property");if("AbortError"===e.name){if(t.signal instanceof AbortSignal)return new a({message:"Authentication ceremony was sent an abort signal",code:"ERROR_CEREMONY_ABORTED",cause:e})}else{if("NotAllowedError"===e.name)return new a({message:e.message,code:"ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY",cause:e});if("SecurityError"===e.name){const t=window.location.hostname;if(!i(t))return new a({message:`${window.location.hostname} is an invalid domain`,code:"ERROR_INVALID_DOMAIN",cause:e});if(r.rpId!==t)return new a({message:`The RP ID "${r.rpId}" is invalid for this domain`,code:"ERROR_INVALID_RP_ID",cause:e})}else if("UnknownError"===e.name)return new a({message:"The authenticator was unable to process the specified options, or could not create a new assertion signature",code:"ERROR_AUTHENTICATOR_GENERAL_ERROR",cause:e})}return e}({error:e,options:f})}if(!p)throw new Error("Authentication was not completed");const{id:R,rawId:w,response:E,type:g}=p;let A;return E.userHandle&&(A=t(E.userHandle)),{id:R,rawId:t(w),response:{authenticatorData:t(E.authenticatorData),clientDataJSON:t(E.clientDataJSON),signature:t(E.signature),userHandle:A},type:g,clientExtensionResults:p.getClientExtensionResults(),authenticatorAttachment:l(p.authenticatorAttachment)}},e.startRegistration=async function(e){if(!n())throw new Error("WebAuthn is not supported in this browser");const c={publicKey:{...e,challenge:r(e.challenge),user:{...e.user,id:r(e.user.id)},excludeCredentials:e.excludeCredentials?.map(o)}};let d;c.signal=s.createNewAbortSignal();try{d=await navigator.credentials.create(c)}catch(e){throw function({error:e,options:t}){const{publicKey:r}=t;if(!r)throw Error("options was missing required publicKey property");if("AbortError"===e.name){if(t.signal instanceof AbortSignal)return new a({message:"Registration ceremony was sent an abort signal",code:"ERROR_CEREMONY_ABORTED",cause:e})}else if("ConstraintError"===e.name){if(!0===r.authenticatorSelection?.requireResidentKey)return new a({message:"Discoverable credentials were required but no available authenticator supported it",code:"ERROR_AUTHENTICATOR_MISSING_DISCOVERABLE_CREDENTIAL_SUPPORT",cause:e});if("required"===r.authenticatorSelection?.userVerification)return new a({message:"User verification was required but no available authenticator supported it",code:"ERROR_AUTHENTICATOR_MISSING_USER_VERIFICATION_SUPPORT",cause:e})}else{if("InvalidStateError"===e.name)return new a({message:"The authenticator was previously registered",code:"ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED",cause:e});if("NotAllowedError"===e.name)return new a({message:e.message,code:"ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY",cause:e});if("NotSupportedError"===e.name)return 0===r.pubKeyCredParams.filter((e=>"public-key"===e.type)).length?new a({message:'No entry in pubKeyCredParams was of type "public-key"',code:"ERROR_MALFORMED_PUBKEYCREDPARAMS",cause:e}):new a({message:"No available authenticator supported any of the specified pubKeyCredParams algorithms",code:"ERROR_AUTHENTICATOR_NO_SUPPORTED_PUBKEYCREDPARAMS_ALG",cause:e});if("SecurityError"===e.name){const t=window.location.hostname;if(!i(t))return new a({message:`${window.location.hostname} is an invalid domain`,code:"ERROR_INVALID_DOMAIN",cause:e});if(r.rp.id!==t)return new a({message:`The RP ID "${r.rp.id}" is invalid for this domain`,code:"ERROR_INVALID_RP_ID",cause:e})}else if("TypeError"===e.name){if(r.user.id.byteLength<1||r.user.id.byteLength>64)return new a({message:"User ID was not between 1 and 64 characters",code:"ERROR_INVALID_USER_ID_LENGTH",cause:e})}else if("UnknownError"===e.name)return new a({message:"The authenticator was unable to process the specified options, or could not create a new credential",code:"ERROR_AUTHENTICATOR_GENERAL_ERROR",cause:e})}return e}({error:e,options:c})}if(!d)throw new Error("Registration was not completed");const{id:h,rawId:f,response:p,type:R}=d;let w,E,g,A;if("function"==typeof p.getTransports&&(w=p.getTransports()),"function"==typeof p.getPublicKeyAlgorithm)try{E=p.getPublicKeyAlgorithm()}catch(e){u("getPublicKeyAlgorithm()",e)}if("function"==typeof p.getPublicKey)try{const e=p.getPublicKey();null!==e&&(g=t(e))}catch(e){u("getPublicKey()",e)}if("function"==typeof p.getAuthenticatorData)try{A=t(p.getAuthenticatorData())}catch(e){u("getAuthenticatorData()",e)}return{id:h,rawId:t(f),response:{attestationObject:t(p.attestationObject),clientDataJSON:t(p.clientDataJSON),transports:w,publicKeyAlgorithm:E,publicKey:g,authenticatorData:A},type:R,clientExtensionResults:d.getClientExtensionResults(),authenticatorAttachment:l(d.authenticatorAttachment)}},Object.defineProperty(e,"__esModule",{value:!0})}));
+
+  </script>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var msg = $('msg'), hint = $('hint'), go = $('go');
+
+  function say(t, cls) { msg.textContent = t || ''; msg.className = 'msg' + (cls ? ' ' + cls : ''); }
+
+  // Same shape as the authenticated document's jp(): POST, JSON, cookies included.
+  async function jp(u, b) {
+    var r = await fetch(u, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(b || {})
+    });
+    var d = {};
+    try { d = await r.json(); } catch (e) {}
+    return { ok: r.ok, status: r.status, data: d };
+  }
+
+  var q = new URLSearchParams(location.search);
+  var setupSecret = q.get('setup') || '';
+  var enrollToken = q.get('enrollToken') || q.get('enroll') || '';
+
+  // One place decides what happens on success, so no flow can forget to land.
+  function landed() {
+    say('Unlocked. Loading…', 'ok');
+    // Re-request /gate. With a session cookie the server now returns the full
+    // document instead of this one. A reload is the whole handoff.
+    location.replace('/gate');
+  }
+
+  function fail(e, what) {
+    var t = (e && (e.message || e.name)) || String(e || 'failed');
+    if (/NotAllowed|AbortError/i.test(t)) t = 'Cancelled, or the authenticator timed out.';
+    say(what + ': ' + t, 'err');
+    go.disabled = false;
+  }
+
+  async function runUnlock() {
+    go.disabled = true; say('Waiting for your passkey…');
+    try {
+      var o = await jp('/api/webauthn/unlock/options', {});
+      if (!o.ok) throw new Error('server refused (' + o.status + ')');
+      var asr = await SimpleWebAuthnBrowser.startAuthentication(o.data);
+      var v = await jp('/api/webauthn/unlock/verify', { response: asr });
+      if (!v.ok) throw new Error('verification refused (' + v.status + ')');
+      landed();
+    } catch (e) { fail(e, 'Unlock'); }
+  }
+
+  async function runSetup() {
+    go.disabled = true; say('Registering this device…');
+    try {
+      var o = await jp('/api/webauthn/register/options', { bootstrapSecret: setupSecret });
+      if (!o.ok) throw new Error('server refused (' + o.status + ')');
+      var att = await SimpleWebAuthnBrowser.startRegistration(o.data);
+      var v = await jp('/api/webauthn/register/verify', { bootstrapSecret: setupSecret, response: att });
+      if (!v.ok) throw new Error('verification refused (' + v.status + ')');
+      landed();
+    } catch (e) { fail(e, 'Registration'); }
+  }
+
+  async function runEnroll() {
+    go.disabled = true; say('Adding this device…');
+    try {
+      var o = await jp('/api/webauthn/enroll/options', { enrollToken: enrollToken });
+      if (!o.ok) throw new Error('server refused (' + o.status + ')');
+      var att = await SimpleWebAuthnBrowser.startRegistration(o.data);
+      var v = await jp('/api/webauthn/enroll/verify', { enrollToken: enrollToken, response: att });
+      if (!v.ok) throw new Error('verification refused (' + v.status + ')');
+      landed();
+    } catch (e) { fail(e, 'Enrolment'); }
+  }
+
+  async function boot() {
+    if (typeof SimpleWebAuthnBrowser === 'undefined') {
+      say('The passkey library did not load. This page is unusable; do not retry blindly.', 'err');
+      return;
+    }
+    var st = { registered: false, setupEnabled: false };
+    try {
+      var r = await fetch('/api/webauthn/status', { credentials: 'include' });
+      st = await r.json();
+    } catch (e) {
+      say('Cannot reach the server.', 'err');
+      return;
+    }
+
+    if (enrollToken) {
+      go.textContent = 'Add this device';
+      go.onclick = runEnroll;
+      hint.textContent = 'Using a one-time enrolment link.';
+    } else if (setupSecret) {
+      go.textContent = 'Register your passkey';
+      go.onclick = runSetup;
+      hint.textContent = 'First-time setup. This link works once.';
+    } else if (st.registered) {
+      go.textContent = 'Unlock with passkey';
+      go.onclick = runUnlock;
+      hint.textContent = st.sessionMin ? ('A session lasts ' + st.sessionMin + ' minutes.') : '';
+    } else if (st.setupEnabled) {
+      go.textContent = 'Register your passkey';
+      go.onclick = function () { say('Open the setup link from install.sh — it carries the one-time secret.', 'err'); };
+      hint.textContent = 'No passkey is registered yet.';
+    } else {
+      go.textContent = 'No way in from here';
+      hint.textContent = 'No passkey is registered and the setup window is closed. Recovery is a manual re-run of the installer bootstrap step from your own shell.';
+      return;
+    }
+    go.disabled = false;
+    // A passkey prompt must be user-initiated, so nothing auto-runs here.
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
