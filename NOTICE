@@ -56,7 +56,7 @@ BROWSER COMPONENTS LOADED AT RUNTIME FROM A CDN
   pointed only at the manifest. They are fetched by the browser at page load.
 
   @simplewebauthn/browser    10.0.0    MIT
-                                       loaded by src/gate.html and src/cockpit.html
+                                       loaded by src/gate.html
   qrcodejs (davidshimjs)     unpinned  MIT
                                        loaded by src/gate.html
   Google Identity Services   n/a       Proprietary — Google Terms of Service

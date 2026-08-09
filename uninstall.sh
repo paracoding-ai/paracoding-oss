@@ -20,7 +20,7 @@ done
 echo "Tearing down paracoding in $PROJECT ($REGION)."
 if [ "$KEEP" -eq 1 ]; then echo "  --keep-data: Firestore will be PRESERVED."
 else echo "  FULL WIPE: the Firestore database goes too -- approvals, journal, memory, passkeys."; fi
-for s in paracoding-control-plane paracoding-gate-exec; do
+for s in paracoding-control-plane paracoding-mcp paracoding-gate-exec; do
   gcloud run services delete "$s" --region "$REGION" --project "$PROJECT" --quiet 2>/dev/null
 done
 for s in pc-session-secret pc-human-confirm-secret pc-approval-mac-key pc-bootstrap-secret pc-webauthn-creds; do
@@ -90,10 +90,10 @@ PC_L=$(gcloud run services list --project "$PROJECT" --format='value(metadata.na
 if [ $PC_RC -ne 0 ]; then
   pc_blind "Cloud Run services -- 'gcloud run services list' exited $PC_RC"
 else
-  for s in paracoding-control-plane paracoding-gate-exec; do
+  for s in paracoding-control-plane paracoding-mcp paracoding-gate-exec; do
     pc_has "$PC_L" "$s" && pc_ours "Cloud Run service $s"
   done
-  for s in $(printf '%s\n' "$PC_L" | grep -E '^(paracoding|pc)-' | grep -Fvx paracoding-control-plane | grep -Fvx paracoding-gate-exec); do
+  for s in $(printf '%s\n' "$PC_L" | grep -E '^(paracoding|pc)-' | grep -Fvx paracoding-control-plane | grep -Fvx paracoding-mcp | grep -Fvx paracoding-gate-exec); do
     pc_older "Cloud Run service $s"
   done
 fi

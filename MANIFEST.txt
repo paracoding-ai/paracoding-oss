@@ -1,15 +1,14 @@
 # v3 release manifest
-# generated from source commit 0536c6d10ac3094b7cd929bb2e35179f77df1512
+# generated from source commit 08730d94ef09aae329ee1d58f53605e76a9d8fe7
 # regenerate with gen-v3.py -- hand edits WILL drift and are not supported
 
 3cce5720a36a5831      4955  CONTRIBUTING.md
 9e42f0bf5c319e34     11351  LICENSE
-7e576e0370cca5e9      3825  NOTICE
-a2fbe82aaed2d413      6879  README.md
-26993c596de2ba67     17040  SECURITY-WHITEPAPER.md
-50f57e025b4e1d09     32634  SECURITY.md
-d9507e1a2520be87     59291  install.sh
-1de12acd76320394     11646  uninstall.sh
+f511906915fca332      3804  NOTICE
+13800101b8c8e36f      5370  README.md
+57277dcec4f0d79e     35466  SECURITY.md
+7829415e64198820    145731  install.sh
+e6732d6baaa369db     11703  uninstall.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
 091534dd21d508ba       427  agent-plugin/plugin.json
@@ -18,16 +17,15 @@ e679d5eab4d80423       221  agent-plugin/mcp.json
 97a2bbee410eb982        20  control-plane/blob-baseline.json
 f7b24a9f6f1db064      2232  control-plane/gen-baseline.py
 70d3d445d67d8c49      1016  control-plane/package.json
-a783e3a0839dc3cc      5356  control-plane/route-audit.mjs
-4921dac359e02c98      1297  control-plane/route-baseline.json
+f345d84fbd56d2a5      9901  control-plane/route-audit.mjs
+74474e55653ef301      6010  control-plane/route-baseline.json
 06552f3a3ea14007       257  control-plane/tsconfig.json
-9bf1dc6d510e2ec8     94557  control-plane/src/cockpit.html
 d070d6afc566909d     12765  control-plane/src/dash.html
 f524a61cf74d9d55    125278  control-plane/src/gate.html
-04c4630c07b0795e      8181  control-plane/src/gittools.ts
+041ffeeefbac86a1     10811  control-plane/src/gittools.ts
 1308f3f465cf1114     23327  control-plane/src/gppatch.ts
 9bf1dc6d510e2ec8     94557  control-plane/src/harness.html
-c67fce7004cbc1b7    434726  control-plane/src/index.ts
+1f58492d0bb1a90d    450959  control-plane/src/index.ts
 1d40b83efd609392     17907  control-plane/src/locked.html
 ec2b16e67eed3245      2265  control-plane/src/pcgit/05-adapter/src/backend.ts
 1a5af2857ff495b3      2528  control-plane/src/pcgit/05-adapter/src/errors.ts
@@ -43,15 +41,15 @@ e0b44bef72c68a16      7574  control-plane/src/pcgit/07-refs/src/model.ts
 ed49970dbacbde83     15415  control-plane/src/pcgit/07-refs/src/objects.ts
 ecdc94f12edde025     16261  control-plane/src/pcgit/07-refs/src/push.ts
 73092c74df72165e     10276  control-plane/src/pcgit/07-refs/src/refs.ts
-ee3fe4aa9682407c      8053  control-plane/src/pcgit/09-mcp/src/config.ts
+0ea7d0836faa96fb     10062  control-plane/src/pcgit/09-mcp/src/config.ts
 c5b69b06cd702d38      8049  control-plane/src/pcgit/09-mcp/src/context.ts
 e277961bba823332     10114  control-plane/src/pcgit/09-mcp/src/diff.ts
 a2bb5727fe6a17e2      4182  control-plane/src/pcgit/09-mcp/src/errors.ts
-3a20f5e4eed3a387     31320  control-plane/src/pcgit/09-mcp/src/ops.ts
+bb7374c5514ff8bc     38677  control-plane/src/pcgit/09-mcp/src/ops.ts
 31a4d903307ce5a8      9520  control-plane/src/pcgit/09-mcp/src/ref-gate.ts
-07a4d7429592f9fc      7994  control-plane/src/pcgit/09-mcp/src/tree.ts
+2b07148791737798     15144  control-plane/src/pcgit/09-mcp/src/tree.ts
 e4d00fe80ed5c3b5       570  gate-exec/Dockerfile
 ced29b5814c424aa      2299  gate-exec/README.md
-03603ec1b1a9c2b8     42580  gate-exec/exec_server.py
-b378bf7db468eae8      5213  gate-exec/pcmint.py
+1211d79580ccff99     47296  gate-exec/exec_server.py
+d4341eb82c9d234d      3138  gate-exec/pcmint.py
 bed7eaa575af395f      3003  gate-exec/pcwebauthn.py

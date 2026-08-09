@@ -20,7 +20,24 @@ PROJECT="${1:-}"
 REGION="${2:-us-east1}"
 [ -n "$PROJECT" ] || { echo "usage: ./install.sh [--rehearse] PROJECT_ID [REGION]"; exit 2; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# [SEC-SURFACE-SPLIT-V1] TWO CLOUD RUN SERVICES FROM ONE IMAGE, BECAUSE IAP IS ONE SWITCH
+# PER SERVICE. The console (gate, dash, harness, flow, wiki) is the bootstrap path into a
+# brand-new install -- it is how you reach the gate BEFORE any passkey exists -- so it sits
+# BEHIND IAP. The MCP surface must NOT: IAP consumes the Authorization header and an MCP
+# client has no Google identity to present, so with IAP on, POST /mcp is refused at the edge
+# and no connector can ever reach the app. One service cannot be both. Two were shipped
+# wrong before this: one service with IAP ON (MCP unreachable), then IAP OFF entirely
+# (bootstrap destroyed). This is the third option and the only correct one.
+#
+# THE CONSOLE KEEPS THE OLD SERVICE NAME AND THAT IS NOT COSMETIC. WA_RP_ID is the WebAuthn
+# Relying Party ID and a registered passkey is bound to it. Moving the console to a new
+# service would change its *.run.app host, change WA_RP_ID, and INVALIDATE EVERY PASSKEY
+# ALREADY REGISTERED on an upgrade -- locking the operator out of their own gate with no way
+# back in. PC_IAP_AUD names this service too. So the console is $CP_SVC, unchanged, and the
+# NEW service is the MCP one: re-pointing a connector URL is a copy and paste, and that is
+# the cost this direction pays instead.
 CP_SVC=paracoding-control-plane
+MC_SVC=paracoding-mcp
 GX_SVC=paracoding-gate-exec
 CP_SA="pc-control-plane@${PROJECT}.iam.gserviceaccount.com"
 GX_SA="pc-gate-exec@${PROJECT}.iam.gserviceaccount.com"
@@ -229,13 +246,31 @@ say "1/10 enabling APIs (this is the slow one)"
 #   cloudresourcemanager -- needed by the IAP access binding in step 8/10, which used to
 #                           enable it there; enabling it here means one propagation wait
 #                           instead of two.
+#   iap                  -- step 8/10 puts the CONSOLE behind Identity-Aware Proxy. Enabled
+#                           here for the same reason cloudresourcemanager is: one wait, and
+#                           a failure that names the API before anything has been deployed.
+#                           Without it 'gcloud beta run services update --iap' fails with a
+#                           bare SERVICE_DISABLED at the step that protects your console.
 #   serviceusage         -- this very command needs it on projects where it is not on by
 #                           default. A chicken-and-egg the retry loop cannot solve.
+#
+# [SEC-MINTER-REMOVE-V1] iamcredentials.googleapis.com IS NO LONGER ENABLED, AND ITS ABSENCE
+# IS THE FIX RATHER THAN AN OVERSIGHT. It was here for ONE caller: gate-exec/pcmint.py's
+# :generateAccessToken, the last rung of a KMS -> JWT -> STS -> impersonate chain that also
+# needed a Workload Identity pool, PC_KMS_KEY and PC_EXEC_SA. This installer created none of
+# those three and never referenced them, no execution path ever called the chain -- approved
+# jobs run on the APPROVER's OAuth token -- and the executor's /selftest therefore reported
+# mint:{ok:false} on every install that has ever shipped. The chain is deleted from
+# pcmint.py, so this API was left enabled for nothing, which is the unused-credential
+# pattern the approval-MAC key already cost this fleet once.
+# NOTHING ELSE IN THE EMITTED TREE NEEDS IT. index.ts's only :generateAccessToken call is
+# inside dev_api, which this generator strips from the emitted tree; the one remaining match
+# is a substring in the danger-classifier regex, which tests a URL and calls nothing.
 retry gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com firestore.googleapis.com secretmanager.googleapis.com \
-  iam.googleapis.com iamcredentials.googleapis.com logging.googleapis.com \
+  iam.googleapis.com logging.googleapis.com \
   compute.googleapis.com cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
-  cloudkms.googleapis.com \
+  cloudkms.googleapis.com iap.googleapis.com \
   --project "$PROJECT" >/dev/null || die "could not enable APIs"
 echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 
@@ -310,32 +345,72 @@ fi
 # The observations index KEEPS COLLECTION_GROUP scope. A code reading argued it should be
 # COLLECTION; live evidence contradicted that reading -- the running deployment serves
 # memory queries at COLLECTION_GROUP and they work. Do not "fix" it from the source alone.
-say "2b/10 Firestore indexes for the memory and history tools"
+say "2b/10 Firestore indexes for the memory, history and queue tools"
 PC_IDX_FAIL=0
-pc_index() { # collection-group query-scope field1,order field2,order
-  if gcloud firestore indexes composite create \
+PC_IDX_N=0
+# [SEC-TOOLINFRA-V3-M5] THE THIRD FIELD-CONFIG, AND WHY ITS ABSENCE HID AN INDEX.
+# This helper took EXACTLY TWO field-configs. The index POST /api/queue/claim needs --
+# work_items(assigned_role, status, created_at), an orderBy on a THIRD field -- could
+# therefore not be written here at all. It was not judged unnecessary and dropped; the
+# helper had no way to say it, so nobody said it. "${5:-}" is what keeps every existing
+# two-field call byte-identical in behaviour under set -u.
+#
+# ALREADY-EXISTS IS NOT REFUSED, AND PRINTING ONE LINE FOR BOTH IS THE N16 CLASS.
+# The old branch printed NOT MADE for a re-run and for a genuine permission failure alike
+# and counted both, so the only honest thing the counter could say was "expected on a
+# re-run" -- which trains the reader to ignore it. They are now discriminated on
+# Firestore's own error text: only a REFUSAL counts, and the refusal is reprinted verbatim.
+pc_index() { # collection-group query-scope field1,order field2,order [field3,order]
+  PC_IDX_N=$((PC_IDX_N+1))
+  _pc_f3=""
+  _pc_lbl="${3%%,*}+${4%%,*}"
+  if [ -n "${5:-}" ]; then
+    _pc_f3="--field-config=field-path=${5%%,*},order=${5#*,}"
+    _pc_lbl="$_pc_lbl+${5%%,*}"
+  fi
+  _pc_out=$(gcloud firestore indexes composite create \
     --collection-group="$1" --query-scope="$2" \
     --field-config=field-path="${3%%,*}",order="${3#*,}" \
     --field-config=field-path="${4%%,*}",order="${4#*,}" \
-    --database="$FSDB" --project "$PROJECT" --async >/dev/null 2>&1; then
-    printf '  requested  %-17s %s+%s\n' "$1" "${3%%,*}" "${4%%,*}"
-  else
-    printf '  NOT MADE   %-17s %s+%s\n' "$1" "${3%%,*}" "${4%%,*}"
-    PC_IDX_FAIL=$((PC_IDX_FAIL+1))
+    $_pc_f3 \
+    --database="$FSDB" --project "$PROJECT" --async 2>&1)
+  _pc_rc=$?
+  if [ "$_pc_rc" -eq 0 ]; then
+    printf '  requested  %-17s %s\n' "$1" "$_pc_lbl"
+    return 0
   fi
+  case "$_pc_out" in
+    *ALREADY_EXISTS*|*"already exists"*)
+      printf '  exists     %-17s %s\n' "$1" "$_pc_lbl" ;;
+    *)
+      printf '  REFUSED    %-17s %s\n' "$1" "$_pc_lbl"
+      printf '%s\n' "$_pc_out" | sed 's/^/             /'
+      PC_IDX_FAIL=$((PC_IDX_FAIL+1)) ;;
+  esac
 }
+# SIX INVOCATIONS. Count the CALLS, never a grep. The gcloud line lives once, inside the
+# helper, so grepping for it reports 1 whatever the real number of indexes is. That is how
+# two of these stayed missing through an audit that read the file carefully.
+#   memory_relations scope+to  is the literal sibling of scope+from one line above it.
+#   index.ts open_nodes queries scope+from AND THEN scope+to; only the first was indexed,
+#   so open_nodes threw FAILED_PRECONDITION on its second query -- the same defect the
+#   memory work already paid to fix, one line below where it was fixed.
+#   work_items is the three-field one described above.
 pc_index observations     COLLECTION_GROUP status,ascending    createdAt,descending
 pc_index memory_entities  COLLECTION       scope,ascending     entityType,ascending
 pc_index memory_relations COLLECTION       scope,ascending     from,ascending
+pc_index memory_relations COLLECTION       scope,ascending     to,ascending
 pc_index chat_history     COLLECTION       agent_id,ascending  timestamp,descending
+pc_index work_items       COLLECTION       assigned_role,ascending status,ascending created_at,ascending
 if [ "$PC_IDX_FAIL" -eq 0 ]; then
-  echo "  all four requested; they build in the background"
+  echo "  $PC_IDX_N requested or already present; they build in the background"
 else
-  echo "  NOTE: $PC_IDX_FAIL of 4 index requests were not accepted. An index that ALREADY"
-  echo "        exists reports the same way, so on a re-run this line is expected."
-  echo "        If a memory or history call later fails FAILED_PRECONDITION, Firestore's"
-  echo "        own error names the exact index and gives you a one-click link for it."
+  echo "  NOTE: $PC_IDX_FAIL of $PC_IDX_N index requests were REFUSED. The text above is"
+  echo "        Firestore's own. An index that ALREADY EXISTS is reported as 'exists' and is"
+  echo "        NOT counted here, so this line means a real failure and not a re-run."
 fi
+echo "  ACCEPTANCE IS NOT EXISTENCE. Step 8b/10 re-reads the live index list off the"
+echo "  database and fails the install if one of the $PC_IDX_N is missing."
 
 say "3/10 service accounts (three, least privilege)"
 for pair in "pc-control-plane:control plane" "pc-gate-exec:gated executor"; do
@@ -435,6 +510,40 @@ for S in pc-session-secret pc-human-confirm-secret; do
   retry gcloud secrets add-iam-policy-binding "$S" --member="serviceAccount:$CP_SA" \
     --role=roles/secretmanager.secretAccessor --project "$PROJECT" >/dev/null
 done
+# [SEC-CREDSTORE-V1] pc-webauthn-creds HAS TO EXIST AND THE EXECUTOR HAS TO BE ABLE TO READ IT.
+# Step 7/10 has always set PC_CREDS_SECRET=projects/$PROJECT/secrets/pc-webauthn-creds on the
+# executor, and NOTHING EVER CREATED THAT SECRET OR GRANTED ACCESS TO IT. gate-exec/pcmint.py
+# load_creds() wraps the Secret Manager read in a bare `except Exception: return {}`, and
+# exec_server.py reads {} as "no enrolled credentials to verify against" and answers 403. So the
+# variable pointed at nothing and the failure would have read as an empty credential store
+# rather than as a secret that was never made.
+# IT IS INERT TODAY ONLY BECAUSE THE SAME STEP SHIPS PC_REQUIRE_ASSERTION=0. The moment anyone
+# arms the assertion check, every approval 403s -- including the one that would disarm it.
+# THE PAYLOAD IS THE EMPTY JSON OBJECT, NOT A RANDOM STRING, so mk() above is deliberately not
+# reused: load_creds() json.loads() this value, and 32 bytes of base64 noise raises instead of
+# parsing. Enrolment adds a VERSION; this only has to be valid JSON that means "nobody yet".
+if gcloud secrets describe pc-webauthn-creds --project "$PROJECT" >/dev/null 2>&1; then
+  echo "  pc-webauthn-creds exists, left alone"
+else
+  printf '{}' > "$HERE/.c.tmp"
+  PC_CS_RC=0
+  retry gcloud secrets create pc-webauthn-creds --replication-policy=automatic \
+    --data-file="$HERE/.c.tmp" --project "$PROJECT" >/dev/null || PC_CS_RC=$?
+  python3 -c "import os;os.remove('$HERE/.c.tmp')"
+  [ "$PC_CS_RC" -eq 0 ] || die "could not create the secret pc-webauthn-creds (exit $PC_CS_RC).
+Step 7/10 names it in PC_CREDS_SECRET on the executor, so leaving it absent ships a deployment
+whose independent approval check can never be armed."
+  echo "  pc-webauthn-creds created (empty enrolment, {})"
+fi
+retry gcloud secrets add-iam-policy-binding pc-webauthn-creds --member="serviceAccount:$GX_SA" \
+  --role=roles/secretmanager.secretAccessor --project "$PROJECT" >/dev/null \
+  || die "could not grant $GX_SA secretAccessor on pc-webauthn-creds. The executor is the ONLY
+service that may read it -- deliberately not the control plane, which could otherwise enrol its
+own key and then forge assertions against itself."
+echo "  pc-webauthn-creds -> $GX_SA (secretAccessor, THAT SECRET ONLY; the control plane is"
+echo "  not granted it, which is what makes verification in the executor mean anything)"
+echo "  It starts EMPTY. That is why 7/10 still ships PC_REQUIRE_ASSERTION=0: arming the"
+echo "  assertion check before a credential is enrolled refuses every approval."
 # [SEC-MACFREE-INSTALL-V1] pc-approval-mac-key IS NOT CREATED AND NOT GRANTED HERE AT ALL.
 # It used to be created and handed to both services, and the grant to $GX_SA is precisely
 # what made the executor a signing oracle for its own approvals. gate-exec has read no
@@ -458,19 +567,37 @@ done
 # Do NOT re-add a $GX_SA binding to "make verification work": verification is asymmetric and
 # needs the PUBLIC key, which step 5b/10 grants instead.
 
-say "5/10 reserving the URL (deploy twice, build once)"
+say "5/10 reserving the URLs (deploy twice, build once)"
 # WebAuthn RP ID must equal the host that serves the gate, and the origin allowlist is a
 # SEPARATE exact match. Neither is knowable until the service exists. Getting it wrong locks
 # you out of your own gate, so: ship a stock image first purely to learn the URL.
+#
+# [SEC-SURFACE-SPLIT-V1] BOTH URLs ARE RESERVED HERE, NOT ONE. The MCP service's URL is not a
+# convenience: oaPubBase() in index.ts resolves MCP_PUBLIC_URL first and only falls back to
+# req.get('host'), so whatever is set there is what OAuth discovery hands to every connector.
+# It MUST be the MCP service's own address. Reserving it now means step 6/10 can set the
+# right value on the first deploy instead of correcting it afterwards.
 gcloud run services describe "$CP_SVC" --region "$REGION" --project "$PROJECT" >/dev/null 2>&1 || \
 retry gcloud run deploy "$CP_SVC" --image us-docker.pkg.dev/cloudrun/container/hello \
   --region "$REGION" --project "$PROJECT" --service-account "$CP_SA" \
-  --allow-unauthenticated --quiet >/dev/null || die "could not reserve the control-plane URL"
+  --allow-unauthenticated --quiet >/dev/null || die "could not reserve the console URL"
 CP_URL=$(gcloud run services describe "$CP_SVC" --region "$REGION" --project "$PROJECT" --format='value(status.url)')
-[ -n "$CP_URL" ] || die "no control-plane URL"
+[ -n "$CP_URL" ] || die "no console URL"
 CP_HOST="${CP_URL#https://}"
-echo "  $CP_URL"
-echo "  WA_RP_ID=$CP_HOST"
+gcloud run services describe "$MC_SVC" --region "$REGION" --project "$PROJECT" >/dev/null 2>&1 || \
+retry gcloud run deploy "$MC_SVC" --image us-docker.pkg.dev/cloudrun/container/hello \
+  --region "$REGION" --project "$PROJECT" --service-account "$CP_SA" \
+  --allow-unauthenticated --quiet >/dev/null || die "could not reserve the MCP URL"
+MC_URL=$(gcloud run services describe "$MC_SVC" --region "$REGION" --project "$PROJECT" --format='value(status.url)')
+[ -n "$MC_URL" ] || die "no MCP URL. Refusing to continue: step 6/10 writes this value into
+both services as MCP_PUBLIC_URL, and writing it EMPTY makes oaPubBase() fall back to whatever
+Host header a caller sends -- which is an open redirect in your OAuth discovery document.
+Check the service, then re-run:
+    gcloud run services describe $MC_SVC --region $REGION --project $PROJECT"
+MC_HOST="${MC_URL#https://}"
+echo "  console $CP_URL"
+echo "  mcp     $MC_URL"
+echo "  WA_RP_ID=$CP_HOST  (the gate is served by the console, so the RP ID is its host)"
 
 say "5b/10 approval signing key (Cloud KMS, asymmetric -- Stage C)"
 # [SEC-KMSSIGN-INSTALL-V1] A FRESH INSTALL SHIPS AT STAGE C. There is nothing to soak: a
@@ -658,13 +785,616 @@ gated job would 403 -- including the job that would undo it. Add it to the list.
   esac
   echo "  approval signing key version checked: singular is a member of the allowlist"
 fi
+say "5c/10 the data lake bucket"
+# [SEC-LAKE-BUCKET-V1] THE DEFECT THAT PULLED v3 BACK. control-plane/src/index.ts registers
+# read_file, write_file, put_file and list_files against ONE bucket and this installer created
+# no bucket and set no variable, so all four tools registered and then answered
+# "data lake not configured (DATA_LAKE_BUCKET unset)". The PCV1 encryption-at-rest stack sat on
+# top of that, pointed at nothing.
+#
+# DATA_LAKE_BUCKET IS THE VARIABLE THE CODE ACTUALLY READS, AND THAT IS MEASURED, NOT ASSUMED.
+# index.ts:64  const DATA_LAKE_BUCKET = process.env.DATA_LAKE_BUCKET || ''
+# index.ts:1190 const lake = DATA_LAKE_BUCKET ? getStorage().bucket(DATA_LAKE_BUCKET) : null
+# LAKE_BUCKET EXISTS TOO AND THE FOUR TOOLS NEVER READ IT. It only feeds PC_LAKE at index.ts:84,
+# which appears solely as the SECOND rung of `process.env.DATA_LAKE_BUCKET || PC_LAKE` on the
+# vault and git-object paths. Precedence is therefore DATA_LAKE_BUCKET, then LAKE_BUCKET, then
+# "<project>-datalake" -- and setting LAKE_BUCKET alone would leave every lake tool dead while
+# looking configured. This step sets the FIRST rung.
+#
+# THE NAME IS DERIVED FROM THE PROJECT so a re-run ADOPTS rather than making a second lake, and
+# it is deliberately the same string PC_LAKE would have fallen back to, so the two rungs of that
+# precedence can never disagree with each other.
+PC_LAKE_BUCKET="${PROJECT}-datalake"
+if gcloud storage buckets describe "gs://$PC_LAKE_BUCKET" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "  adopting gs://$PC_LAKE_BUCKET"
+else
+  PC_LB_RC=0
+  retry gcloud storage buckets create "gs://$PC_LAKE_BUCKET" --project "$PROJECT" \
+    --location="$REGION" --uniform-bucket-level-access --public-access-prevention >/dev/null \
+    || PC_LB_RC=$?
+  gcloud storage buckets describe "gs://$PC_LAKE_BUCKET" --project "$PROJECT" >/dev/null 2>&1 \
+    || die "the data lake bucket gs://$PC_LAKE_BUCKET is still absent after a create attempt
+(exit $PC_LB_RC). BUCKET NAMES ARE GLOBALLY UNIQUE, so the likeliest cause is that this exact
+name already belongs to somebody else's project -- in which case create returns 409 and describe
+returns 403, and no re-run of this installer will ever fix it. Create a bucket of your own in
+$REGION with uniform bucket-level access and public access prevented, grant
+roles/storage.objectAdmin on it to
+$CP_SA, and set its name on the control plane yourself:
+    gcloud run services update $CP_SVC --region $REGION --project $PROJECT \
+      --update-env-vars DATA_LAKE_BUCKET=<your-bucket>
+    gcloud run services update $MC_SVC --region $REGION --project $PROJECT \
+      --update-env-vars DATA_LAKE_BUCKET=<your-bucket>
+BOTH services need it: the console renders the lake and the MCP service serves the lake tools.
+DATA_LAKE_BUCKET is the variable the lake tools read; LAKE_BUCKET is NOT a substitute.
+Refusing to coin a second name here: a lake whose name is not derivable from the project id
+is a lake the next run of this installer cannot find, and it would quietly create another."
+  echo "  created gs://$PC_LAKE_BUCKET in $REGION"
+fi
+# The create rc is deliberately NOT trusted, exactly as at 5b/10: a concurrent run makes it a
+# 409, which is success for our purposes. The DESCRIBE above is the authority, and the name is a
+# pure function of the project, so adopting can never produce a duplicate.
+#
+# THE SETTINGS ARE RE-ASSERTED ON EVERY RUN, INCLUDING AN ADOPTED BUCKET. A bucket this
+# installer made earlier is already right; a bucket an operator made by hand may not be, and a
+# lake with per-object ACLs or public access is not something to discover later.
+retry gcloud storage buckets update "gs://$PC_LAKE_BUCKET" --project "$PROJECT" \
+  --uniform-bucket-level-access --public-access-prevention >/dev/null \
+  || die "could not enforce uniform bucket-level access and public access prevention on
+gs://$PC_LAKE_BUCKET. Refusing to point the control plane at a lake whose access model is
+unknown."
+# roles/storage.objectAdmin ON THIS BUCKET ONLY -- never the project-wide role. The control
+# plane reads, writes and deletes lake objects and does nothing else with Cloud Storage.
+# --condition=None is not decoration: against a policy that already CONTAINS a condition,
+# gcloud refuses an unconditioned binding non-interactively, and an adopted bucket may well
+# carry one.
+retry gcloud storage buckets add-iam-policy-binding "gs://$PC_LAKE_BUCKET" --project "$PROJECT" \
+  --member="serviceAccount:$CP_SA" --role=roles/storage.objectAdmin --condition=None >/dev/null \
+  || die "could not grant roles/storage.objectAdmin on gs://$PC_LAKE_BUCKET to $CP_SA."
+echo "  uniform bucket-level access ON, public access PREVENTED, location $REGION"
+echo "  $CP_SA -> roles/storage.objectAdmin on THAT BUCKET ONLY (no project-wide storage role)"
+echo
+echo "  AT REST, STATED EXACTLY, BECAUSE A LAKE THAT LOOKS ENCRYPTED AND IS NOT IS WORSE THAN"
+echo "  ONE THAT SAYS SO. This step provisions the BUCKET. The PCV1 vault is a separate thing"
+echo "  and it is provisioned at 5e/10, which reports its own outcome:"
+echo "    - the control plane seals a lake object with a master key derived by Cloud KMS"
+echo "      KEM_XWING decapsulation over the object shared/vault/master.kem. 5e/10 creates the"
+echo "      keyring and the KEM key ALWAYS, and MINTS master.kem when this machine can do a"
+echo "      client-side X-Wing encapsulation -- verified against KMS before it is published."
+echo "    - THE MINT IS CONDITIONAL AND THE CONDITION IS A LIBRARY: it needs a Python"
+echo "      cryptography carrying ML-KEM-768. A bare python3 has none, and openssl 3.5.6 does"
+echo "      not implement X-Wing, so on such a machine 5e/10 prints exactly what is missing"
+echo "      and skips the mint. It is never forged."
+echo "    - WITH master.kem PRESENT the lake is SEALED. WITHOUT it the lake is FAIL-CLOSED, NOT"
+echo "      PLAINTEXT: harWriteLake calls vaultMaster() before file.save(), so every write"
+echo "      outside the five cleartext prefixes THROWS. There is no plaintext fallback branch,"
+echo "      and a write that appears to succeed and is unsealed is not a state this code reaches."
+echo "    - the five prefixes shared/deploy/ shared/harness/ shared/passkey/ shared/mcp-oauth/"
+echo "      shared/vault/ are stored PLAINTEXT BY DESIGN -- the control plane loads and"
+echo "      executes them at boot. That list is an invariant across three peers; it is not a"
+echo "      setting and it must never be widened."
+echo "    - a sealed object is exactly 34 bytes longer than its plaintext (4 magic + 1 epoch"
+echo "      + 1 flags + 12 nonce + 16 GCM tag). Equal size means PLAINTEXT. That is how to"
+echo "      check, and it needs no key."
+echo
+
+say "5d/10 workstation VM (optional, default no)"
+# [SEC-WSVM-OPTIN-V1] vm_status, vm_start, vm_stop and vm_resize act on a Compute
+# Engine instance named by WS_VM in zone WS_ZONE -- index.ts:2910-2911 and :1493-1494, which
+# carry a built-in default name and zone. No instance was ever created and neither variable was
+# ever set, so four tools registered and then failed against a machine nobody made.
+# [SEC-SSHKEY-PREFLIGHT-V1] ssh_executor IS NOT ONE OF THEM AND SAYING IT WAS SENT ADOPTERS
+# THE WRONG WAY. It reads NEITHER WS_VM NOR WS_ZONE -- it takes its target as a tool argument
+# and needs a PRIVATE KEY, from the Secret Manager secret named by EXEC_SSH_KEY_SECRET on the
+# executor. This installer creates no such secret, so ssh jobs are REFUSED, and gate-exec now
+# refuses them ABOVE the approval claim so a refusal costs no approval. Creating the VM below
+# does not make ssh_executor work: this instance is created with --no-address and OS Login
+# enforced, and the executor has no VPC route to it.
+# It is opt-in and it defaults to NO, because a running VM bills by the hour and most adopters
+# do not want one.
+# --rehearse MUST NOT PROMPT. An unattended rehearsal has to reach the 9/10 boundary with no
+# human, and this script has exactly ONE prompt in it -- the ENTER after the passkey, below the
+# boundary, which a rehearsal never reaches. Keep it that way: the answer is taken from
+# PC_WANT_VM when it is set, and under --rehearse an unset PC_WANT_VM answers NO without asking.
+# Setting PC_WANT_VM=y is also how CI rehearses the create path.
+PC_WANT_VM="${PC_WANT_VM-}"
+if [ -z "$PC_WANT_VM" ]; then
+  if [ "$PC_REHEARSE" = 1 ]; then
+    PC_WANT_VM=n
+    echo "  --rehearse: answering NO without asking, so this run needs no human."
+    echo "  Set PC_WANT_VM=y to rehearse the create path instead."
+  else
+    printf '  Create a workstation VM so the vm_* tools work? [y/N]: '
+    read PC_WANT_VM || PC_WANT_VM=n
+  fi
+fi
+case "$PC_WANT_VM" in
+  y|Y|yes|YES|Yes) PC_WANT_VM=y ;;
+  *)               PC_WANT_VM=n ;;
+esac
+PC_VM_ENV=""
+if [ "$PC_WANT_VM" = n ]; then
+  echo "  no VM. WS_VM and WS_ZONE are left UNSET, and unset is not the same as harmless:"
+  echo "  vm_status, vm_start, vm_stop and vm_resize STILL REGISTER and will fail against"
+  echo "  the built-in default name in us-central1-a. Those four tools will not work."
+  echo "  Re-run with PC_WANT_VM=y to add one later; nothing else in this install depends"
+  echo "  on it. ssh_executor is a SEPARATE case and a VM does not fix it -- see above."
+else
+  WS_VM_NAME=paracoding-workstation
+  # A FIXED NAME, AND DELIBERATELY NOT A ROLE NAME. WS_VM and WS_ZONE are both written onto the
+  # control plane at 6/10 below, so nothing here depends on this matching any built-in default
+  # in the code, and a re-run still adopts the instance by name. A FAILED LIST IS FATAL: this is
+  # the N16 class, and the consequence of misreading a failed query as "no instance" is a SECOND
+  # billed workstation that no later run adopts.
+  PC_VMLIST_RC=0
+  PC_VMLIST=$(gcloud compute instances list --project "$PROJECT" \
+    --filter="name=($WS_VM_NAME)" --format='value(zone)' 2>/dev/null) || PC_VMLIST_RC=$?
+  [ "$PC_VMLIST_RC" -eq 0 ] || die "could not list the Compute Engine instances in $PROJECT
+(exit $PC_VMLIST_RC). Refusing to continue: this installer cannot tell a project with no
+workstation from a query that failed, and guessing wrong CREATES A SECOND billed VM instead of
+adopting the one you already have."
+  WS_VM_ZONE=$(printf '%s\n' "$PC_VMLIST" | sed -n '1p' | sed 's#.*/##')
+  if [ -n "$WS_VM_ZONE" ]; then
+    echo "  adopting the existing instance $WS_VM_NAME in $WS_VM_ZONE"
+  else
+    # EMPTY FROM A SUCCESSFUL LIST IS THE NORMAL FRESH-PROJECT STATE and is not fatal -- it is
+    # the create case. Only a non-zero status changed meaning, exactly as at 2/10.
+    # The ZONE is LISTED, never composed. "$REGION-a" is a trap: us-east1 has b, c and d and no
+    # a at all, so a composed zone would fail the create in the commonest region this installer
+    # is run in.
+    PC_ZONES_RC=0
+    PC_ZONES=$(gcloud compute zones list --project "$PROJECT" \
+      --filter="name~^${REGION}- AND status=UP" --format='value(name)' 2>/dev/null) || PC_ZONES_RC=$?
+    [ "$PC_ZONES_RC" -eq 0 ] || die "could not list the Compute Engine zones in $REGION (exit
+$PC_ZONES_RC). Refusing to compose a zone name from the region: $REGION-a does not exist in
+every region, and writing an unusable zone into WS_ZONE leaves the VM tools polling forever for
+a machine that was never created."
+    WS_VM_ZONE=$(printf '%s\n' "$PC_ZONES" | sed -n '1p')
+    [ -n "$WS_VM_ZONE" ] || die "$REGION reports no Compute Engine zone that is UP. Pick another
+region, or create the workstation yourself and set WS_VM and WS_ZONE on $CP_SVC."
+    PC_VMC_RC=0
+    retry gcloud compute instances create "$WS_VM_NAME" --project "$PROJECT" \
+      --zone "$WS_VM_ZONE" --machine-type e2-standard-2 \
+      --image-family debian-12 --image-project debian-cloud \
+      --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+      --metadata enable-oslogin=TRUE --no-address --no-service-account --no-scopes \
+      --quiet >/dev/null || PC_VMC_RC=$?
+    gcloud compute instances describe "$WS_VM_NAME" --zone "$WS_VM_ZONE" --project "$PROJECT" \
+      >/dev/null 2>&1 \
+      || die "the workstation VM $WS_VM_NAME is still absent in $WS_VM_ZONE after a create
+attempt (exit $PC_VMC_RC). The describe is the authority here, not the create status, because a
+concurrent run makes create a 409 and that is success for our purposes."
+    echo "  created $WS_VM_NAME in $WS_VM_ZONE (e2-standard-2, Debian 12, Shielded VM)"
+    echo "  It has NO EXTERNAL IP, NO ATTACHED SERVICE ACCOUNT and OS Login enforced. That is"
+    echo "  deliberate: a workstation with the default compute service account is a project-wide"
+    echo "  credential anyone on the box can use, and an external IP puts port 22 on the"
+    echo "  internet. The cost is that it has no egress and no GCP identity until you choose to"
+    echo "  give it them:"
+    echo "    reach it     gcloud compute ssh $WS_VM_NAME --zone $WS_VM_ZONE --tunnel-through-iap"
+    echo "    egress       add a Cloud NAT on the subnet in $REGION"
+    echo "    identity     gcloud compute instances set-service-account $WS_VM_NAME ..."
+  fi
+  PC_VM_ENV=",WS_VM=$WS_VM_NAME,WS_ZONE=$WS_VM_ZONE"
+  echo "  WS_VM=$WS_VM_NAME WS_ZONE=$WS_VM_ZONE will be set on $CP_SVC at 6/10"
+fi
+
+say "5e/10 the PCV1 vault key (Cloud KMS, KEM_XWING)"
+# [SEC-VAULT-KMS-V1] 5c/10 CREATED THE BUCKET. A BUCKET IS NOT A VAULT, AND THE DIFFERENCE IS A
+# TOOL THAT WORKS VERSUS A TOOL THAT THROWS. index.ts harWriteLake calls vaultMaster() BEFORE
+# file.save(), so with no vault EVERY write outside the five cleartext prefixes throws. The
+# shipped README used to say the remediation was "create a bucket, grant objectAdmin, set the
+# variable" -- follow that exactly and write_file and put_file still die. This step is the half
+# that was missing.
+#
+# THREE THINGS, AND THE THIRD IS THE ONE THAT CANNOT ALWAYS BE DONE FROM HERE:
+#   1. keyring paracoding-vault in $REGION                       -- pure gcloud, always
+#   2. key vault-kem-xwing (KEY_ENCAPSULATION / KEM_XWING) with roles/cloudkms.decapsulator
+#      granted to $CP_SA KEY-SCOPED, never project-wide          -- pure gcloud, always
+#   3. the lake object shared/vault/master.kem                   -- needs a CLIENT-SIDE X-Wing
+#      encapsulation. MEASURED, not assumed: openssl 3.5.6 does NOT implement X-Wing --
+#      `openssl list -kem-algorithms` offers ML-KEM-512/768/1024 and the TLS hybrid groups, and
+#      X25519MLKEM768 is NOT a substitute because the TLS group concatenates where X-Wing runs a
+#      SHA3-256 combiner. Python cryptography DOES carry ML-KEM-768 and X25519, which is enough
+#      to build X-Wing, but cryptography is NOT a prerequisite of this script and a bare python3
+#      has no ML-KEM at all. So step 3 is ATTEMPTED, VERIFIED AGAINST KMS BEFORE IT IS
+#      PUBLISHED, and when it cannot be done it is SAID OUT LOUD and skipped. It is never forged.
+#
+# shared/vault/ IS ONE OF THE FIVE CLEARTEXT PREFIXES AND MUST STAY THAT WAY. master.kem is the
+# bootstrap; it cannot be encrypted by the thing it bootstraps. That list is one invariant across
+# three peers -- index.ts, shared/vault/envelope.py, shared/runner/vault_runtime.py. Never widen it.
+PC_VKR=paracoding-vault
+PC_VKEY=vault-kem-xwing
+PC_VAULT_OK=1
+pc_vault_fail() {
+  PC_VAULT_OK=0
+  if [ "$PC_REHEARSE" = 1 ]; then
+    echo "  VAULT KEY NOT PROVISIONED: $1"
+    echo "  Permitted under --rehearse ONLY. The lake stays FAIL-CLOSED -- a non-cleartext write"
+    echo "  throws rather than landing in plaintext -- so nothing is left half-armed."
+  else
+    die "could not provision the PCV1 vault key.
+  $1
+Refusing to continue. The control plane would come up with lake tools that register cleanly and
+throw on the first write, which is the exact defect class this release exists to close."
+  fi
+}
+# THE SUBCOMMAND IS VERIFIED BEFORE ITS OUTPUT IS TRUSTED. `gcloud projects test-iam-permissions`
+# did not exist in SDK 578 and silently skipped a preflight for its entire life; a KEM purpose is
+# newer than that. If this gcloud cannot express the purpose, stop here rather than create a key
+# of the wrong kind that a later run would adopt.
+gcloud kms keys create --help 2>/dev/null | grep -q 'key-encapsulation' \
+  || pc_vault_fail "this gcloud ($(gcloud version 2>/dev/null | head -1)) has no
+--purpose=key-encapsulation, so it cannot create a KEM key. Upgrade the SDK and re-run."
+if [ "$PC_VAULT_OK" = 1 ]; then
+  if gcloud kms keyrings describe "$PC_VKR" --location "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
+    echo "  adopting keyring $PC_VKR in $REGION"
+  else
+    retry gcloud kms keyrings create "$PC_VKR" --location "$REGION" --project "$PROJECT" >/dev/null 2>&1
+    gcloud kms keyrings describe "$PC_VKR" --location "$REGION" --project "$PROJECT" >/dev/null 2>&1 \
+      || pc_vault_fail "keyring $PC_VKR is still absent in $REGION after a create attempt."
+  fi
+fi
+# The create rc is deliberately NOT trusted, exactly as at 5b/10: a concurrent run makes it
+# ALREADY_EXISTS, which is success for our purposes. The DESCRIBE is the authority, and a keyring
+# name is unique within a location, so adopting can never produce a duplicate.
+if [ "$PC_VAULT_OK" = 1 ]; then
+  if gcloud kms keys describe "$PC_VKEY" --keyring "$PC_VKR" --location "$REGION" \
+    --project "$PROJECT" >/dev/null 2>&1; then
+    echo "  adopting key $PC_VKEY"
+  else
+    retry gcloud kms keys create "$PC_VKEY" --keyring "$PC_VKR" --location "$REGION" \
+      --purpose key-encapsulation --default-algorithm kem-xwing \
+      --project "$PROJECT" >/dev/null 2>&1
+    gcloud kms keys describe "$PC_VKEY" --keyring "$PC_VKR" --location "$REGION" \
+      --project "$PROJECT" >/dev/null 2>&1 \
+      || pc_vault_fail "key $PC_VKEY is still absent on keyring $PC_VKR after a create attempt."
+  fi
+fi
+# THE ALGORITHM IS RE-ASSERTED ON EVERY RUN, INCLUDING AN ADOPTED KEY. index.ts pins epoch 2 to
+# KEM_XWING with a 1120-byte ciphertext; a key adopted from an earlier hand-built attempt could
+# be ML-KEM-768 or ML-KEM-1024, whose ciphertexts are 1088 and 1568 bytes. Those decapsulate
+# happily and derive a DIFFERENT master, which encrypts fine and decrypts nothing.
+if [ "$PC_VAULT_OK" = 1 ]; then
+  PC_VALG=$(gcloud kms keys describe "$PC_VKEY" --keyring "$PC_VKR" --location "$REGION" \
+    --project "$PROJECT" --format='value(versionTemplate.algorithm)' 2>/dev/null); PC_VALG_RC=$?
+  [ "$PC_VALG_RC" -eq 0 ] \
+    || pc_vault_fail "could not read the algorithm of $PC_VKEY (exit $PC_VALG_RC). A failed
+describe is not an answer, and adopting a key whose algorithm is unknown is how a vault ends up
+deriving a master nobody can decrypt with."
+  if [ "$PC_VAULT_OK" = 1 ] && [ "$PC_VALG" != "KEM_XWING" ]; then
+    pc_vault_fail "key $PC_VKEY exists on keyring $PC_VKR but its algorithm is '$PC_VALG', not
+KEM_XWING. This installer will NOT create a second key beside it and will NOT rewrite yours.
+Either destroy that key, or point this install at a keyring of its own."
+  fi
+fi
+# roles/cloudkms.decapsulator ON THIS KEY ONLY. Measured with `gcloud iam roles describe`: it
+# carries cloudkms.cryptoKeyVersions.useToDecapsulate and viewPublicKey and nothing that can
+# encrypt, sign or administer. The broad roles/cloudkms.cryptoOperator would also work and is
+# what an earlier hand-built vault used; it is far too much.
+if [ "$PC_VAULT_OK" = 1 ]; then
+  retry gcloud kms keys add-iam-policy-binding "$PC_VKEY" --keyring "$PC_VKR" \
+    --location "$REGION" --project "$PROJECT" --member="serviceAccount:$CP_SA" \
+    --role=roles/cloudkms.decapsulator --condition=None >/dev/null \
+    || pc_vault_fail "could not grant roles/cloudkms.decapsulator on $PC_VKEY to $CP_SA."
+fi
+if [ "$PC_VAULT_OK" = 1 ]; then
+  echo "  $PC_VKEY ready in $REGION (KEY_ENCAPSULATION / KEM_XWING, one version)"
+  echo "  $CP_SA -> roles/cloudkms.decapsulator on THAT KEY ONLY (no project-wide KMS role)"
+fi
+# ---- master.kem: minted here when this machine can, refused loudly when it cannot ----
+# THE CAPABILITY IS TESTED, NOT ASSUMED, AND THE TEST IS THE IMPORT ITSELF.
+PC_KEM_LIB=0
+if [ "$PC_VAULT_OK" = 1 ]; then
+  python3 -c "from cryptography.hazmat.primitives.asymmetric import mlkem, x25519
+mlkem.MLKEM768PublicKey" >/dev/null 2>&1 && PC_KEM_LIB=1
+fi
+if [ "$PC_VAULT_OK" = 1 ] && [ "$PC_KEM_LIB" != 1 ]; then
+  echo
+  echo "  THE VAULT KEY EXISTS AND shared/vault/master.kem DOES NOT. STATED PLAINLY, BECAUSE A"
+  echo "  LAKE THAT LOOKS ENCRYPTED AND IS NOT IS WORSE THAN ONE THAT SAYS SO:"
+  echo "    - minting master.kem needs a CLIENT-SIDE X-Wing encapsulation (ML-KEM-768 + X25519)."
+  echo "      This python3 has no ML-KEM. openssl does not implement X-Wing either, so there is"
+  echo "      no way to do it with the prerequisites this script checked at 0/10, and it will"
+  echo "      not be forged."
+  echo "    - UNTIL IT EXISTS THE LAKE IS FAIL-CLOSED, NOT PLAINTEXT: every write outside the"
+  echo "      five cleartext prefixes THROWS. read_file and list_files work; write_file and"
+  echo "      put_file do not. That is a refusal, not a leak."
+  echo "    - TO FINISH IT, on any machine with the library, re-run this installer:"
+  echo "        python3 -m pip install 'cryptography>=46'   (or a distro python3-cryptography)"
+  echo "        ./install.sh $PROJECT $REGION"
+  echo "      Provisioning is idempotent: the keyring and key above are ADOPTED, not remade, and"
+  echo "      the mint below is skipped if master.kem is already there."
+  echo
+fi
+if [ "$PC_VAULT_OK" = 1 ] && [ "$PC_KEM_LIB" = 1 ]; then
+  if gcloud storage objects describe "gs://$PC_LAKE_BUCKET/shared/vault/master.kem" \
+    --project "$PROJECT" >/dev/null 2>&1; then
+    echo "  shared/vault/master.kem already exists -- ADOPTED, never overwritten."
+    echo "  Rewriting it would derive a new master and orphan every object sealed under the old"
+    echo "  one, and this installer has no way to re-seal a lake it did not write."
+  else
+    # THE MINT IS VERIFIED BEFORE IT IS PUBLISHED, AND THAT IS THE WHOLE DIFFERENCE BETWEEN THIS
+    # AND FORGING IT. X-Wing's combiner is SHA3-256 over ss_M|ss_X|ct_X|pk_X with the 6-byte
+    # X-Wing label LAST -- measured against Cloud KMS, and the label-FIRST ordering that some
+    # drafts specify produces a different shared secret. Getting it wrong yields a master that
+    # encrypts happily and decrypts nothing, so the ciphertext is handed BACK to KMS and the
+    # returned shared secret must equal the one computed locally. If it does not, nothing is
+    # written. Verifying needs decapsulate, which the installing account does not hold, so the
+    # grant is taken for the length of the check and revoked immediately afterwards.
+    case "$ACCT" in
+      *.gserviceaccount.com) PC_VMEM="serviceAccount:$ACCT" ;;
+      *)                     PC_VMEM="user:$ACCT" ;;
+    esac
+    PC_VTMP_RC=0
+    retry gcloud kms keys add-iam-policy-binding "$PC_VKEY" --keyring "$PC_VKR" \
+      --location "$REGION" --project "$PROJECT" --member="$PC_VMEM" \
+      --role=roles/cloudkms.decapsulator --condition=None >/dev/null || PC_VTMP_RC=$?
+    if [ "$PC_VTMP_RC" -ne 0 ]; then
+      pc_vault_fail "could not grant yourself ($PC_VMEM) temporary decapsulate on $PC_VKEY to
+verify the mint (exit $PC_VTMP_RC). Refusing to publish a master.kem that was never checked."
+    fi
+    PC_MINT_RC=0
+    if [ "$PC_VAULT_OK" = 1 ]; then
+      PC_KEMTOK=$(gcloud auth print-access-token 2>/dev/null); PC_KEMTOK_RC=$?
+      [ "$PC_KEMTOK_RC" -eq 0 ] || PC_MINT_RC=91
+    fi
+    if [ "$PC_VAULT_OK" = 1 ] && [ "$PC_MINT_RC" -eq 0 ]; then
+      PC_KEMKV="projects/$PROJECT/locations/$REGION/keyRings/$PC_VKR/cryptoKeys/$PC_VKEY/cryptoKeyVersions/1"
+      PC_KEM_KV="$PC_KEMKV" PC_KEM_TOK="$PC_KEMTOK" PC_KEM_OUT="$HERE/.master.kem.tmp" python3 - <<'PCVMINT'
+import base64, datetime, hashlib, json, os, sys, urllib.request
+from cryptography.hazmat.primitives.asymmetric import mlkem, x25519
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+
+KV  = os.environ["PC_KEM_KV"]
+TOK = os.environ["PC_KEM_TOK"]
+OUT = os.environ["PC_KEM_OUT"]
+BASE = "https://cloudkms.googleapis.com/v1/"
+
+def call(url, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=("POST" if data else "GET"))
+    req.add_header("Authorization", "Bearer " + TOK)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+def fail(msg):
+    sys.stderr.write("MINT-REFUSED: " + msg + "\n")
+    sys.exit(1)
+
+try:
+    pk = call(BASE + KV + "/publicKey?publicKeyFormat=XWING_RAW_BYTES")
+except Exception as e:
+    fail("could not read the X-Wing public key: %s" % e)
+ek = base64.b64decode((pk.get("publicKey") or {}).get("data") or "")
+if len(ek) != 1216:
+    fail("public key is %d bytes, want 1216 (ML-KEM-768 ek 1184 + X25519 pk 32)" % len(ek))
+pk_M, pk_X = ek[:1184], ek[1184:]
+
+ss_M, ct_M = mlkem.MLKEM768PublicKey.from_public_bytes(pk_M).encapsulate()
+esk_X = x25519.X25519PrivateKey.generate()
+ct_X  = esk_X.public_key().public_bytes_raw()
+ss_X  = esk_X.exchange(x25519.X25519PublicKey.from_public_bytes(pk_X))
+ct = ct_M + ct_X
+if len(ct) != 1120:
+    fail("X-Wing ciphertext is %d bytes, want 1120" % len(ct))
+
+XWING_LABEL = bytes([0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c])
+ss_local = hashlib.sha3_256(ss_M + ss_X + ct_X + pk_X + XWING_LABEL).digest()
+
+try:
+    dec = call(BASE + KV + ":decapsulate", {"ciphertext": base64.b64encode(ct).decode()})
+except Exception as e:
+    fail("KMS refused to decapsulate the freshly minted ciphertext: %s" % e)
+ss_kms = base64.b64decode(dec.get("sharedSecret") or dec.get("shared_secret") or "")
+if ss_kms != ss_local:
+    fail("the shared secret KMS derived does not match the one computed here. The X-Wing "
+         "combiner in this build disagrees with the key. NOTHING WAS WRITTEN -- a master.kem "
+         "published now would encrypt happily and decrypt nothing.")
+
+master = HKDF(algorithm=hashes.SHA256(), length=32, salt=bytes(32),
+              info=b"paracoding-vault master v1").derive(ss_kms)
+created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+env = ('{"v":1,"epoch":2,"kem_alg":"KEM_XWING","kem_version":1,"kdf":"HKDF-SHA256"'
+       ',"kdf_info":"paracoding-vault master v1","kem_ct_b64":"'
+       + base64.b64encode(ct).decode() + '","created":"' + created + '"}')
+if len(env) != 1660:
+    fail("envelope is %d bytes, want 1660" % len(env))
+json.loads(env)
+with open(OUT, "w") as f:
+    f.write(env)
+print("  verified against KMS: local and decapsulated shared secrets agree")
+print("  master key fingerprint sha256 %s (the key itself is never written or printed)"
+      % hashlib.sha256(master).hexdigest()[:32])
+print("  envelope %d bytes, epoch 2, KEM_XWING ciphertext %d bytes" % (len(env), len(ct)))
+PCVMINT
+      PC_MINT_RC=$?
+    fi
+    # THE REVOKE IS NOT OPTIONAL AND IT IS JUDGED BY RE-READING THE POLICY, NOT BY ITS EXIT CODE.
+    # --condition=None on the remove is load-bearing for the same reason it is on the add: against
+    # a policy that already contains a condition, gcloud refuses an unflagged remove
+    # non-interactively, and a half-fixed job opens a privilege window it cannot close.
+    PC_VREV_RC=0
+    gcloud kms keys remove-iam-policy-binding "$PC_VKEY" --keyring "$PC_VKR" \
+      --location "$REGION" --project "$PROJECT" --member="$PC_VMEM" \
+      --role=roles/cloudkms.decapsulator --condition=None >/dev/null 2>&1 || PC_VREV_RC=$?
+    PC_VLEFT=$(gcloud kms keys get-iam-policy "$PC_VKEY" --keyring "$PC_VKR" --location "$REGION" \
+      --project "$PROJECT" --format=json 2>/dev/null | python3 -c 'import sys,json
+try: p = json.load(sys.stdin)
+except Exception: print("UNREADABLE"); raise SystemExit
+m = sys.argv[1]
+print("PRESENT" if any(m in (b.get("members") or []) for b in (p.get("bindings") or [])) else "GONE")' "$PC_VMEM")
+    if [ "$PC_VLEFT" != "GONE" ]; then
+      die "TEMPORARY DECAPSULATE GRANT WAS NOT REVOKED. $PC_VMEM still appears on the IAM policy
+of $PC_VKEY (remove exit $PC_VREV_RC, policy re-read said '$PC_VLEFT'). A leaked privilege is not
+the same outcome as a failed mint and is never reported as one. Revoke it by hand:
+  gcloud kms keys remove-iam-policy-binding $PC_VKEY --keyring $PC_VKR --location $REGION \\
+    --project $PROJECT --member=$PC_VMEM --role=roles/cloudkms.decapsulator --condition=None"
+    fi
+    echo "  temporary decapsulate grant revoked, confirmed by re-reading the key's IAM policy"
+    if [ "$PC_VAULT_OK" = 1 ] && [ "$PC_MINT_RC" -ne 0 ]; then
+      rm -f "$HERE/.master.kem.tmp"
+      pc_vault_fail "minting shared/vault/master.kem failed (exit $PC_MINT_RC) and NOTHING was
+published. The refusal above says which check stopped it. The lake stays fail-closed."
+    fi
+    if [ "$PC_VAULT_OK" = 1 ]; then
+      PC_VUP_RC=0
+      gcloud storage cp "$HERE/.master.kem.tmp" \
+        "gs://$PC_LAKE_BUCKET/shared/vault/master.kem" --project "$PROJECT" >/dev/null 2>&1 \
+        || PC_VUP_RC=$?
+      rm -f "$HERE/.master.kem.tmp"
+      [ "$PC_VUP_RC" -eq 0 ] \
+        || pc_vault_fail "could not upload shared/vault/master.kem (exit $PC_VUP_RC)."
+    fi
+    if [ "$PC_VAULT_OK" = 1 ]; then
+      PC_VSZ=$(gcloud storage objects describe "gs://$PC_LAKE_BUCKET/shared/vault/master.kem" \
+        --project "$PROJECT" --format='value(size)' 2>/dev/null); PC_VSZ_RC=$?
+      [ "$PC_VSZ_RC" -eq 0 ] \
+        || pc_vault_fail "wrote shared/vault/master.kem and could not read it back (exit $PC_VSZ_RC)."
+      [ "$PC_VSZ" = "1660" ] \
+        || pc_vault_fail "shared/vault/master.kem reads back at $PC_VSZ bytes, want 1660."
+      echo "  shared/vault/master.kem published and read back at 1660 bytes"
+      echo "  It is stored PLAINTEXT ON PURPOSE: shared/vault/ is one of the five cleartext"
+      echo "  prefixes, and the bootstrap cannot be sealed by the thing it bootstraps. The"
+      echo "  object holds only a PUBLIC KEM ciphertext -- the master key is never in it, and"
+      echo "  only $CP_SA can turn it back into one."
+    fi
+  fi
+fi
+if [ "$PC_VAULT_OK" = 1 ]; then
+  echo
+  echo "  HOW TO CHECK ENCRYPTION AT REST, AND IT NEEDS NO KEY: a sealed object is exactly 34"
+  echo "  bytes longer than its plaintext (4 magic + 1 epoch + 1 flags + 12 nonce + 16 GCM tag)"
+  echo "  and begins with the ASCII bytes PCV1. EQUAL SIZE MEANS PLAINTEXT."
+fi
+
 say "6/10 building and deploying the control plane"
+# [SEC-SURFACE-SPLIT-V1] ONE BUILD, TWO SERVICES. The console is deployed --source, which
+# builds the image; the MCP service is then deployed from THE IMAGE THAT BUILD PRODUCED, read
+# off the console's ready revision. Deploying both --source would build the same tree twice
+# and could, on a re-run, put two DIFFERENT images behind one URL pair -- a split-brain that
+# is invisible until a route behaves differently on one surface.
+#
+# PC_SURFACE IS THE ONLY THING THAT DIFFERS IN KIND. index.ts registers every route when
+# PC_SURFACE is unset (today's single service, byte for byte); console keeps the 63 browser
+# routes, mcp keeps the 25 machine-client routes. A path in neither table THROWS at boot, so
+# a route added without a surface fails the deploy instead of vanishing from one service.
+#
+# THE TWO ENV DIFFERENCES, EACH DELIBERATE:
+#   MCP_PUBLIC_URL   $MC_URL on BOTH. It is the address of the MCP resource, and that resource
+#                    lives on the MCP service. oaPubBase() builds every discovery document
+#                    from it, so the console's URL must never appear there.
+#   PC_IAP_AUD       CONSOLE ONLY. It is the audience of the IAP JWT and IAP is enabled on the
+#                    console alone. Setting it on the MCP service would name an audience no
+#                    request there can ever carry.
+# WA_RP_ID/WA_RP_ORIGIN are the CONSOLE host on both: the gate is served by the console, and a
+# passkey is bound to that host. Everything else is identical by construction.
 retry gcloud run deploy "$CP_SVC" --source "$HERE/control-plane" --region "$REGION" --project "$PROJECT" \
   --service-account "$CP_SA" --allow-unauthenticated --clear-base-image --quiet \
-  --set-env-vars "WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$CP_URL,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=1,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240" \
+  --set-env-vars "PC_SURFACE=console,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=1,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION$PC_VM_ENV" \
   --update-secrets "WA_SESSION_SECRET=pc-session-secret:latest,HUMAN_CONFIRM_SECRET=pc-human-confirm-secret:latest" \
-  >/dev/null || die "control-plane deploy failed"
-echo "  deployed"
+  >/dev/null || die "console deploy failed"
+echo "  console deployed"
+# READ THE IMAGE OFF THE REVISION, NEVER OFF THE BUILD LOG. There is no set -e, so an empty
+# result here would otherwise walk straight into a deploy with no --image argument.
+PC_CP_REV0=$(gcloud run services describe "$CP_SVC" --region "$REGION" --project "$PROJECT" \
+  --format='value(status.latestReadyRevisionName)' 2>/dev/null); PC_REV0_RC=$?
+[ "$PC_REV0_RC" -eq 0 ] || die "could not read the console revision name (exit $PC_REV0_RC)."
+[ -n "$PC_CP_REV0" ] || die "the console reports no ready revision after a successful deploy."
+PC_IMAGE=$(gcloud run revisions describe "$PC_CP_REV0" --region "$REGION" --project "$PROJECT" \
+  --format='value(spec.containers[0].image)' 2>/dev/null); PC_IMG_RC=$?
+[ "$PC_IMG_RC" -eq 0 ] || die "could not read the image off revision $PC_CP_REV0 (exit $PC_IMG_RC)."
+[ -n "$PC_IMAGE" ] || die "revision $PC_CP_REV0 names no container image. Refusing to deploy the
+MCP service, because without this value it would be deployed from whatever it happens to be
+running now -- which on a fresh install is the placeholder 'hello' image from step 5/10, and
+that image serves no /mcp at all."
+echo "  image $PC_IMAGE"
+retry gcloud run deploy "$MC_SVC" --image "$PC_IMAGE" --region "$REGION" --project "$PROJECT" \
+  --service-account "$CP_SA" --allow-unauthenticated --quiet \
+  --set-env-vars "PC_SURFACE=mcp,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_REQUIRE_PASSKEY=1,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION$PC_VM_ENV" \
+  --update-secrets "WA_SESSION_SECRET=pc-session-secret:latest,HUMAN_CONFIRM_SECRET=pc-human-confirm-secret:latest" \
+  >/dev/null || die "MCP service deploy failed"
+echo "  mcp deployed from the same image"
+# GET / IS A CONSOLE ROUTE, SO THE MCP SERVICE ANSWERS 404 AT ITS ROOT. That is correct and it
+# is why no HTTP startup probe is configured on either deploy above: Cloud Run's DEFAULT probe
+# is a TCP connect to $PORT, which the MCP service satisfies. Adding --startup-probe on / here
+# would make every MCP revision fail to go ready, on a 404 that is the design.
+# [SEC-LAKE-BUCKET-V1] GCP_PROJECT IS SET ABOVE AND IT WAS NEVER SET BEFORE, WHICH IS ITS OWN
+# DEFECT. index.ts:83 resolves PC_PROJECT from GCP_PROJECT or GOOGLE_CLOUD_PROJECT with NO
+# fallback, and Cloud Run sets neither. So PC_PROJECT was the empty string on every install, and
+# every REST URL built from it -- the VM tools at :1495/:2912, run_status at :1536, and the vault
+# KMS key version at :4068-4069, which came out as "projects//locations/..." -- was malformed.
+# The Storage and Firestore clients autodetect the project from the metadata server, which is why
+# this stayed invisible.
+#
+# READ IT BACK OFF THE REVISION THAT IS ACTUALLY SERVING, NEVER OFF THE COMMAND WE JUST RAN. A
+# deploy that reports success and a revision that carries the value are two different facts, and
+# only the second one is worth anything.
+PC_CP_REV=$(gcloud run services describe "$CP_SVC" --region "$REGION" --project "$PROJECT" \
+  --format='value(status.latestReadyRevisionName)' 2>/dev/null); PC_REV_RC=$?
+[ "$PC_REV_RC" -eq 0 ] || die "could not read the control-plane revision name (exit $PC_REV_RC)."
+[ -n "$PC_CP_REV" ] || die "the control plane reports no ready revision after a successful
+deploy. Refusing to verify anything against a service that is not serving."
+PC_REVJSON=$(gcloud run revisions describe "$PC_CP_REV" --region "$REGION" --project "$PROJECT" \
+  --format=json 2>/dev/null); PC_RJ_RC=$?
+[ "$PC_RJ_RC" -eq 0 ] || die "could not describe revision $PC_CP_REV (exit $PC_RJ_RC)."
+PC_SEEN_LAKE=$(printf '%s' "$PC_REVJSON" | python3 -c 'import sys,json
+d = json.load(sys.stdin)
+cs = ((d.get("spec") or {}).get("containers")) or []
+v = [e.get("value","") for c in cs for e in (c.get("env") or []) if e.get("name") == "DATA_LAKE_BUCKET"]
+print(v[0] if v else "")' 2>/dev/null)
+[ "$PC_SEEN_LAKE" = "$PC_LAKE_BUCKET" ] || die "revision $PC_CP_REV is serving
+DATA_LAKE_BUCKET='$PC_SEEN_LAKE', not '$PC_LAKE_BUCKET'. The deploy reported success and the
+variable did not arrive, so read_file, write_file, put_file and list_files would have failed with
+'data lake not configured' on a install that called itself complete."
+echo "  $PC_CP_REV serves DATA_LAKE_BUCKET=$PC_SEEN_LAKE (read off the revision, not asserted)"
+# THE SAME QUESTION, ASKED OF THE OTHER SERVICE, BECAUSE THE LAKE TOOLS LIVE THERE. read_file,
+# write_file, put_file and list_files are MCP tools, so they run on $MC_SVC and not on the
+# console. A console that serves DATA_LAKE_BUCKET proves nothing about them. This also reads
+# back PC_SURFACE, which is the one variable whose absence would silently give you two
+# identical services instead of a split -- and every route would still answer, so nothing
+# downstream would notice.
+PC_MC_REV=$(gcloud run services describe "$MC_SVC" --region "$REGION" --project "$PROJECT" \
+  --format='value(status.latestReadyRevisionName)' 2>/dev/null); PC_MREV_RC=$?
+[ "$PC_MREV_RC" -eq 0 ] || die "could not read the MCP revision name (exit $PC_MREV_RC)."
+[ -n "$PC_MC_REV" ] || die "the MCP service reports no ready revision after a successful deploy."
+PC_MREVJSON=$(gcloud run revisions describe "$PC_MC_REV" --region "$REGION" --project "$PROJECT" \
+  --format=json 2>/dev/null); PC_MRJ_RC=$?
+[ "$PC_MRJ_RC" -eq 0 ] || die "could not describe revision $PC_MC_REV (exit $PC_MRJ_RC)."
+PC_SEEN_MC=$(printf '%s' "$PC_MREVJSON" | python3 -c 'import sys,json
+d = json.load(sys.stdin)
+cs = ((d.get("spec") or {}).get("containers")) or []
+e = dict((x.get("name",""), x.get("value","")) for c in cs for x in (c.get("env") or []))
+print((e.get("PC_SURFACE","") or "UNSET") + " " + (e.get("DATA_LAKE_BUCKET","") or "UNSET")
+      + " " + (e.get("MCP_PUBLIC_URL","") or "UNSET"))' 2>/dev/null)
+[ "$PC_SEEN_MC" = "mcp $PC_LAKE_BUCKET $MC_URL" ] || die "revision $PC_MC_REV is serving
+'$PC_SEEN_MC' for PC_SURFACE / DATA_LAKE_BUCKET / MCP_PUBLIC_URL, and it must serve
+'mcp $PC_LAKE_BUCKET $MC_URL'. A wrong PC_SURFACE gives you two consoles or two MCP servers
+rather than one of each; a wrong MCP_PUBLIC_URL makes OAuth discovery advertise the console's
+address to every connector, which is the defect this split exists to fix."
+echo "  $PC_MC_REV serves PC_SURFACE=mcp and MCP_PUBLIC_URL=$MC_URL (read off the revision)"
+# ONE PROBE OBJECT, WRITTEN AND READ AND DELETED. This proves the BUCKET answers -- the name
+# resolves, the location is right and the credentials work. It is NOT an encryption proof: it
+# goes to Cloud Storage directly, not through the control plane's vault, and 5c/10 says plainly
+# why nothing here can seal an object yet.
+PC_PROBE="install-probe/$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').txt"
+printf 'paracoding install probe' > "$HERE/.p.tmp"
+PC_PW_RC=0
+gcloud storage cp "$HERE/.p.tmp" "gs://$PC_LAKE_BUCKET/$PC_PROBE" --project "$PROJECT" \
+  >/dev/null 2>&1 || PC_PW_RC=$?
+PC_PR_RC=0
+PC_PBACK=$(gcloud storage cat "gs://$PC_LAKE_BUCKET/$PC_PROBE" --project "$PROJECT" 2>/dev/null) \
+  || PC_PR_RC=$?
+gcloud storage rm "gs://$PC_LAKE_BUCKET/$PC_PROBE" --project "$PROJECT" >/dev/null 2>&1
+python3 -c "import os;os.remove('$HERE/.p.tmp')"
+[ "$PC_PW_RC" -eq 0 ] || die "could not WRITE a probe object to gs://$PC_LAKE_BUCKET (exit
+$PC_PW_RC). The bucket exists but is not writable, so the lake tools would fail on first use."
+[ "$PC_PR_RC" -eq 0 ] || die "wrote a probe object to gs://$PC_LAKE_BUCKET and could not READ it
+back (exit $PC_PR_RC)."
+[ "$PC_PBACK" = "paracoding install probe" ] || die "the probe object read back from
+gs://$PC_LAKE_BUCKET did not match what was written."
+echo "  probe object written, read back byte-for-byte and deleted on gs://$PC_LAKE_BUCKET"
 
 say "7/10 gated executor (private) "
 # [SEC-ASSERTION-NOT-YET-V1] Ships DISARMED on purpose. gate-exec demands a per-job
@@ -716,9 +1446,23 @@ $GX_SVC' returned nothing). Refusing to continue, because the next command write
 into the control plane as GATE_EXEC_URL, and writing it EMPTY leaves you with a control plane
 that cannot reach its executor -- no gated job can ever run. Check the service, then re-run:
     gcloud run services describe $GX_SVC --region $REGION --project $PROJECT"
+# [SEC-SURFACE-SPLIT-V1] BOTH SERVICES GET GATE_EXEC_URL, BECAUSE BOTH DISPATCH TO THE
+# EXECUTOR. The console fires an approved job from the gate (POST /api/webauthn/confirm/verify);
+# the MCP service fires one from the legacy agent API (POST /api/jobs/fire) and stages from the
+# tool surface. Setting it on the console alone would leave every machine-side dispatch
+# reaching for an empty URL -- and the failure would look like the executor's IAM.
+#
+# THE TRAFFIC IS ONE-WAY AND THAT WAS CHECKED, NOT ASSUMED. gate-exec is handed NO control-plane
+# URL by this installer and needs none: exec_server.py writes its results straight back into
+# Firestore (job_ref.update) and journals there too. Its whole environment is PC_FIRESTORE_DB,
+# PC_REQUIRE_ASSERTION, PC_RP_ID, the APPROVAL_SIG_* / EXEC_* settings, PC_KMS_HOST and
+# PC_METADATA_HOST. So splitting the control plane in two gives the executor nothing to
+# re-point, and there is deliberately no third URL written anywhere below.
 retry gcloud run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" \
   --update-env-vars "GATE_EXEC_URL=$GX_URL" >/dev/null
-echo "  $GX_URL  (private; only the control plane may call it)"
+retry gcloud run services update "$MC_SVC" --region "$REGION" --project "$PROJECT" \
+  --update-env-vars "GATE_EXEC_URL=$GX_URL" >/dev/null
+echo "  $GX_URL  (private; only the console and the MCP service may call it)"
 # [SEC-APPROVAL-SIGKEY-PAIR-V1] Written HERE, after both services exist, and as their own
 # update commands rather than folded into the --set-env-vars strings above. The allowlist
 # legitimately CONTAINS COMMAS, and a comma inside a --set-env-vars value is a separator,
@@ -736,7 +1480,10 @@ if [ -n "$PC_SIG_KV" ]; then
   retry gcloud run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" \
     --update-env-vars "^@^APPROVAL_SIG_KEY_VERSION=$PC_SIG_KV" >/dev/null \
     || die "could not set APPROVAL_SIG_KEY_VERSION on $CP_SVC"
-  echo "  approval signing: allowlist set on $GX_SVC, then key version pinned on $CP_SVC"
+  retry gcloud run services update "$MC_SVC" --region "$REGION" --project "$PROJECT" \
+    --update-env-vars "^@^APPROVAL_SIG_KEY_VERSION=$PC_SIG_KV" >/dev/null \
+    || die "could not set APPROVAL_SIG_KEY_VERSION on $MC_SVC"
+  echo "  approval signing: allowlist set on $GX_SVC, then key version pinned on both surfaces"
   echo "  READ BOTH BACK off the serving revisions before trusting them."
   # ARMED LAST, AND ONLY LAST. APPROVAL_REQUIRE_SIGNED turns the executor's "absent" rung
   # from allow into refuse. Writing it before the two updates above would refuse every
@@ -756,42 +1503,584 @@ if [ -n "$PC_SIG_KV" ]; then
   fi
 fi
 
-say "8/10 putting the console behind Google (IAP)"
-# [SEC-INSTALL-IAP-V1] IAP authenticates a real human at Google's edge before a single byte reaches
-# this app -- and it uses a GOOGLE-MANAGED OAuth client, so there is no consent screen to
-# configure and no client to create. That is what makes this install one command.
+say "8/10 two surfaces: the console behind IAP, the MCP service in front of it"
+# [SEC-IAP-MCP-CARVEOUT-V1] [SEC-SURFACE-SPLIT-V1] THE DEFECT THIS STEP EXISTS NOT TO
+# REINTRODUCE, IN EITHER DIRECTION. Both previous shapes were wrong:
+#   ONE SERVICE, IAP ON   IAP protects the WHOLE service, /mcp included. It answered 401 at
+#                         the edge and the app was never reached, while the installer handed
+#                         out $CP_URL/mcp as a connector endpoint. No MCP client could ever
+#                         connect. A bearer token is not a workaround: IAP CONSUMES the
+#                         Authorization header, so a token that satisfies IAP cannot also
+#                         carry MCP session identity. Measured: POST /mcp with a bearer still
+#                         answered 401 with x-goog-iap-generated-response: true.
+#   ONE SERVICE, IAP OFF  /mcp works and the console is exposed to anyone who learns the URL,
+#                         with the app's own passkey session as the only layer. That also
+#                         destroys the bootstrap path this install depends on -- IAP is how
+#                         you reach the gate on a brand-new install, BEFORE a passkey exists.
 #
-# TWO APIs ARE REQUIRED, and the second one is not obvious: without cloudresourcemanager the
-# access binding fails with a bare SERVICE_DISABLED and no hint. Learned the hard way.
-retry gcloud services enable iap.googleapis.com cloudresourcemanager.googleapis.com \
-  --project "$PROJECT" >/dev/null || die "could not enable the IAP APIs"
-if gcloud beta run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" --iap --quiet >/dev/null 2>&1; then
-  # The access grant goes on the IAP resource, NOT on the Run service. Granting
-  # roles/iap.httpsResourceAccessor via `run services add-iam-policy-binding` is rejected.
-  # [SEC-IAP-MEMBER-TYPE-V1] The principal type must MATCH the identity, and "user:" was
-  # hardcoded. An IAM member is TYPE:EMAIL, and Google rejects the pair outright rather
-  # than ignoring it: 'INVALID_ARGUMENT: Principal ... is of type "serviceAccount". The
-  # principal should appear as "serviceAccount:..."'. Measured at step 8/10 in build
-  # 692c3bdd, which is the first run in the installer's life to reach this line.
-  # Outside rehearsal step 0/10 refuses a service account, so a real install always took
-  # the "user:" branch and this was never wrong for a human -- which is exactly why it
-  # survived. It is still a latent defect: the string was asserted, not derived.
-  case "$ACCT" in
-    *gserviceaccount.com) PC_IAP_MEMBER="serviceAccount:$ACCT" ;;
-    *)                    PC_IAP_MEMBER="user:$ACCT" ;;
-  esac
-  retry gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service="$CP_SVC" \
-    --region="$REGION" --project="$PROJECT" --member="$PC_IAP_MEMBER" \
-    --role=roles/iap.httpsResourceAccessor >/dev/null \
-    || die "IAP is on but $ACCT was not granted access -- you would be locked out. Grant it and re-run."
-  echo "  the console is behind IAP. only $ACCT can reach it."
+# A PATH-LEVEL CARVE-OUT DOES NOT EXIST ON CLOUD RUN, PROVEN AGAINST THE REAL APIS:
+#   1. IapSettings (iap.googleapis.com v1, discovery revision 20260803) carries accessSettings
+#      and applicationSettings and NO path, matcher or exclusion field anywhere in the schema.
+#      IAP on Cloud Run is a per-SERVICE boolean; there is nothing finer to set.
+#   2. Granting roles/iap.httpsResourceAccessor to allUsers under the condition
+#      request.path.startsWith("/mcp") returns INVALID_ARGUMENT 'Conditions are not allowed on
+#      public resources.' Conditions are legal only for named principals, and an MCP client
+#      has no Google identity to name.
+# One switch per service, therefore two services. That is what step 6/10 deployed.
+#
+# THE HALF THAT IS INVISIBLE UNTIL YOU CURL IT, AND IT BITES ON BOTH SERVICES.
+# Enabling IAP on Cloud Run REVOKES the allUsers -> roles/run.invoker binding that
+# --allow-unauthenticated created, and hands invocation to the IAP service agent alone.
+# So --no-iap ALONE leaves a service answering a bare Google Frontend 403 to everyone --
+# a THIRD unreachable signature, with no x-goog-iap-generated-response and no
+# www-authenticate. Both halves are therefore handled EXPLICITLY on each service below:
+# the MCP service gets IAP off AND the public invoker binding restored; the console gets
+# IAP on AND the public invoker binding removed, because step 6/10 re-adds it on every run.
+# --condition=None is not decoration: against a policy that already contains any conditional
+# binding, gcloud refuses an unconditioned add or remove non-interactively.
+
+# ---- the app's own guard, asserted BEFORE IAP goes in front of it ----
+# This runs first ON PURPOSE. Once IAP is on, an anonymous request never reaches the app, so
+# this is the last moment the compensating control can be observed at all. It is not made
+# redundant by IAP: IAP is defence in depth in front of the passkey session, and if IAP ever
+# comes off -- or fails to go on, three paragraphs down -- the session guard is what is left.
+PC_HARNESS_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/harness" 2>/dev/null)
+case "$PC_HARNESS_CODE" in
+  302|303)
+    echo "  console: /harness sends an anonymous caller to /gate -- the app's own guard answers."
+    ;;
+  ""|000)
+    echo "  WARNING: could not reach $CP_URL/harness to confirm the app's own guard answers."
+    echo "           IAP is still applied below; 8b/10 re-checks the live surfaces."
+    ;;
+  403)
+    echo "  WARNING: $CP_URL answered 403 to an anonymous caller. That is the Google Frontend"
+    echo "  refusing the request, NOT your console leaking and NOT the app: the service has no"
+    echo "  allUsers -> roles/run.invoker binding. The usual cause is an organization policy on"
+    echo "  constraints/iam.allowedPolicyMemberDomains. IAP is applied below regardless."
+    ;;
+  *)
+    die "the console at $CP_URL/harness answered $PC_HARNESS_CODE to an ANONYMOUS caller.
+Underneath IAP the app's own passkey session is what protects the console, and that guard is
+not answering. Refusing to continue rather than put IAP in front of a console that would be
+readable by anyone the moment IAP came off."
+    ;;
+esac
+
+# ---- the MCP service: IAP OFF, and publicly invokable ----
+# Set NEGATIVELY and unconditionally, so an upgrade over a service that already has IAP on is
+# corrected rather than left broken. A non-zero exit here is harmless where IAP was never on.
+PC_IAP_OFF_RC=0
+gcloud beta run services update "$MC_SVC" --region "$REGION" --project "$PROJECT" --no-iap --quiet >/dev/null 2>&1 || PC_IAP_OFF_RC=$?
+if [ "$PC_IAP_OFF_RC" != "0" ]; then
+  echo "  NOTE: 'gcloud beta run services update --no-iap' on $MC_SVC exited $PC_IAP_OFF_RC."
+  echo "  If this service never had IAP on, nothing was needed and this is harmless."
+  echo "  If it DID, no MCP client can connect. Turn it off:"
+  echo "    gcloud beta run services update $MC_SVC --region $REGION --project $PROJECT --no-iap"
+fi
+PC_MC_INV_RC=0
+retry gcloud run services add-iam-policy-binding "$MC_SVC" --region "$REGION" --project "$PROJECT" --member=allUsers --role=roles/run.invoker --condition=None >/dev/null 2>&1 || PC_MC_INV_RC=$?
+if [ "$PC_MC_INV_RC" = "0" ]; then
+  echo "  $MC_SVC accepts unauthenticated connections; the app does its own bearer auth."
 else
-  # Projects outside an Organization may need IAP switched on once in the console first.
-  echo "  COULD NOT ENABLE IAP AUTOMATICALLY."
-  echo "  This usually means this project is not in a Google Cloud Organization."
-  echo "  The install continues and everything works, but your console is reachable by anyone"
-  echo "  who has the URL until you enable IAP yourself:"
-  echo "    https://console.cloud.google.com/run/detail/$REGION/$CP_SVC/security?project=$PROJECT"
+  echo "  WARNING: could not grant allUsers roles/run.invoker on $MC_SVC (exit $PC_MC_INV_RC)."
+  echo "  Every MCP client will get a Google 403 before a byte reaches the app. Grant it:"
+  echo "    gcloud run services add-iam-policy-binding $MC_SVC --region $REGION --project $PROJECT --member=allUsers --role=roles/run.invoker --condition=None"
+  echo "  An organization policy on constraints/iam.allowedPolicyMemberDomains blocks this."
+fi
+
+# ---- the console: IAP ON, and NOT publicly invokable ----
+# PC_IAP_ON is the single fact steps 8b/10 and 10/10 read. It is set on EVERY path below,
+# including the ones that fail, because an unset variable under `set -u` would abort the run
+# at a line that is only reached when something else has already gone wrong.
+PC_IAP_ON=0
+# VERIFY THE SUBCOMMAND EXISTS BEFORE DEPENDING ON IT. --help is answered by the local SDK and
+# does not touch the network. Without this, an SDK lacking `gcloud iap web` would enable IAP
+# successfully and then fail the access grant -- which is the lockout path, not a warning.
+PC_IAPIAM_RC=0
+CLOUDSDK_CORE_DISABLE_PROMPTS=1 gcloud iap web add-iam-policy-binding --help >/dev/null 2>&1 </dev/null || PC_IAPIAM_RC=$?
+if [ "$PC_IAPIAM_RC" != "0" ]; then
+  echo "  IAP NOT ENABLED: this SDK has no 'gcloud iap web add-iam-policy-binding' (exit"
+  echo "  $PC_IAPIAM_RC), so IAP could be switched on and nobody granted access -- which locks"
+  echo "  you out of your own console. Refusing to do half of it. Run 'gcloud components"
+  echo "  update', then re-run this installer. Until then the console rests on the app's own"
+  echo "  passkey session and is reachable by anyone who learns its URL."
+else
+  PC_IAP_RC=0
+  gcloud beta run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" --iap --quiet >/dev/null 2>&1 || PC_IAP_RC=$?
+  if [ "$PC_IAP_RC" != "0" ]; then
+    echo "  COULD NOT ENABLE IAP ON $CP_SVC (exit $PC_IAP_RC)."
+    echo "  This usually means this project is not in a Google Cloud Organization."
+    echo "  The install continues and everything works, but your console is reachable by anyone"
+    echo "  who has the URL until you enable IAP yourself:"
+    echo "    https://console.cloud.google.com/run/detail/$REGION/$CP_SVC/security?project=$PROJECT"
+  else
+    # The access grant goes on the IAP resource, NOT on the Run service; granting
+    # roles/iap.httpsResourceAccessor via `run services add-iam-policy-binding` is rejected.
+    # The principal TYPE must match the identity. An IAM member is TYPE:EMAIL and Google
+    # refuses a mismatched pair outright rather than ignoring it.
+    case "$ACCT" in
+      *gserviceaccount.com) PC_IAP_MEMBER="serviceAccount:$ACCT" ;;
+      *)                    PC_IAP_MEMBER="user:$ACCT" ;;
+    esac
+    PC_GRANT_RC=0
+    retry gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service="$CP_SVC" \
+      --region="$REGION" --project="$PROJECT" --member="$PC_IAP_MEMBER" \
+      --role=roles/iap.httpsResourceAccessor >/dev/null 2>&1 || PC_GRANT_RC=$?
+    if [ "$PC_GRANT_RC" != "0" ]; then
+      # ROLL BACK RATHER THAN DIE. Dying here leaves IAP ON with nobody granted -- a console
+      # nobody can open, including the person who would fix it, and including the gate that
+      # every repair has to be approved at. Undoing both halves returns the install to the
+      # state the paragraph above describes: guarded by the passkey session, and reachable.
+      echo "  IAP WAS ENABLED AND $ACCT COULD NOT BE GRANTED ACCESS (exit $PC_GRANT_RC)."
+      echo "  Rolling IAP back rather than leaving you locked out of your own gate."
+      gcloud beta run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" --no-iap --quiet >/dev/null 2>&1
+      PC_UNDO_RC=0
+      retry gcloud run services add-iam-policy-binding "$CP_SVC" --region "$REGION" --project "$PROJECT" --member=allUsers --role=roles/run.invoker --condition=None >/dev/null 2>&1 || PC_UNDO_RC=$?
+      if [ "$PC_UNDO_RC" != "0" ]; then
+        echo "  AND THE ROLLBACK'S INVOKER BINDING ALSO FAILED (exit $PC_UNDO_RC). $CP_SVC may now"
+        echo "  answer 403 to everyone. Restore it by hand before anything else:"
+        echo "    gcloud run services add-iam-policy-binding $CP_SVC --region $REGION --project $PROJECT --member=allUsers --role=roles/run.invoker --condition=None"
+      fi
+      echo "  To finish this properly: grant yourself access, then re-run the installer."
+      echo "    gcloud iap web add-iam-policy-binding --resource-type=cloud-run --service=$CP_SVC --region=$REGION --project=$PROJECT --member=$PC_IAP_MEMBER --role=roles/iap.httpsResourceAccessor"
+    else
+      # THE OTHER HALF, AND IT IS BELT AND BRACES RATHER THAN A DISCOVERY. Step 6/10 deploys
+      # the console with --allow-unauthenticated, which asks for the allUsers binding on EVERY
+      # run, and enabling IAP revokes it. Measured 2026-08-09 in the dev harness on two real
+      # services: after --iap the console's run IAM policy held exactly ONE member,
+      # serviceAccount:service-<num>@gcp-sa-iap, and this remove then exited 1 with "Policy
+      # binding with the specified principal, role, and condition not found!".
+      # SO A NON-ZERO EXIT HERE IS THE NORMAL CASE AND IS NOT FATAL. The command stays because
+      # "IAP revokes it" is Google behaviour we do not control, and a console that IAP fronts
+      # for browsers while allUsers can still invoke it directly is worth one idempotent line
+      # to make impossible. What is NOT claimed: this run never observed that state.
+      PC_RMINV_RC=0
+      gcloud run services remove-iam-policy-binding "$CP_SVC" --region "$REGION" --project "$PROJECT" --member=allUsers --role=roles/run.invoker --condition=None >/dev/null 2>&1 || PC_RMINV_RC=$?
+      PC_IAP_ON=1
+      echo "  the console is behind IAP. only $ACCT can reach it."
+      if [ "$PC_RMINV_RC" = "0" ]; then
+        echo "  and its allUsers invoker binding is removed, so IAP is the only way in."
+      else
+        echo "  its allUsers invoker binding was already absent (enabling IAP revokes it)."
+      fi
+    fi
+  fi
+fi
+
+# ---- say which URL is which, once, in one place ----
+echo
+echo "  console  $CP_URL      behind IAP, and where you register your passkey"
+echo "  mcp      $MC_URL      NOT behind IAP, and where an MCP client connects"
+echo "  These are not interchangeable. Handing a connector the console URL is the defect this"
+echo "  step exists to prevent; handing a browser the MCP URL gets you a 404 at the root,"
+echo "  because GET / is a console route and the MCP service deliberately does not serve it."
+if [ "$PC_IAP_ON" != "1" ]; then
+  echo "  IAP IS NOT ON. The console is guarded by the app's passkey session alone. That guard"
+  echo "  was asserted against your live deployment above, but it is one layer, not two."
+fi
+
+say "8b/10 functional self-test -- does the installed system actually ANSWER?"
+# [SEC-SELFTEST-FUNCTIONAL-V1] THE CONTROL WHOSE ABSENCE LET NINETEEN BROKEN TOOLS SHIP.
+# The self-test at 10/10 invoked ZERO MCP tools. It checked that /gate redirects, that
+# POST /mcp is 401 and that the executor is private -- and every one of the nineteen tools
+# with no backing infrastructure passed it. A self-test that cannot fail is worse than no
+# self-test, because it is the sentence "ready, no defects" with nothing behind it.
+#
+# THIS STEP SITS ABOVE THE 9/10 BOUNDARY ON PURPOSE, AND THE BOUNDARY DID NOT MOVE.
+# `exit 20` and the pc-bootstrap-secret mint are exactly where they were. What changed is
+# that the functional phase now runs BEFORE either -- so an unattended --rehearse gets the
+# same coverage a full install does, and a real install learns its tool surface is broken
+# BEFORE it spends the operator's Face ID rather than after.
+#
+# TWO DESIGN RULES, BOTH LEARNED FROM A GREEN RUN THAT MEANT NOTHING:
+#  1. ASSERT ON CONTENT, NEVER ON THE ABSENCE OF AN ERROR. index.ts returns a NORMAL,
+#     SUCCESSFUL MCP result whose text reads "data lake not configured" for all four lake
+#     tools. There is no throw and no non-2xx. Anything testing exceptions or status codes
+#     goes green against a completely unconfigured lake.
+#  2. NOT-EXERCISED IS NOT A PASS. A tool that genuinely cannot run unattended is reported
+#     as NOT-EXERCISED with its reason, and its backing resource is asserted instead. The
+#     census at the foot of the report names both sets, because blurring them is what
+#     happened.
+PC_FUNC_FAIL=0
+PC_FUNC_AT=$(gcloud auth print-access-token --project "$PROJECT" 2>/dev/null)
+if [ -z "$PC_FUNC_AT" ]; then
+  echo "  FAIL  could not obtain an access token, so the functional phase cannot mint the"
+  echo "        throwaway identity it needs. The tool surface was NOT proven."
+  PC_FUNC_FAIL=1
+else
+  PC_FUNC_URL="$MC_URL" PC_FUNC_CONSOLE="$CP_URL" PC_FUNC_IAP="$PC_IAP_ON" \
+  PC_FUNC_PROJECT="$PROJECT" PC_FUNC_DB="$FSDB" \
+  PC_FUNC_LAKE="$PC_LAKE_BUCKET" PC_FUNC_ROLE="fleet-onboarder" PC_FUNC_AT="$PC_FUNC_AT" \
+  python3 - <<'PCFUNC'
+import hashlib, json, os, secrets, sys, time, urllib.error, urllib.request
+
+# PC_FUNC_URL IS THE MCP SERVICE, NOT THE CONSOLE. Every tool call below goes to /mcp, which
+# only the MCP service serves. Pointing this at the console would 404 every call and the
+# census would report the whole tool surface as unreachable.
+MC = os.environ["PC_FUNC_URL"].rstrip("/")
+CONSOLE = os.environ.get("PC_FUNC_CONSOLE", "").rstrip("/")
+IAP_ON = os.environ.get("PC_FUNC_IAP", "0") == "1"
+AT = os.environ["PC_FUNC_AT"]
+PROJ = os.environ["PC_FUNC_PROJECT"]
+DB = os.environ["PC_FUNC_DB"]
+LAKE = os.environ["PC_FUNC_LAKE"]
+ROLE = os.environ["PC_FUNC_ROLE"]
+
+FS = "https://firestore.googleapis.com/v1/projects/" + PROJ + "/databases/" + DB
+GAUTH = {"Authorization": "Bearer " + AT}
+FINDINGS = []
+EXERCISED = []
+ASSERTED = []
+
+# The reviewed, written-down list of things that genuinely cannot run unattended. A finding
+# that drops out of "exercised" and is NOT named here is a coverage regression, not a pass.
+UNEXERCISABLE = {
+    "FN.LAKE_WRITE": "harWriteLake seals through the PCV1 vault, so a write here would test "
+                     "the VAULT rather than the lake tools. 5e/10 creates the keyring and the "
+                     "KEM key always and MINTS shared/vault/master.kem only where this machine "
+                     "has an ML-KEM capability; where it could not, it says what is missing and "
+                     "the lake is FAIL-CLOSED, not plaintext -- every write outside the five "
+                     "cleartext prefixes THROWS, with no plaintext fallback. Either way 5e/10 "
+                     "reports it. The bucket and the grant are asserted instead.",
+    "FN.STAGE_TOOLS": "stage_privileged_job, run_command and ssh_executor each need a human "
+                      "passkey with user presence. No approval is produced or verified here.",
+    "FN.VM_TOOLS": "vm_status/vm_start/vm_stop/vm_resize need a workstation instance. 5d/10 "
+                   "says whether one was made; vm_start/stop/resize also spend an approval.",
+    "FN.BROWSER_TOOLS": "browser_open/navigate/tabs need a live CDP endpoint on a running box. "
+                        "This installer provisions no such endpoint, so there is nothing to drive.",
+}
+
+KNOWN = ("whoami read_graph search_nodes open_nodes list_work_items read_journal "
+         "list_pending_confirm read_file list_files read_history search_history get_time "
+         "read_job_log run_status vm_status list_my_messages check_answer browser_tabs "
+         "create_entities create_relations add_observations delete_entities "
+         "delete_observations delete_relations append_journal post_work_item "
+         "complete_work_item cancel_work_item log_history write_file put_file "
+         "answer_message ask_agent refresh dev_api stage_privileged_job run_command "
+         "ssh_executor gcp_api run_roll vm_start vm_stop vm_resize browser_open "
+         "browser_navigate browser_eval").split()
+GIT_TOOLS = "git_read git_list git_log git_diff git_propose git_propose_patch git_push".split()
+
+# collection-group, query-scope, ordered field list. ONE ROW PER pc_index() INVOCATION at
+# 2b/10, counted as invocations. The naive grep for the gcloud line reports 1, because the
+# string occurs once inside the helper -- which is how two of these stayed missing.
+WANT_INDEXES = [
+    ("observations", "COLLECTION_GROUP", ["status", "createdAt"]),
+    ("memory_entities", "COLLECTION", ["scope", "entityType"]),
+    ("memory_relations", "COLLECTION", ["scope", "from"]),
+    ("memory_relations", "COLLECTION", ["scope", "to"]),
+    ("chat_history", "COLLECTION", ["agent_id", "timestamp"]),
+    ("work_items", "COLLECTION", ["assigned_role", "status", "created_at"]),
+]
+
+
+def rec(status, ident, how, msg):
+    FINDINGS.append((status, ident, how, msg))
+    if status != "NOT-EXERCISED":
+        (EXERCISED if how == "EXERCISED" else ASSERTED).append(ident)
+
+
+def http(url, method="GET", body=None, hdrs=None, timeout=90):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in (hdrs or {}).items():
+        req.add_header(k, v)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+        return r.status, dict((k.lower(), v) for k, v in r.getheaders()), r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, dict((k.lower(), v) for k, v in e.headers.items()), e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, {}, "TRANSPORT: " + str(e)
+
+
+def frames(text):
+    if text[:1] in ("{", "["):
+        try:
+            return [json.loads(text)]
+        except Exception:
+            return []
+    out = []
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            try:
+                out.append(json.loads(line[5:].strip()))
+            except Exception:
+                pass
+    return out
+
+
+TOK = secrets.token_hex(32)
+KEY = "pcs_" + secrets.token_hex(18)
+EXP = int(time.time() * 1000) + 300000
+MAUTH = {"Authorization": "Bearer " + TOK, "Accept": "application/json, text/event-stream"}
+
+
+def sha(s):
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def fsput(col, docid, fields):
+    st, _h, _b = http(FS + "/documents/" + col + "?documentId=" + docid, "POST", {"fields": fields}, GAUTH, 60)
+    return st == 200
+
+
+def fsdel(col, docid):
+    http(FS + "/documents/" + col + "/" + docid, "DELETE", None, GAUTH, 60)
+
+
+def rpc(msg):
+    st, _h, b = http(MC + "/mcp", "POST", msg, MAUTH)
+    fr = frames(b)
+    for f in fr:
+        if isinstance(f, dict) and ("result" in f or "error" in f):
+            return st, f
+    return st, {"error": {"message": "no JSON-RPC frame in a " + str(st) + " response: " + b[:200]}}
+
+
+def call(name, args):
+    a = dict(args)
+    a["agent"] = KEY
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": a}}
+    st, f = rpc(msg)
+    if "error" in f and "initializ" in json.dumps(f).lower():
+        st, f = rpc([{"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                      "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                                 "clientInfo": {"name": "install-selftest", "version": "1"}}},
+                     {"jsonrpc": "2.0", "method": "notifications/initialized"}, msg])
+    return st, f
+
+
+def text_of(f):
+    r = f.get("result") or {}
+    return "\n".join(str(x.get("text", "")) for x in (r.get("content") or []) if isinstance(x, dict))
+
+
+# ---- FN.MCP_REACHABLE -------------------------------------------------------------
+# The old 10/10 line asserted POST /mcp returns 401 and called that "MCP requires a token".
+# It is green when IAP answers 401 at the edge -- in which case the app was never reached
+# and NO MCP CLIENT CAN CONNECT TO THIS INSTALL AT ALL. The two 401s are told apart by who
+# generated them, which is the only thing that distinguishes a working surface here.
+st, h, b = http(MC + "/mcp", "POST", {}, {"Accept": "application/json, text/event-stream"}, 45)
+iap = "x-goog-iap-generated-response" in h
+chal = "resource_metadata=" in (h.get("www-authenticate") or "")
+if chal and not iap:
+    rec("PASS", "FN.MCP_REACHABLE", "EXERCISED",
+        "the app on " + MC + " answered " + str(st) + " with its own OAuth challenge")
+elif iap:
+    rec("FAIL", "FN.MCP_REACHABLE", "EXERCISED",
+        "IAP answered " + str(st) + " at the edge of " + MC + " and the app was never reached. "
+        "Every MCP client -- not just this test -- is refused before a byte arrives. IAP "
+        "protects the WHOLE service, /mcp included, and this is the service that must NOT have "
+        "it. Turn it off and restore the public invoker binding: gcloud beta run services "
+        "update <mcp-svc> --no-iap, then gcloud run services add-iam-policy-binding <mcp-svc> "
+        "--member=allUsers --role=roles/run.invoker --condition=None")
+elif st == 403 and not chal:
+    rec("FAIL", "FN.MCP_REACHABLE", "EXERCISED",
+        "POST /mcp answered 403 from the Google Frontend, with no IAP header and no OAuth "
+        "challenge. This is the Cloud Run INVOKER refusal, not IAP and not the app: the "
+        "allUsers -> roles/run.invoker binding is missing, which is what enabling IAP "
+        "revokes, and which an org policy on iam.allowedPolicyMemberDomains can forbid "
+        "restoring. Fix: gcloud run services add-iam-policy-binding <svc> --region <region> "
+        "--member=allUsers --role=roles/run.invoker --condition=None")
+else:
+    rec("FAIL", "FN.MCP_REACHABLE", "EXERCISED",
+        "POST /mcp answered " + str(st) + " with neither an app OAuth challenge nor an IAP "
+        "response: " + b[:160])
+
+# ---- FN.CONSOLE_IAP: the OTHER half of the split, and the only reliable discriminator -----
+# Both surfaces answer 401/302 to an anonymous caller, so a status code cannot tell them
+# apart. WHO generated the response can. x-goog-iap-generated-response is set by IAP and by
+# nothing else, so its presence on the console and its ABSENCE on /mcp above is the pair of
+# facts that proves the split is the right way round. Asserting only one of them would pass
+# on a deployment with both services configured identically.
+if not CONSOLE:
+    rec("NOT-EXERCISED", "FN.CONSOLE_IAP", "EXERCISED", "no console URL was passed to this phase")
+    UNEXERCISABLE["FN.CONSOLE_IAP"] = "no console URL was passed to this phase"
+elif not IAP_ON:
+    rec("NOT-EXERCISED", "FN.CONSOLE_IAP", "EXERCISED",
+        "step 8/10 reported that it could not enable IAP on the console")
+    UNEXERCISABLE["FN.CONSOLE_IAP"] = (
+        "step 8/10 could not enable IAP on the console -- most often because the project is "
+        "not in a Google Cloud Organization -- and said so at the time. The console is "
+        "running on the app's own passkey session alone, which 8/10 asserted against the live "
+        "deployment. That is one layer where the design calls for two, and it is reported "
+        "here as NOT-EXERCISED rather than as a pass.")
+else:
+    cst, ch, _cb = http(CONSOLE + "/harness", "GET", None, {}, 45)
+    if "x-goog-iap-generated-response" in ch:
+        rec("PASS", "FN.CONSOLE_IAP", "EXERCISED",
+            "IAP answered " + str(cst) + " for an anonymous caller at the console edge")
+    elif cst in (401, 302, 303):
+        rec("FAIL", "FN.CONSOLE_IAP", "EXERCISED",
+            "the console answered " + str(cst) + " but WITHOUT x-goog-iap-generated-response, so "
+            "that refusal came from the app, not from IAP. The status code alone would have "
+            "passed this check, which is exactly why it is not the assertion. The console is "
+            "not behind IAP and there is no bootstrap path protected at the edge.")
+    else:
+        rec("FAIL", "FN.CONSOLE_IAP", "EXERCISED",
+            "the console answered " + str(cst) + " to an anonymous caller with no IAP header. "
+            "Anything other than an IAP refusal here means the edge is not guarding it.")
+
+MINTED = False
+if any(f[0] == "FAIL" and f[1] == "FN.MCP_REACHABLE" for f in FINDINGS):
+    for i in ("FN.WHOAMI", "FN.TOOL_CENSUS", "FN.MEMORY_GRAPH", "FN.LAKE_LIST"):
+        rec("NOT-EXERCISED", i, "EXERCISED", "the MCP surface is unreachable -- see FN.MCP_REACHABLE")
+        UNEXERCISABLE[i] = "blocked by FN.MCP_REACHABLE, which is itself FAIL"
+else:
+    # A THROWAWAY IDENTITY, AND WHY IT IS SAFE. Two Firestore documents whose IDs are
+    # sha256 of a random secret, holding a 300-second exp. The secrets exist only in this
+    # process's memory, are never printed and never written to disk; both documents are
+    # deleted below. If this process is killed between the two, the records are inert the
+    # moment the exp passes -- oaBearerRole and pcSessionLookup BOTH fail closed on it.
+    MINTED = (fsput("oauth_tokens", sha(TOK),
+                    {"role": {"stringValue": ROLE}, "revoked": {"booleanValue": False},
+                     "exp": {"integerValue": str(EXP)}})
+              and fsput("session_keys", sha(KEY),
+                        {"role": {"stringValue": ROLE}, "revoked": {"booleanValue": False},
+                         "label": {"stringValue": "installer 8b/10 self-test"},
+                         "exp": {"integerValue": str(EXP)}}))
+
+try:
+    if MINTED:
+        # ---- FN.WHOAMI: the one call every agent is told to make first ----------------
+        st, f = call("whoami", {})
+        t = text_of(f)
+        if t.startswith("ROLE: " + ROLE):
+            rec("PASS", "FN.WHOAMI", "EXERCISED", "resolved " + ROLE + " through the real MCP surface")
+        else:
+            rec("FAIL", "FN.WHOAMI", "EXERCISED", "whoami did not resolve: " + (t or json.dumps(f))[:200])
+
+        # ---- FN.TOOL_CENSUS: an unclassified tool FAILS the run ----------------------
+        st, f = rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        names = [str(x.get("name")) for x in ((f.get("result") or {}).get("tools") or [])]
+        unknown = [n for n in names if n not in KNOWN and n not in GIT_TOOLS]
+        gitseen = [n for n in names if n in GIT_TOOLS]
+        if not names:
+            rec("FAIL", "FN.TOOL_CENSUS", "EXERCISED", "tools/list returned nothing: " + json.dumps(f)[:200])
+        elif unknown:
+            rec("FAIL", "FN.TOOL_CENSUS", "EXERCISED",
+                "tool(s) this self-test has no class for, so nothing here backs them: " + " ".join(unknown)
+                + ". Add them to KNOWN and give them a check, or stop registering them.")
+        elif gitseen:
+            rec("FAIL", "FN.TOOL_CENSUS", "EXERCISED",
+                "the git tools are registered but this installer provisions no repository, so "
+                "they fail on first call: " + " ".join(gitseen))
+        else:
+            rec("PASS", "FN.TOOL_CENSUS", "EXERCISED",
+                str(len(names)) + " tools, all classified, git tools correctly absent")
+
+        # ---- FN.MEMORY_GRAPH: exercises the 2b/10 indexes, open_nodes included --------
+        # open_nodes queries memory_relations scope+from AND scope+to. Only the first was
+        # indexed until [SEC-TOOLINFRA-V3-M5], so this call threw FAILED_PRECONDITION.
+        ent = "install-selftest-" + secrets.token_hex(4)
+        st, f = call("create_entities", {"entities": [{"name": ent, "entityType": "selftest"}], "scope": "own"})
+        c1 = text_of(f)
+        st, f = call("open_nodes", {"names": [ent], "scope": "own"})
+        c2 = text_of(f)
+        st, f = call("delete_entities", {"entityNames": [ent], "scope": "own"})
+        low = (c1 + c2).lower()
+        if "failed_precondition" in low or "requires an index" in low:
+            rec("FAIL", "FN.MEMORY_GRAPH", "EXERCISED",
+                "a memory query wants a composite index that does not exist: " + (c1 + c2)[:300])
+        elif ent in c2 and "OPEN_NODES_FAILED" not in c2:
+            rec("PASS", "FN.MEMORY_GRAPH", "EXERCISED",
+                "create_entities then open_nodes round-tripped, both relation queries served")
+        else:
+            rec("FAIL", "FN.MEMORY_GRAPH", "EXERCISED", "open_nodes did not return the entity: " + c2[:300])
+
+        # ---- FN.LAKE_LIST: CONTENT, NOT STATUS ---------------------------------------
+        # index.ts returns a normal successful result reading "data lake not configured".
+        # No throw, no non-2xx. This is the assertion the last proof did not have.
+        st, f = call("list_files", {"prefix": "shared/"})
+        t = text_of(f)
+        if "not configured" in t:
+            rec("FAIL", "FN.LAKE_LIST", "EXERCISED",
+                "list_files SUCCEEDED and did nothing: " + t[:160] + " -- DATA_LAKE_BUCKET is "
+                "not reaching the serving revision. All four lake tools are no-ops.")
+        elif "denied" in t.lower():
+            rec("FAIL", "FN.LAKE_LIST", "EXERCISED", "list_files was denied: " + t[:160])
+        else:
+            rec("PASS", "FN.LAKE_LIST", "EXERCISED", "list_files read the configured lake")
+    elif not any(f[1] == "FN.WHOAMI" for f in FINDINGS):
+        for i in ("FN.WHOAMI", "FN.TOOL_CENSUS", "FN.MEMORY_GRAPH", "FN.LAKE_LIST"):
+            rec("FAIL", i, "EXERCISED",
+                "the throwaway self-test identity could not be written to Firestore, so no "
+                "tool was called. Coverage was lost, which is a failure and not a pass.")
+finally:
+    if MINTED:
+        fsdel("oauth_tokens", sha(TOK))
+        fsdel("session_keys", sha(KEY))
+
+# ---- FN.INDEXES_EXIST: existence off the database, never acceptance off the installer --
+st, _h, b = http(FS + "/collectionGroups/-/indexes", "GET", None, GAUTH, 60)
+try:
+    live = json.loads(b).get("indexes") or []
+except Exception:
+    live = []
+have = set()
+for ix in live:
+    fl = [x.get("fieldPath") for x in (ix.get("fields") or []) if x.get("fieldPath") != "__name__"]
+    have.add((ix.get("name", "").split("/collectionGroups/")[-1].split("/")[0],
+              ix.get("queryScope"), tuple(fl), ix.get("state")))
+missing = []
+for cg, scope, fields in WANT_INDEXES:
+    if not any(k[0] == cg and k[1] == scope and k[2] == tuple(fields) and k[3] in ("READY", "CREATING")
+               for k in have):
+        missing.append(cg + "(" + ",".join(fields) + ")")
+if st != 200:
+    rec("FAIL", "FN.INDEXES_EXIST", "ASSERTED", "could not read the index list: " + str(st) + " " + b[:160])
+elif missing:
+    rec("FAIL", "FN.INDEXES_EXIST", "ASSERTED",
+        str(len(missing)) + " of " + str(len(WANT_INDEXES)) + " composite indexes are MISSING: "
+        + " ".join(missing) + ". 2b/10 reporting acceptance is not evidence they exist.")
+else:
+    rec("PASS", "FN.INDEXES_EXIST", "ASSERTED",
+        "all " + str(len(WANT_INDEXES)) + " composite indexes are live (READY or CREATING)")
+
+# ---- FN.LAKE_WRITE backing: the bucket and the grant, since the write cannot run -------
+st, _h, b = http("https://storage.googleapis.com/storage/v1/b/" + LAKE, "GET", None, GAUTH, 60)
+if st == 200:
+    rec("PASS", "FN.LAKE_BUCKET", "ASSERTED", "gs://" + LAKE + " exists")
+else:
+    rec("FAIL", "FN.LAKE_BUCKET", "ASSERTED", "gs://" + LAKE + " is not readable: " + str(st) + " " + b[:120])
+for i in ("FN.LAKE_WRITE", "FN.STAGE_TOOLS", "FN.VM_TOOLS", "FN.BROWSER_TOOLS"):
+    rec("NOT-EXERCISED", i, "ASSERTED", UNEXERCISABLE[i])
+
+fails = 0
+for status, ident, how, msg in FINDINGS:
+    if status == "FAIL":
+        fails += 1
+    print("  %-14s %-20s %s" % (status, ident, msg))
+print("")
+print("  CENSUS -- read this before the verdict.")
+print("    EXERCISED (a real call was made against the installed system): "
+      + (" ".join(sorted(set(EXERCISED))) or "NONE"))
+print("    ASSERTED  (the backing resource was proven to exist, no call made): "
+      + (" ".join(sorted(set(ASSERTED))) or "NONE"))
+ne = [f for f in FINDINGS if f[0] == "NOT-EXERCISED"]
+print("    NOT-EXERCISED (did NOT run -- this is not a pass):")
+for _s, ident, _h2, _m in ne:
+    print("      " + ident + ": " + UNEXERCISABLE.get(ident, "NO REVIEWED REASON -- coverage regression"))
+rot = [f[1] for f in ne if f[1] not in UNEXERCISABLE]
+if rot:
+    print("  COVERAGE REGRESSION: " + " ".join(rot) + " stopped running and is on no reviewed list.")
+    fails += len(rot)
+print("")
+print("  %d FAIL, %d of %d findings exercised against the running system."
+      % (fails, len(set(EXERCISED)), len(FINDINGS)))
+sys.exit(min(fails, 99))
+PCFUNC
+  PC_FUNC_FAIL=$?
+fi
+if [ "$PC_FUNC_FAIL" -eq 0 ]; then
+  echo "  the tool surface answered. Carried into 10/10; it is not re-run there."
+else
+  echo "  $PC_FUNC_FAIL FUNCTIONAL CHECK(S) FAILED. The installer ran; the installed system"
+  echo "  does not do its job. 10/10 will refuse to print INSTALL COMPLETE over this."
 fi
 
 # [SEC-REHEARSE-V1] THE BOUNDARY. This sits ABOVE `say "9/10 ..."` on purpose, so in
@@ -835,7 +2124,7 @@ retry gcloud run services update "$CP_SVC" --region "$REGION" --project "$PROJEC
 echo "  bootstrap window closed"
 
 say "10/10 self-test"
-FAIL=0
+FAIL=$PC_FUNC_FAIL
 chk() { # name expected actual
   if [ "$2" = "$3" ]; then printf '  ok   %-38s %s\n' "$1" "$3"
   else printf '  FAIL %-38s got %s want %s\n' "$1" "$3" "$2"; FAIL=$((FAIL+1)); fi
@@ -848,17 +2137,36 @@ chk_has() {
   case "$3" in *"$2"*) printf '  ok   %-38s %s\n' "$1" "$2" ;;
     *) printf '  FAIL %-38s %s not found\n' "$1" "$2"; FAIL=$((FAIL+1)) ;; esac
 }
-# [SEC-IAP-SELFTEST-V1] With IAP in front NOTHING unauthenticated reaches the app. The old
-# checks asserted the app answered anonymously -- which IAP now correctly prevents -- so a
-# healthy install reported as broken. These assert IAP is ENFORCING, which is stronger.
-chk_in  "gate is behind IAP" "302 303" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/gate")"
-chk_has "gate redirects to Google" "accounts.google.com" "$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 30 "$CP_URL/gate")"
-chk_has "/ redirects to Google" "accounts.google.com" "$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 30 "$CP_URL/")"
-chk "MCP requires a token"   401 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST -H 'Content-Type: application/json' -d '{}' "$CP_URL/mcp")"
+# [SEC-SURFACE-SPLIT-V1] WHICH CONSOLE ASSERTION IS CORRECT DEPENDS ON WHETHER IAP WENT ON,
+# AND BOTH BRANCHES ASSERT SOMETHING REAL. With IAP on, an anonymous caller never reaches the
+# app, so asserting the app's redirect would FAIL every healthy install -- and asserting the
+# STATUS CODE alone would pass on a console with no IAP at all, because the app answers 302
+# too. The header is the discriminator; it is generated by IAP and by nothing else. The app's
+# own guard is not left unproven: 8/10 asserted it against the live deployment in the moment
+# before IAP was put in front of it, which is the only moment it is observable.
+if [ "$PC_IAP_ON" = "1" ]; then
+  chk_has "console is behind IAP" "x-goog-iap-generated-response" "$(curl -s -D - -o /dev/null --max-time 30 "$CP_URL/harness" 2>/dev/null)"
+  printf '  --   %-38s %s\n' "console passkey guard" "asserted at 8/10, before IAP went in front"
+else
+  chk_in  "console requires a session" "302 303" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/harness")"
+  chk_has "console sends you to the gate" "/gate" "$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 30 "$CP_URL/harness")"
+  chk     "dashboard data refuses anonymous" 401 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/api/dash/summary")"
+fi
+# [SEC-SELFTEST-FUNCTIONAL-V1] THE OLD LINE HERE WAS `chk "MCP requires a token" 401`, and it
+# was green for the WRONG REASON. IAP fronts the whole service, so IAP answers 401 at the edge
+# and the app is never reached -- which is also the state in which no MCP client can connect at
+# all. Both outcomes printed "ok". 8b/10 now asks WHO generated the 401 instead, which is the
+# only thing that tells a working surface from an unreachable one, so the check is not repeated
+# here. This line reports what 8b/10 found, and never invents a second verdict.
+printf '  --   %-38s %s\n' "MCP surface" "judged at 8b/10, not re-tested here"
 chk_in "executor is private" "403 404" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$GX_URL/healthz")"
-# Security headers come from OUR app. Behind IAP an anonymous fetch returns IAPs redirect,
-# not our response, so they cannot be read from here. Report honestly instead of failing.
-printf '  --   %-38s %s\n' "app security headers" "not checkable anonymously behind IAP"
+chk_in "MCP root is console-only" "404 405" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$MC_URL/")"
+# Security headers come from OUR app, set by a middleware mounted immediately after the app is
+# created and therefore before every route. READ OFF THE MCP SERVICE, NOT THE CONSOLE: the
+# console is behind IAP, where an anonymous fetch never reaches the app and this could only
+# ever report on Google's edge. The MCP service is public by design and runs the SAME IMAGE,
+# so the same middleware answers -- and the discovery document is a real, anonymous, 200 route.
+chk_has "app security headers" "nosniff" "$(curl -s -D - -o /dev/null --max-time 30 "$MC_URL/.well-known/oauth-protected-resource" 2>/dev/null)"
 
 # [SEC-PKG-STRANGER-V1] Resolve the Agent Plugins manifest against the URL we only now know. Written to
 # agent-plugin.local/, NOT over agent-plugin/: the shipped copy is in MANIFEST.txt and
@@ -867,7 +2175,7 @@ if [ -d "$HERE/agent-plugin" ]; then
   mkdir -p "$HERE/agent-plugin.local"
   cp "$HERE/agent-plugin/plugin.json" "$HERE/agent-plugin.local/plugin.json" 2>/dev/null
   cp "$HERE/agent-plugin/README.md" "$HERE/agent-plugin.local/README.md" 2>/dev/null
-  sed "s#https://REPLACE-WITH-YOUR-CONTROL-PLANE-HOST#${CP_URL}#" \
+  sed "s#https://REPLACE-WITH-YOUR-CONTROL-PLANE-HOST#${MC_URL}#" \
     "$HERE/agent-plugin/mcp.json" > "$HERE/agent-plugin.local/mcp.json" 2>/dev/null \
     && printf '  --   %-38s %s\n' "agent plugin resolved" "agent-plugin.local/mcp.json" \
     || printf '  --   %-38s %s\n' "agent plugin" "could not be resolved; edit mcp.json by hand"
@@ -877,8 +2185,14 @@ if [ "$FAIL" -eq 0 ]; then
 cat <<EOF
   INSTALL COMPLETE.
 
-    console   ${CP_URL}/gate
-    MCP URL   ${CP_URL}/mcp
+    console   ${CP_URL}/gate     (behind IAP -- sign in with $ACCT)
+    MCP URL   ${MC_URL}/mcp      (NOT behind IAP -- this is the connector endpoint)
+
+  TWO SERVICES, ONE IMAGE, AND THE URLS ARE NOT INTERCHANGEABLE. IAP on Cloud Run is one
+  switch per service: the console needs it (it is how you reach the gate before a passkey
+  exists) and the MCP surface cannot have it (IAP consumes the Authorization header, so an
+  MCP client would be refused at the edge). Giving a connector the console URL is the one
+  mistake this arrangement exists to prevent.
 
   Model buses are OFF by default (fleet_mode=home), so this spends nothing until you turn
   one on. Approvals are signed with a Cloud KMS asymmetric key (EC_SIGN_P256_SHA256). The
@@ -902,9 +2216,40 @@ cat <<EOF
 
       ${HERE}/agent-plugin.local/
 
-  Read README.md in this release for what install.sh does NOT provision -- the data lake
-  bucket, the VM tools and the browser tools all register and then fail without backing
-  infrastructure you supply yourself. That is a boundary, and it is written down.
+  The data lake bucket IS provisioned now (5c/10) and the control plane was verified to be
+  serving its name off the running revision. Two things are reported at the step that would
+  have made them rather than restated here:
+
+    the PCV1 vault    5e/10 created keyring ${PC_VKR} and key ${PC_VKEY}, and MINTED
+                      shared/vault/master.kem if this machine had an ML-KEM capability. That
+                      step said which way it went. Where master.kem was NOT minted the lake is
+                      FAIL-CLOSED, not plaintext: every write outside the five cleartext
+                      prefixes throws, and 5e/10 printed what is missing and how to finish it.
+    the browser tools they need a live CDP endpoint on a running box, and this installer
+                      provisions none.
+
+  Two tool families are DELIBERATELY ABSENT rather than broken, which is a different thing
+  from the line above and is why they are listed separately:
+
+    the 7 git tools   git_read, git_list, git_log, git_diff, git_propose, git_propose_patch
+                      and git_push are NOT REGISTERED on this install. They serve exactly one
+                      repository, they need GIT_REPO_ID and GIT_BUCKET, and this installer
+                      provisions no git repository -- so you get no tool rather than a tool
+                      that fails on its first call. To enable them: create a bucket for the
+                      objects, grant $CP_SA objectAdmin on it, and set GIT_REPO_ID and
+                      GIT_BUCKET on $MC_SVC -- they are MCP tools, so they are served by the
+                      MCP service and setting them on the console does nothing. Leave
+                      FIRESTORE_DATABASE UNSET and they follow
+                      PC_FIRESTORE_DB to the database everything else already uses; setting
+                      it to something different is refused at startup rather than serving you
+                      an empty repository.
+    ssh_executor      it stages, and the gated executor REFUSES it, because no SSH key is
+                      configured. The refusal happens BEFORE the approval is consumed, so it
+                      costs you nothing but the tap. To enable it: put the private key in a
+                      Secret Manager secret, grant $GX_SA secretAccessor on THAT SECRET ONLY,
+                      and set EXEC_SSH_KEY_SECRET to its name on $GX_SVC.
+
+  The VM tools depend on the answer you gave at 5d/10; that step said which way it went.
 EOF
 else
   echo "  $FAIL CHECK(S) FAILED. The install is NOT good. Nothing above lies to you about that."

@@ -95,6 +95,41 @@ function requireEnv(name: string): string {
   return raw;
 }
 
+/**
+ * [SEC-GITDB-RECONCILE-V1] ONE DATABASE, TWO NAMES, AND THE MISMATCH WAS SILENT.
+ *
+ * This package reads `FIRESTORE_DATABASE`, because it was written to be deployed on its
+ * own by 03-infra/deploy.sh, which exports that name. It is no longer deployed on its own:
+ * it is bundled into the control plane, and the control plane's own Firestore client reads
+ * `PC_FIRESTORE_DB` (index.ts:48). The installer creates a RANDOMLY NAMED database and sets
+ * only `PC_FIRESTORE_DB`.
+ *
+ * So the git tools defaulted to `(default)` while every other tool used the named database.
+ * That is the worst available failure: `(default)` frequently EXISTS in a Google Cloud
+ * project and simply has no `repos` collection, so the git tools returned an EMPTY
+ * repository instead of an error, and an empty answer reads as "no such branch".
+ *
+ * RESOLUTION. An explicit `FIRESTORE_DATABASE` still wins, so a standalone pcgit deployment
+ * is unchanged. Absent that, follow the host's `PC_FIRESTORE_DB`. If BOTH are set and they
+ * DISAGREE, refuse at startup: there is no reading of that state in which the two halves of
+ * one service addressing two databases is what anybody meant, and a throw here is loud
+ * where the old default was silent.
+ */
+function reconcileDatabaseId(): string {
+  const own = process.env.FIRESTORE_DATABASE || '';
+  const host = process.env.PC_FIRESTORE_DB || '';
+  if (own !== '' && host !== '' && own !== host) {
+    throw new Error(
+      `FIRESTORE_DATABASE=${JSON.stringify(own)} and PC_FIRESTORE_DB=${JSON.stringify(host)} ` +
+        `name DIFFERENT Firestore databases on one service. Refusing to guess: the git tools ` +
+        `would address one database while every other tool addressed the other, and the ` +
+        `symptom is an EMPTY repository rather than an error. Set them equal, or unset ` +
+        `FIRESTORE_DATABASE to follow the host.`,
+    );
+  }
+  return own || host || '(default)';
+}
+
 export function loadConfig(): Config {
   const repoId = requireEnv('GIT_REPO_ID');
   if (repoId.includes('/') || repoId.startsWith('.')) {
@@ -109,8 +144,9 @@ export function loadConfig(): Config {
     repoId,
     bucket: requireEnv('GIT_BUCKET'),
     // Defaulted, not required: a project that kept the (default) database
-    // still boots with no extra configuration.
-    databaseId: process.env.FIRESTORE_DATABASE || '(default)',
+    // still boots with no extra configuration. See reconcileDatabaseId above for why
+    // this is no longer a bare read of FIRESTORE_DATABASE.
+    databaseId: reconcileDatabaseId(),
     filesCollection: process.env.GIT_FILES_COLLECTION ?? `repos/${repoId}/files`,
     refsRootCollection: process.env.GIT_REFS_ROOT_COLLECTION ?? 'repos',
 

@@ -496,25 +496,143 @@ async function resolveCopySource(
   return { oid: entry.oid, path: from, ref: src.ref, refName, commit };
 }
 
-/** One entry of a proposal after its bytes have been named, either way. */
+// ---------------------------------------------------------------------------
+// 5b. remove-a-path  [SEC-PROPOSE-DELETE-V1]
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a path being REMOVED against the base tree of the branch being
+ * written, and refuse if it is not there.
+ *
+ * WHY THIS RESOLVES AT ALL, rather than handing the path to `buildTree` and
+ * letting the tree walk sort it out: a caller has to be able to VERIFY that a
+ * removal removed the thing it meant. Resolving here yields the oid of the
+ * blob that is about to leave the tree, which goes back in the response the
+ * same way a copy's source does, and it turns a typo into an error BEFORE any
+ * object is written rather than partway through building the tree.
+ *
+ * WHY A MISSING PATH IS AN ERROR AND NEVER A NO-OP: a removal that quietly
+ * succeeded on a path that was never there reports success and changes
+ * nothing. That is how a "removal" ships that removed nothing -- and the whole
+ * point of the caller asking for a removal is that the file must be gone.
+ *
+ * THIS WIDENS NO AUTHORISATION, AND THAT IS THE ENTIRE ARGUMENT. There is no
+ * ref parameter: a removal is resolved against `baseTree`, the tree of the
+ * branch head this proposal is already building on. It reaches strictly less
+ * than `copy_from`, which at least takes a ref. Removing a path is therefore
+ * possible in exactly the cases where OVERWRITING that same path through
+ * `content` is possible -- same branch, same `normalizeRepoPath`, same
+ * `assertBranchName`, same structural refusals, same commit, and the same
+ * compare-and-swap in `git_push` deciding whether any of it becomes visible. A
+ * delete primitive that reached further than the write primitive would be a
+ * privilege escalation, so it does not take a ref, an oid, a glob or a prefix.
+ */
+async function resolveDeleteTarget(
+  ctx: ServerContext,
+  branch: string,
+  baseTree: string | null,
+  path: string,
+): Promise<{ oid: string; mode: string }> {
+  if (baseTree === null) {
+    throw new ToolError(
+      'PATH_NOT_FOUND',
+      `cannot remove ${path}: branch ${branch} does not exist yet, so it holds no files. ` +
+        `NOTHING was written.`,
+      { path, branch },
+    );
+  }
+  const cut = path.lastIndexOf('/');
+  const dir = cut < 0 ? '' : path.slice(0, cut);
+  const name = cut < 0 ? path : path.slice(cut + 1);
+
+  let entries;
+  try {
+    entries = (await readTreeEntries(deps(ctx), baseTree, dir)).entries;
+  } catch (err) {
+    if (isNotFound(err)) {
+      throw new ToolError(
+        'PATH_NOT_FOUND',
+        `cannot remove ${path}: ${dir === '' ? '/' : dir} does not exist at ${branch}. ` +
+          `NOTHING was written.`,
+        { path, branch },
+      );
+    }
+    if (isWrongType(err)) {
+      throw new ToolError(
+        'NOT_A_TREE',
+        `cannot remove ${path}: ${dir === '' ? '/' : dir} is not a directory at ${branch}`,
+        { path, branch },
+      );
+    }
+    throw err;
+  }
+
+  const entry = entries.find((e) => e.path === name);
+  if (entry === undefined) {
+    throw new ToolError(
+      'PATH_NOT_FOUND',
+      `cannot remove ${path}: no such file at ${branch}. NOTHING was written. A removal ` +
+        `is never a no-op here -- if it were, a typo would report a deletion that ` +
+        `deleted nothing.`,
+      { path, branch },
+    );
+  }
+  if (entry.type !== 'blob') {
+    // No recursive directory removal, deliberately: the blast radius of one
+    // wrong path would be everything underneath it. Name each file.
+    const what = entry.mode === MODE_GITLINK ? 'submodule' : entry.type;
+    throw new ToolError(
+      'BAD_REQUEST',
+      `cannot remove ${path}: it is a ${what}, not a file. This API removes one named ` +
+        `file per entry; there is no recursive removal, no glob and no prefix. Name ` +
+        `each file you want gone.`,
+      { path, branch, mode: entry.mode, type: entry.type },
+    );
+  }
+  if (entry.mode === MODE_SYMLINK) {
+    throw new ToolError(
+      'BAD_REQUEST',
+      `cannot remove ${path}: it is a symlink (mode ${entry.mode}). Removing a symlink ` +
+        `is a structural change this API does not perform, exactly as writing over one ` +
+        `is not.`,
+      { path, branch, mode: entry.mode, type: entry.type },
+    );
+  }
+
+  return { oid: entry.oid, mode: entry.mode };
+}
+
+/** One entry of a proposal after its bytes have been named, any of three ways. */
 type NormalizedFile =
-  | { path: string; content: string; copyFrom: null }
-  | { path: string; content: null; copyFrom: ProposeCopyFrom };
+  | { path: string; content: string; copyFrom: null; remove: false }
+  | { path: string; content: null; copyFrom: ProposeCopyFrom; remove: false }
+  | { path: string; content: null; copyFrom: null; remove: true };
 
 /** One resolved entry of a proposal, as reported back to the caller. */
 interface ProposedFile {
   path: string;
-  blobOid: string;
+  /**
+   * The blob this entry PUTS at `path`. `null` for a removal, which puts
+   * nothing there -- the oid of what was taken away is reported as
+   * `source.removedBlobOid` instead, so the two can never be confused.
+   */
+  blobOid: string | null;
   /**
    * Byte length for a `content` entry. `null` for a copy: the source blob is
    * deliberately never materialised, so the server does not know its size and
    * will not guess one. `blobOid` is what the caller verifies against, and it
-   * is present either way.
+   * is present for both forms that write. `null` for a removal.
    */
   size: number | null;
   source:
     | { kind: 'content' }
-    | { kind: 'copy'; path: string; ref: string; refName: string | null; commit: string };
+    | { kind: 'copy'; path: string; ref: string; refName: string | null; commit: string }
+    /**
+     * `removedBlobOid` is what the caller verifies a removal against, the way
+     * `blobOid` verifies a write: it is the oid the path actually held in the
+     * base tree at the moment it was removed.
+     */
+    | { kind: 'delete'; removedBlobOid: string; mode: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -540,7 +658,12 @@ export async function gitPropose(
   ctx: ServerContext,
   args: {
     branch: string;
-    files: Array<{ path: string; content?: string | null; copy_from?: ProposeCopyFrom | null }>;
+    files: Array<{
+      path: string;
+      content?: string | null;
+      copy_from?: ProposeCopyFrom | null;
+      delete?: boolean | null;
+    }>;
     message: string;
     author?: { name: string; email: string };
   },
@@ -549,7 +672,8 @@ export async function gitPropose(
 
   if (!Array.isArray(args.files) || args.files.length === 0) {
     throw badRequest(
-      'files must be a non-empty array of { path, content } or { path, copy_from }',
+      'files must be a non-empty array of { path, content }, { path, copy_from } or ' +
+        '{ path, delete: true }',
     );
   }
   if (args.files.length > ctx.cfg.maxProposeFiles) {
@@ -572,26 +696,50 @@ export async function gitPropose(
     seen.add(path);
     const hasContent = file.content !== undefined && file.content !== null;
     const hasCopy = file.copy_from !== undefined && file.copy_from !== null;
-    if (hasContent && hasCopy) {
+
+    // `delete` is boolean-or-absent. There is deliberately no `delete: false`
+    // form: it names no operation, and reading it as "leave this file alone"
+    // would make an entry that does nothing look like an entry that did
+    // something. Omitting the entry is how you leave a file alone.
+    const del = file.delete;
+    if (del !== undefined && del !== null && typeof del !== 'boolean') {
       throw badRequest(
-        `files[${path}] sets BOTH content and copy_from. Exactly one: content sends the ` +
-          `bytes, copy_from names an existing blob to reuse.`,
+        `files[${path}].delete must be the boolean true, or be omitted`,
+        { path, delete: del },
+      );
+    }
+    if (del === false) {
+      throw badRequest(
+        `files[${path}] sets delete:false, which names no operation. To remove the path ` +
+          `send delete:true; to leave it alone, omit the entry entirely.`,
         { path },
       );
     }
-    if (!hasContent && !hasCopy) {
+    const hasDelete = del === true;
+
+    const chosen = (hasContent ? 1 : 0) + (hasCopy ? 1 : 0) + (hasDelete ? 1 : 0);
+    if (chosen > 1) {
       throw badRequest(
-        `files[${path}] sets neither content nor copy_from. One of them is required; an ` +
-          `entry with neither would write an empty file.`,
-        { path },
+        `files[${path}] sets ${chosen} of content, copy_from and delete. EXACTLY ONE is ` +
+          `required: content sends the bytes, copy_from names an existing blob to reuse, ` +
+          `delete:true removes the path.`,
+        { path, content: hasContent, copy_from: hasCopy, delete: hasDelete },
+      );
+    }
+    if (chosen === 0) {
+      throw badRequest(
+        `files[${path}] sets none of content, copy_from and delete. Exactly one is ` +
+          `required; an entry with none would write an empty file.`,
+        { path, content: false, copy_from: false, delete: false },
       );
     }
     if (hasContent && typeof file.content !== 'string') {
       throw badRequest(`files[${path}].content must be a string`, { path });
     }
+    if (hasDelete) return { path, content: null, copyFrom: null, remove: true };
     return hasContent
-      ? { path, content: file.content as string, copyFrom: null }
-      : { path, content: null, copyFrom: file.copy_from as ProposeCopyFrom };
+      ? { path, content: file.content as string, copyFrom: null, remove: false }
+      : { path, content: null, copyFrom: file.copy_from as ProposeCopyFrom, remove: false };
   });
 
   // Only bytes that actually CROSSED THE WIRE count against the cap. A copy
@@ -640,6 +788,18 @@ export async function gitPropose(
   // already in the store, and resolving it costs one tree read.
   const written: ProposedFile[] = [];
   for (const file of normalized) {
+    if (file.remove) {
+      // Resolved against the base tree, and refused if it is not there. No
+      // object is written for a removal; the work is entirely in the tree.
+      const gone = await resolveDeleteTarget(ctx, args.branch, baseTree, file.path);
+      written.push({
+        path: file.path,
+        blobOid: null,
+        size: null,
+        source: { kind: 'delete', removedBlobOid: gone.oid, mode: gone.mode },
+      });
+      continue;
+    }
     if (file.copyFrom !== null) {
       const src = await resolveCopySource(ctx, file.path, file.copyFrom);
       written.push({
@@ -668,7 +828,10 @@ export async function gitPropose(
   const treeOid = await buildTree(
     deps(ctx),
     baseTree,
-    written.map((w) => ({ path: w.path, oid: w.blobOid })),
+    written
+      .filter((w) => w.source.kind !== 'delete')
+      .map((w) => ({ path: w.path, oid: w.blobOid as string })),
+    written.filter((w) => w.source.kind === 'delete').map((w) => w.path),
   );
 
   const now = Math.floor(Date.now() / 1000);
@@ -704,6 +867,14 @@ export async function gitPropose(
     files: written,
     /** How many entries reused an existing blob instead of sending bytes. */
     copied: written.filter((w) => w.source.kind === 'copy').length,
+    /**
+     * How many entries REMOVED a path. The paths themselves, and the blob oid
+     * each one held when it was removed, are in `files` above -- every removal
+     * is an entry whose `source.kind` is `delete`.
+     */
+    deleted: written.filter((w) => w.source.kind === 'delete').length,
+    /** Every path this commit removes, so a caller can verify at a glance. */
+    deletedPaths: written.filter((w) => w.source.kind === 'delete').map((w) => w.path),
     /** Bytes that actually crossed the wire. A copy contributes zero. */
     bytesSent: totalBytes,
     refMoved: false,

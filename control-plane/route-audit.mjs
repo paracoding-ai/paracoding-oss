@@ -25,6 +25,37 @@ const writeBaseline = process.argv.includes('--write-baseline');
 
 const SRC = readFileSync(srcPath, 'utf8');
 
+// [SEC-ROUTE-VISIBILITY-V1] Guard names are matched against CODE, never prose. A comment 154
+// lines below GET /api/cowork-prompt -- describing a DIFFERENT route -- mentioned waSessionOk,
+// and that alone was enough to mark the handler guarded. Deleting its real waGate changed
+// nothing the audit could see. Comments are therefore blanked to spaces (never deleted, so every
+// byte offset and line number below still refers to the real file). Measured: this changes NO
+// route's verdict at head -- 88/71/17 either way -- and flips exactly the seeded unguarded
+// handler to public, which is the whole point.
+function blankComments(src) {
+  const a = src.split('');
+  let q = null;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i], n = src[i + 1];
+    if (q) { if (c === '\\') { i++; continue; } if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '`') { q = c; continue; }
+    if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') { a[i] = ' '; i++; } continue; }
+    if (c === '/' && n === '*') {
+      const s = i; i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i++;
+      for (let j = s; j <= i && j < a.length; j++) if (a[j] !== '\n') a[j] = ' ';
+      continue;
+    }
+  }
+  return a.join('');
+}
+const CODE = blankComments(SRC);
+if (CODE.length !== SRC.length) {
+  console.error('ROUTE AUDIT: comment blanking changed the file length. Refusing to guess.');
+  process.exit(2);
+}
+
 // Any call that establishes who the caller is, or bounds what they can do.
 const GUARDS = [
   'waSessionOk', 'assertIdentity', 'waGate', 'waElevatedOk', 'oaBearerRole',
@@ -35,7 +66,7 @@ const GUARDS = [
 const RE = /^app\.(get|post|put|delete|patch|all|use)\(\s*(['"`])([^'"`]+)\2/gm;
 const found = [];
 let m;
-while ((m = RE.exec(SRC)) !== null) {
+while ((m = RE.exec(CODE)) !== null) {
   found.push({ method: m[1].toUpperCase(), path: m[3], at: m.index });
 }
 if (found.length === 0) {
@@ -46,8 +77,8 @@ found.sort((a, b) => a.at - b.at);
 
 // A route's handler is everything up to the next top-level registration.
 for (let i = 0; i < found.length; i++) {
-  const end = i + 1 < found.length ? found[i + 1].at : SRC.length;
-  const body = SRC.slice(found[i].at, end);
+  const end = i + 1 < found.length ? found[i + 1].at : CODE.length;
+  const body = CODE.slice(found[i].at, end);
   found[i].guarded = GUARDS.some((g) => body.includes(g));
 }
 
@@ -77,7 +108,28 @@ if (missing.length) {
   console.error('ROUTE AUDIT FAIL: MCP connector route(s) missing: ' + missing.join(', '));
   process.exit(1);
 }
-console.log('  no wildcards, all 7 connector routes present');
+
+// A registration this audit CANNOT SEE is worse than one that is missing: its handler is never
+// searched for a guard, so the guard could be deleted and nothing here would report it. That was
+// live at head -- GET /api/cowork-prompt sat indented inside a try{} and was invisible. Indenting
+// a route into an if, a try, or any block is therefore a hard failure, not a silent one-route
+// drift in the totals. Run over CODE so that PROSE about app.get() can never brick the build.
+const HIDDEN = /(?<![\w.$])app\.(get|post|put|delete|patch|all|use)\(\s*(['"`])([^'"`]+)\2/;
+const hidden = [];
+CODE.split('\n').forEach((line, i) => {
+  const hm = HIDDEN.exec(line);
+  if (hm && hm.index !== 0) hidden.push('line ' + (i + 1) + ': ' + hm[1].toUpperCase() + ' ' + hm[3]);
+});
+if (hidden.length) {
+  console.error('ROUTE AUDIT FAIL: ' + hidden.length + ' route registration(s) NOT at column zero:');
+  for (const h of hidden) console.error('    ' + h);
+  console.error('  This audit is anchored at column zero, so an indented registration is invisible');
+  console.error('  to it and its handler is never checked for a guard. Move it to column zero.');
+  console.error('  If registration must be conditional, decide INSIDE app.get/app.post the way');
+  console.error('  PC_SURFACE_MAP does, never in an if or a try wrapped around the registration.');
+  process.exit(1);
+}
+console.log('  no wildcards, all 7 connector routes present, no hidden registrations');
 
 if (writeBaseline) {
   writeFileSync(basePath, JSON.stringify({
@@ -97,9 +149,34 @@ if (!existsSync(basePath)) {
 const baseline = JSON.parse(readFileSync(basePath, 'utf8'));
 const allowed = new Set(baseline.public || []);
 const novel = publicRoutes.filter((p) => !allowed.has(p));
-const healed = [...allowed].filter((p) => !publicRoutes.includes(p));
+// A baseline entry can leave the public set two ways and they are OPPOSITE in meaning. Either the
+// route is STILL REGISTERED and has acquired a guard -- a real improvement -- or it is GONE from
+// the table entirely. The old code called both 'now guarded (was public)' and exited 0, so a
+// registration that was hidden, renamed or lost in a merge was reported as a security WIN and
+// shipped. A check that reads a disappearance as success is worse than no check. The two are told
+// apart by the FULL route table, never by the public set.
+const registered = new Set(all);
+const nowGuarded = [...allowed].filter((p) => !publicRoutes.includes(p) && registered.has(p));
+const vanished = [...allowed].filter((p) => !registered.has(p));
 
-for (const h of healed) console.log('  now guarded (was public): ' + h);
+for (const h of nowGuarded) console.log('  now guarded (was public, still registered): ' + h);
+
+let failed = false;
+
+if (vanished.length) {
+  console.error('');
+  console.error('ROUTE AUDIT FAIL: ' + vanished.length + ' baseline route(s) NO LONGER REGISTERED:');
+  for (const v of vanished) console.error('    ' + v);
+  console.error('');
+  console.error('  These routes are not guarded now -- they are GONE. That is usually a');
+  console.error('  registration indented into a block, renamed, or lost in a merge.');
+  console.error('');
+  console.error('  IF THE REMOVAL IS DELIBERATE this is not a veto: delete exactly those line(s)');
+  console.error('  from the "public" list in ' + basePath + ' in the SAME commit and say why in');
+  console.error('  the commit message. Do not regenerate the whole baseline to make this pass --');
+  console.error('  that silently blesses every other change in the same breath.');
+  failed = true;
+}
 
 if (novel.length) {
   console.error('');
@@ -110,7 +187,10 @@ if (novel.length) {
   console.error('  or, if the route is meant to be public, add it to ' + basePath);
   console.error('  in the same commit and say why. Do not regenerate the whole baseline');
   console.error('  to make this pass -- that silently blesses every other new hole too.');
-  process.exit(1);
+  failed = true;
 }
+
+if (failed) process.exit(1);
 console.log('  no new unguarded routes vs baseline (' + allowed.size + ' known public)');
+console.log('  no baseline route vanished (' + allowed.size + ' checked against the live table)');
 console.log('ROUTE AUDIT PASS');

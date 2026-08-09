@@ -54,6 +54,34 @@ export async function gitBlobOid(path: string, ref: string): Promise<string> {
 }
 
 export function registerGitTools(server: any, z: any, AG: any, agentId?: string) {
+  // [SEC-GITTOOLS-UNCONFIGURED-V1] REGISTER NOTHING WHEN THERE IS NO REPOSITORY TO SERVE.
+  // loadConfig() requireEnv's GIT_REPO_ID and GIT_BUCKET, and ctx() is deferred into the
+  // handler rather than evaluated at registration -- so before this guard all seven git
+  // tools registered CLEANLY on every install and threw on their FIRST CALL. Nothing in a
+  // fresh install sets either variable, so that was every install: seven tools that
+  // advertise themselves and then fail. An adopter must see no tool rather than a tool
+  // that lies about what it can do.
+  //
+  // CHECKED HERE AND NOT IN loadConfig(): index.ts also imports this module for gitBlobOid
+  // and for the vault-registry re-exports, and both must keep working. The guard withholds
+  // the TOOL SURFACE; it does not disable the module.
+  //
+  // THE THIRD VARIABLE IS NAMED IN THE MESSAGE ON PURPOSE. Setting only the first two
+  // leaves the database id to config.ts, and getting that wrong used to produce an EMPTY
+  // repository rather than an error. config.ts now reconciles FIRESTORE_DATABASE with
+  // PC_FIRESTORE_DB and refuses a conflict, but the operator still has to know it exists.
+  const _repoId = String(process.env.GIT_REPO_ID || '');
+  const _bucket = String(process.env.GIT_BUCKET || '');
+  if (_repoId === '' || _bucket === '') {
+    const _absent = [_repoId === '' ? 'GIT_REPO_ID' : '', _bucket === '' ? 'GIT_BUCKET' : '']
+      .filter(function (s) { return s !== ''; }).join(' and ');
+    console.log('[gittools] git tools NOT registered: ' + _absent + ' unset. This server '
+      + 'serves exactly one repository and none is configured, so the tools are withheld '
+      + 'rather than registered to fail on first call. To enable them set GIT_REPO_ID and '
+      + 'GIT_BUCKET (and FIRESTORE_DATABASE, or leave it unset to follow PC_FIRESTORE_DB) '
+      + 'on this service.');
+    return [];
+  }
   const wrap = (fn: any, shape: any) => async (a: any) => {
     try { return okr(await fn(ctx(), shape(a))); } catch (e) { return failr(e); }
   };
@@ -74,8 +102,8 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
       inputSchema: { from_ref: z.string(), to_ref: z.string(), path: z.string().optional(), ...AG } },
     wrap(gitDiff, (a: any) => ({ from_ref: a.from_ref, to_ref: a.to_ref, path: a.path })));
   server.registerTool('git_propose',
-    { description: 'Create a commit on top of a branch head. WHOLE FILE writes only: each entry replaces the entire file. Each entry gives EXACTLY ONE of: content, the bytes; or copy_from {path, ref}, which REUSES A BLOB ALREADY IN THE REPOSITORY -- the server resolves path at ref and writes that blob oid straight into the tree, so none of its bytes cross the wire and the file cannot be corrupted in transit. copy_from goes through the same ref gate and the same path rules as git_read, so it reaches nothing you could not already read, and an oid is NEVER a lookup key. Optional copy_from.blob_oid is an ASSERTION: the whole call is refused if the source does not resolve to it. A per-file blobOid comes back either way, so you can still verify every entry against a locally computed sha1. Nothing becomes visible until git_push. Returns commitOid and baseOid.',
-      inputSchema: { branch: z.string(), files: z.array(z.object({ path: z.string(), content: z.string().optional(), copy_from: z.object({ path: z.string(), ref: z.string(), blob_oid: z.string().optional() }).optional() })).min(1), message: z.string(), ...AG } },
+    { description: 'Create a commit on top of a branch head. WHOLE FILE writes only: each entry replaces the entire file. Each entry gives EXACTLY ONE of three options -- zero or two is refused. (1) content, the bytes. (2) copy_from {path, ref}, which REUSES A BLOB ALREADY IN THE REPOSITORY -- the server resolves path at ref and writes that blob oid straight into the tree, so none of its bytes cross the wire and the file cannot be corrupted in transit. copy_from goes through the same ref gate and the same path rules as git_read, so it reaches nothing you could not already read, and an oid is NEVER a lookup key. Optional copy_from.blob_oid is an ASSERTION: the whole call is refused if the source does not resolve to it. (3) delete:true, which REMOVES the path. One explicit path per entry: there is no glob, no prefix and no recursive directory removal. Removing a path that does not exist is REFUSED, never a silent success, and a directory left empty by a removal is pruned so the resulting tree stays a valid git object. A removal is resolved against the branch you are already writing to and reaches nothing a write to the same path would not, so it is refused wherever an overwrite would be (a directory, a symlink, a submodule). A per-file blobOid comes back for every entry that writes, so you can still verify each against a locally computed sha1; a removal reports source.removedBlobOid instead -- the oid the path actually held -- plus top-level deleted and deletedPaths. Nothing becomes visible until git_push. Returns commitOid and baseOid.',
+      inputSchema: { branch: z.string(), files: z.array(z.object({ path: z.string(), content: z.string().optional(), copy_from: z.object({ path: z.string(), ref: z.string(), blob_oid: z.string().optional() }).optional(), delete: z.boolean().optional() })).min(1), message: z.string(), ...AG } },
     wrap(gitPropose, (a: any) => ({
       branch: a.branch, files: a.files, message: a.message,
       ...(agentId ? { author: { name: agentId, email: agentId + '@' + ctx().cfg.authorEmailDomain } } : {}),

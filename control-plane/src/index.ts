@@ -140,6 +140,176 @@ app.use((req, res, next) => {
   next();
 });
 
+// ================= [SEC-SURFACE-SPLIT-V1] TWO CLOUD RUN SERVICES, ONE IMAGE =================
+// IAP on Cloud Run is ONE SWITCH PER SERVICE. The console (gate, dash, harness, flow, wiki,
+// lakeview) is the bootstrap path into a brand-new install and must sit BEHIND IAP: it is how
+// the operator reaches the gate before any passkey exists. The MCP surface must NOT, because
+// IAP consumes the Authorization header and an MCP client has no Google identity. One service
+// cannot be both, so the same image is deployed TWICE and PC_SURFACE tells each copy which half
+// of the route table to register. Shipping one service with IAP on made /mcp unreachable;
+// turning IAP off destroyed the bootstrap path. This is the third option and the only correct one.
+//
+//   PC_SURFACE unset    EVERY route registers -- today's behaviour, byte for byte. Nothing below
+//                       runs: no wrapper is installed, no lookup happens, not one registration is
+//                       touched. The operator's live single-service prod does not change.
+//   PC_SURFACE=console  browser pages plus the browser-facing /api/* those pages call. No /mcp.
+//   PC_SURFACE=mcp      the MCP surface, the OAuth and discovery endpoints a connector needs, and
+//                       the legacy bearer-token agent API. No browser pages.
+//
+// WHY A WRAPPER ON app RATHER THAN AN if AROUND EACH REGISTRATION: route-audit.mjs runs as a
+// BUILD STEP before esbuild and parses THIS SOURCE with a pattern anchored at column zero.
+// Indenting a registration into a conditional would hide it from the audit and silently move
+// 87/70/17. Every registration below therefore stays exactly where it is, unindented, and the
+// surface decision is taken INSIDE app.get/app.post at registration time instead.
+//
+// EVERY ROUTE MUST NAME ITS SURFACE. A path missing from this table THROWS at boot rather than
+// defaulting to anything: a route that lands on NEITHER service is a silently broken install, and
+// that is the exact failure this table exists to make impossible. Adding a route means adding a
+// line here. It can only bite when PC_SURFACE is set, so it can never brick the single service.
+//
+// HOW THE SPLIT WAS DECIDED -- by the auth mechanism each handler actually uses, not by its name.
+// A cookie/passkey session (waSessionOk, waGate) is reachable ONLY from a browser that has been
+// through the gate, so every such route is console. A bearer token, an OAuth access token or the
+// human-confirm secret (assertIdentity, oaBearerRole, humanTokenOk) is reachable only from a
+// machine client, so every such route is mcp. The two mechanisms partition the table with no
+// overlap, which is why nothing is marked 'both' today -- 'both' is still honoured so that a
+// future dual-caller route can say so in one word. Measured, not assumed: gate-exec never calls
+// back into this service (it answers /run and writes Firestore directly), the OAuth consent page
+// fetches only /oauth/authorize/complete and /oauth/token, and /oauth/strains -- despite its
+// prefix -- is passkey-gated and the consent page does not call it, so it is console.
+const PC_SURFACE = String(process.env.PC_SURFACE || '').trim().toLowerCase();
+// Keys are exactly METHOD + one space + the path string as registered. Values: console | mcp | both.
+const PC_SURFACE_MAP: { [k: string]: string } = {
+  // ---- console: browser pages ----
+  'GET /': 'console',
+  'GET /gate': 'console',
+  'GET /dash': 'console',
+  'GET /harness': 'console',
+  'GET /chat': 'console',
+  'GET /flow': 'console',
+  'GET /flowhood': 'console',
+  'GET /jobs': 'console',
+  'GET /pastes': 'console',
+  'GET /wiki': 'console',
+  'GET /wiki/:slug': 'console',
+  'GET /lakeview': 'console',
+  // ---- console: the /api/* those pages call (all cookie/passkey-session gated) ----
+  'GET /api/webauthn/status': 'console',
+  'POST /api/webauthn/register/options': 'console',
+  'POST /api/webauthn/register/verify': 'console',
+  'POST /api/webauthn/enroll/link': 'console',
+  'POST /api/webauthn/enroll/options': 'console',
+  'POST /api/webauthn/enroll/verify': 'console',
+  'POST /api/webauthn/unlock/options': 'console',
+  'POST /api/webauthn/unlock/verify': 'console',
+  'POST /api/webauthn/elevate/options': 'console',
+  'POST /api/webauthn/elevate/verify': 'console',
+  'GET /api/webauthn/pending': 'console',
+  'GET /api/webauthn/job/:id': 'console',
+  'POST /api/webauthn/confirm/options': 'console',
+  'POST /api/webauthn/confirm/verify': 'console',
+  'POST /api/webauthn/preapprove': 'console',
+  'GET /api/dash/summary': 'console',
+  'GET /api/dash/usage': 'console',
+  'GET /api/dash/gcp': 'console',
+  'GET /api/vm/status': 'console',
+  'POST /api/vm/start': 'console',
+  'POST /api/vm/stop': 'console',
+  'GET /api/security/pqc-tls': 'console',
+  'POST /api/security/pqc-tls': 'console',
+  'POST /api/ops/token': 'console',
+  'GET /api/ops/session': 'console',
+  'POST /api/ops/end': 'console',
+  'POST /api/shell': 'console',
+  'GET /api/shell/health': 'console',
+  'GET /api/models': 'console',
+  'GET /api/usage': 'console',
+  'GET /api/keys/status': 'console',
+  'POST /api/keys': 'console',
+  'GET /api/fleet/agents': 'console',
+  'POST /api/strain/delete': 'console',
+  'POST /api/strain/subculture': 'console',
+  'POST /api/strain/create': 'console',
+  'GET /api/chat/history': 'console',
+  'POST /api/chat': 'console',
+  'GET /api/flow': 'console',
+  'POST /api/lakeview/link': 'console',
+  'GET /api/strains': 'console',
+  'POST /api/strains/provision': 'console',
+  'POST /api/strains/retire': 'console',
+  'GET /oauth/strains': 'console',
+  'POST /api/sessions/mint': 'console',
+  'GET /api/sessions': 'console',
+  'POST /api/sessions/roleflags': 'console',
+  'GET /api/sessions/roles': 'console',
+  'POST /api/sessions/revoke': 'console',
+  'GET /api/cowork-prompt': 'console',
+  // ---- mcp: the connector transports ----
+  'POST /mcp': 'mcp',
+  'GET /mcp': 'mcp',
+  'POST /mcp/:token': 'mcp',
+  'GET /api/mcp': 'mcp',
+  'POST /api/mcp': 'mcp',
+  // ---- mcp: the legacy bearer-token agent API ----
+  'POST /api/queue/post': 'mcp',
+  'POST /api/queue/claim': 'mcp',
+  'POST /api/journal/log': 'mcp',
+  'POST /api/confirm/stage': 'mcp',
+  'POST /api/confirm/verify': 'mcp',
+  'POST /api/jobs/fire': 'mcp',
+  'POST /api/jobs/supersede': 'mcp',
+  // ---- mcp: OAuth 2.1 and discovery, advertised on the MCP host by oaPubBase ----
+  'POST /oauth/register': 'mcp',
+  'GET /oauth/authorize': 'mcp',
+  'POST /oauth/authorize/complete': 'mcp',
+  'POST /oauth/token': 'mcp',
+  'GET /.well-known/oauth-protected-resource': 'mcp',
+  'GET /.well-known/oauth-protected-resource/mcp': 'mcp',
+  'GET /.well-known/oauth-authorization-server': 'mcp',
+  'GET /.well-known/oauth-authorization-server/mcp': 'mcp',
+  'GET /.well-known/openid-configuration': 'mcp',
+  'GET /.well-known/agents': 'mcp',
+  'GET /.well-known/agent.json': 'mcp',
+  'GET /agents/:role/.well-known/agent-card.json': 'mcp',
+  'GET /agents/:role/.well-known/agent.json': 'mcp',
+};
+// Installed ONLY when PC_SURFACE is set. No try/catch anywhere in here on purpose: a surface that
+// cannot be built must fail the boot loudly, not log and serve half a service.
+if (PC_SURFACE) {
+  if (PC_SURFACE !== 'console' && PC_SURFACE !== 'mcp') {
+    throw new Error('PC_SURFACE=' + PC_SURFACE + ' is not a surface. Use console, use mcp, or'
+      + ' leave it unset for one service carrying every route.');
+  }
+  const pcSurfaceSkipped: string[] = [];
+  const pcSurfaceKept: string[] = [];
+  const pcVerbs = ['get', 'post', 'put', 'patch', 'delete', 'all', 'options', 'head'];
+  for (const pcVerb of pcVerbs) {
+    const pcOrig = (app as any)[pcVerb].bind(app);
+    (app as any)[pcVerb] = function (pcPath: any, ...pcRest: any[]) {
+      // app.get('some setting') is Express's settings accessor: one argument, no handler. Never a route.
+      if (typeof pcPath !== 'string' || pcRest.length === 0) return pcOrig(pcPath, ...pcRest);
+      const pcKey = pcVerb.toUpperCase() + ' ' + pcPath;
+      const pcWant = PC_SURFACE_MAP[pcKey];
+      if (!pcWant) {
+        throw new Error('[surface] ' + pcKey + ' names no surface in PC_SURFACE_MAP. Every route'
+          + ' must name the service(s) it belongs to; a route on neither is a silently broken'
+          + ' install. Add it to the table beside the routes it sits with.');
+      }
+      if (pcWant !== 'both' && pcWant !== PC_SURFACE) { pcSurfaceSkipped.push(pcKey); return app; }
+      pcSurfaceKept.push(pcKey);
+      return pcOrig(pcPath, ...pcRest);
+    };
+  }
+  (app as any).pcSurfaceKept = pcSurfaceKept;
+  (app as any).pcSurfaceSkipped = pcSurfaceSkipped;
+  process.nextTick(() => {
+    console.error('[surface] PC_SURFACE=' + PC_SURFACE + ' registered ' + pcSurfaceKept.length
+      + ' route(s), withheld ' + pcSurfaceSkipped.length + ' belonging to the other surface.');
+  });
+}
+// =============== end [SEC-SURFACE-SPLIT-V1] ===============
+
+
 function assertIdentity(req: express.Request): string {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -512,8 +682,8 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // claim in this file.
   // [RELEASE-ROSTER-V1] v3 ships four strains. The operator's private ones (ads, ghost,
   // seaside, linkedin, avatar, family-budget) are NOT part of an OSS release and must not
-  // be baked into anyone else's install. breakglass/handoff/cockpit are mechanisms, not people.
-  const ROLES = new Set(['fleet-archivist','fleet-analyst','fleet-mechanic','fleet-inspector','fleet-drafter','fleet-herald','fleet-librarian','fleet-curator','fleet-breakglass','fleet-engineer','fleet-courier','fleet-handoff','cockpit']);
+  // be baked into anyone else's install. breakglass/handoff are mechanisms, not people.
+  const ROLES = new Set(['fleet-archivist','fleet-analyst','fleet-mechanic','fleet-inspector','fleet-drafter','fleet-herald','fleet-librarian','fleet-curator','fleet-breakglass','fleet-engineer','fleet-courier','fleet-handoff']);
   // VERIFY-GREP: IDENTITY-TRUTH-V1
   const who = (a: any): string => {
     if (a && typeof a.agent === 'string' && a.agent !== agentId) {
@@ -1071,6 +1241,30 @@ async function buildMcpServer(agentId: string): Promise<any> {
     { description: 'Stage an SSH command on a target node (GATED). AI proposes; it does NOT run until the human confirms with their secret.',
       inputSchema: { target: z.string(), command: z.string(), ...AG } },
     async (a: any) => {
+      // [SEC-SSHKEY-NOSTAGE-V1] REFUSE BEFORE STAGING, NOT AFTER THE TAP.
+      // gate-exec/exec_server.py's ssh_key_preflight() already refuses an ssh job whose key is
+      // unconfigured, and it does so ABOVE claim_job_for_execution(), so the one-shot approval
+      // is no longer burned. That fix cannot go far enough on its own and its own comment says
+      // so: the executor is only reached POST-APPROVAL, so the refusal still arrives after the
+      // operator has spent a Face ID on a job that never had any chance of running. This is the
+      // half that belongs here -- the stage itself is the cost, and nothing should stage.
+      //
+      // SAME VARIABLE NAME AS THE EXECUTOR, DELIBERATELY. EXEC_SSH_KEY_SECRET names the Secret
+      // Manager secret holding the private key. It must be set on BOTH services: the executor
+      // READS the secret, this service only needs to know WHETHER one is configured. Unset here
+      // means refuse, exactly as unset there means refuse -- there is no default and no guess.
+      // The name this replaced was a private, operator-specific resource name that reached a
+      // public tree, and a name nobody creates is indistinguishable at runtime from a name
+      // nobody has permission to read.
+      const _sshSecret = String(process.env.EXEC_SSH_KEY_SECRET || '');
+      if (_sshSecret === '') {
+        return { content: [{ type: 'text', text: 'refused: ssh jobs are not usable on this deployment. '
+          + 'EXEC_SSH_KEY_SECRET names no Secret Manager secret, so gate-exec has no private key to '
+          + 'run an ssh job with and would refuse this job after you had already approved it. '
+          + 'NOTHING WAS STAGED and no approval was requested. To enable ssh: create a secret holding '
+          + 'the private key, grant the gate-exec service secretAccessor on THAT SECRET ONLY, and set '
+          + 'EXEC_SSH_KEY_SECRET to its name on both the control plane and gate-exec.' }], isError: true };
+      }
       const ref = db.collection('pending_confirms').doc();
       await ref.set({ job_id: ref.id, staged_by: who(a), command_type: 'ssh', arguments: { targetNode: a.target, command: a.command }, status: 'pending', created_at: FieldValue.serverTimestamp() });
       await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: `Staged ssh (${ref.id}) on ${a.target}: ${a.command}`, timestamp: FieldValue.serverTimestamp() });
@@ -1189,7 +1383,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
     { description: "Write a file to the data lake as your resolved role. A bare name goes to YOUR PRIVATE folder (agents/<role>/) no other role can read. Use 'shared/...' for the common drop zone every role picks up (e.g. shared/handoff/book3.md).",
       inputSchema: { path: z.string(), content: z.string(), tags: z.array(z.string()).optional(), ...AG } },
     async (a: any) => {
-      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }] };
+      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }], isError: true };  // [SEC-LAKE-UNCONFIGURED-V1] isError, not a 2xx success: an unconfigured lake used to read as A PASS to every client that judges failure by status or exception, which is why green runs went green over a dead lake.
       const me = who(a); const r = resolveKey(a.path, me, 'write');
       if (r.err) return { content: [{ type: 'text', text: r.err }] };
       // [PCV1-LAKE-TOOLS-V1] Through the vault, not straight to GCS. harWriteLake encrypts unless the path is
@@ -1206,7 +1400,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
     { description: "Write a BINARY file to the data lake (as your resolved role). Pass base64_data (the file contents encoded in base64) and an optional content_type (e.g. 'image/png'). Returns a stable lake path and a fetchable direct link.",
       inputSchema: { path: z.string(), base64_data: z.string(), content_type: z.string().optional(), tags: z.array(z.string()).optional(), ...AG } },
     async (a: any) => {
-      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }] };
+      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }], isError: true };  // [SEC-LAKE-UNCONFIGURED-V1] isError, not a 2xx success: an unconfigured lake used to read as A PASS to every client that judges failure by status or exception, which is why green runs went green over a dead lake.
       const me = who(a); const r = resolveKey(a.path, me, 'write');
       if (r.err) return { content: [{ type: 'text', text: r.err }] };
       const buf = Buffer.from(a.base64_data, 'base64');
@@ -1222,7 +1416,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
     { description: "Read a file from the data lake (as your resolved role). You can read YOUR private folder (agents/<role>/...) and anything in shared/... Not another role's private folder. Use list_files to discover paths.",
       inputSchema: { path: z.string(), ...AG } },
     async (a: any) => {
-      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }] };
+      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }], isError: true };  // [SEC-LAKE-UNCONFIGURED-V1] isError, not a 2xx success: an unconfigured lake used to read as A PASS to every client that judges failure by status or exception, which is why green runs went green over a dead lake.
       const me = who(a); const r = resolveKey(a.path, me);
       if (r.err) return { content: [{ type: 'text', text: r.err }] };
       const f = lake.file(r.key!);
@@ -1244,7 +1438,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
     { description: "List files you can see (as your resolved role): YOUR private folder + the shared/ drop zone. Optional prefix, within your own folder or shared/.",
       inputSchema: { prefix: z.string().optional(), ...AG } },
     async (a: any) => {
-      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }] };
+      if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }], isError: true };  // [SEC-LAKE-UNCONFIGURED-V1] isError, not a 2xx success: an unconfigured lake used to read as A PASS to every client that judges failure by status or exception, which is why green runs went green over a dead lake.
       const me = who(a); const myPrefix = `agents/${me}/`;
       let prefixes: string[];
       if (a.prefix) {
@@ -1398,6 +1592,26 @@ async function buildMcpServer(agentId: string): Promise<any> {
       return { content: [{ type: 'text', text: now.toISOString() + " / " + now.toLocaleString("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) }] };
     });
 
+  // [SEC-CDP-UNCONFIGURED-V1] NO CDP ENDPOINT MEANS NO BROWSER TOOLS.
+  // browser_tabs / browser_open / browser_navigate (and browser_eval behind PC_BROWSER_EVAL)
+  // all reach the workstation Chrome through harCdp(), which needs a bridge listening on
+  // WS_CDP_PORT on a running workstation VM. NOTHING in any installer provisions that bridge
+  // and nothing will in v3. Before this guard the tools registered on every install and
+  // returned {ok:false,error:'workstation not running'} on first call -- registered, then
+  // failed, which is the shape that pulled v3.
+  //
+  // WS_CDP_PORT IS THE DISCRIMINATOR, and it is the honest one: the port had a default of
+  // '8025' that nothing listens on, so the default was a guess dressed as configuration.
+  // An explicit WS_CDP_PORT is the only signal a deployer has actually stood a bridge up.
+  // This follows the PC_BROWSER_EVAL precedent immediately below: unset == not registered.
+  const _cdpPort = String(process.env.WS_CDP_PORT || '');
+  if (_cdpPort === '') {
+    console.log('[cp] browser tools NOT registered: WS_CDP_PORT unset. browser_tabs, '
+      + 'browser_open, browser_navigate' + (String(process.env.PC_BROWSER_EVAL || '') === '1' ? ', browser_eval' : '')
+      + ' need a Chrome DevTools Protocol bridge on the workstation VM, which no installer '
+      + 'provisions. They are withheld rather than registered to fail on first call. To enable '
+      + 'them stand up the bridge, then set WS_CDP_PORT (and CDP_TOKEN) on this service.');
+  } else {
   server.registerTool('browser_tabs',
     { description: 'List open tabs in the workstation Chrome (title + url). For browser work PREFER this + browser_eval over screenshot/vision — it is far cheaper and deterministic.', inputSchema: { ...AG } },
     async () => { const j = await harCdp('Target.getTargets', {}); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
@@ -1415,6 +1629,31 @@ async function buildMcpServer(agentId: string): Promise<any> {
       { description: 'Run JavaScript in the active workstation Chrome tab and return its result. Use for clicking (document.querySelector(sel).click()), reading (el.innerText), filling inputs, and scraping the DOM — prefer this over screenshots/coordinate-clicking.', inputSchema: { js: z.string(), ...AG } },
       async (a: any) => { const j = await harCdp('Runtime.evaluate', { params: { expression: a.js }, targetId: a.targetId || '' }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
   }  // PC-CDP-RPC-V1 end browser_eval guard
+  }  // [SEC-CDP-UNCONFIGURED-V1] end WS_CDP_PORT guard
+  // [SEC-VM-UNCONFIGURED-V1] NO INSTANCE CONFIGURED MEANS NO VM TOOLS.
+  // The VM is a y/n install option that DEFAULTS TO NO, so "unconfigured" is the common case,
+  // not the corner. All four tools addressed an instance from DEFAULTS -- WS_VM
+  // 'fleet-navigator', WS_ZONE 'us-central1-a' -- that no installer creates:
+  //   vm_status   built a Compute REST URL against a project segment that is usually empty
+  //               and failed on first call;
+  //   vm_start / vm_stop / vm_resize are WORSE. They STAGE a pending_confirms row, so the
+  //               operator gets an approval card and spends a Face ID on a gcloud command
+  //               naming an instance that does not exist. The cost lands on the human before
+  //               anything discovers the instance is absent.
+  // BOTH variables are required and neither has a usable default here. A default instance
+  // name is a guess, and a guessed name is indistinguishable at runtime from one we cannot
+  // see. Unset == withheld, the same contract registerGitTools() uses for GIT_REPO_ID.
+  const _wsVm = String(process.env.WS_VM || '');
+  const _wsZone = String(process.env.WS_ZONE || '');
+  if (_wsVm === '' || _wsZone === '') {
+    const _vmAbsent = [_wsVm === '' ? 'WS_VM' : '', _wsZone === '' ? 'WS_ZONE' : '']
+      .filter(function (s) { return s !== ''; }).join(' and ');
+    console.log('[cp] VM tools NOT registered: ' + _vmAbsent + ' unset. vm_status, vm_start, '
+      + 'vm_stop and vm_resize address a Compute instance that this deployment does not '
+      + 'declare, and the three staged ones would cost a human approval before failing. They '
+      + 'are withheld rather than registered to fail on first call. To enable them create the '
+      + 'instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.');
+  } else {
   server.registerTool('vm_status',
     { description: 'Status of the workstation browser box (state, machine type, internal IP). Direct Compute REST, no gcloud.', inputSchema: { ...AG } },
     async () => { const s = await harVmStatus(); const mt = await harVmMachine(); const ip = await harBoxInternalIp(); return { content: [{ type: 'text', text: JSON.stringify({ ...s, machineType: mt, internalIp: ip }) }] }; });
@@ -1453,6 +1692,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
   server.registerTool('vm_resize',
     { description: 'Ask the operator to set the workstation machine type (e.g. e2-medium, e2-standard-2). STAGED to the human gate, never executed here: a resize STOPS the instance first, so it can kill their session. Returns { mode: "staged", job_id }; read the result with read_job_log after they approves.', inputSchema: { machine_type: z.string(), ...AG } },
     async (a: any) => { const mt = String((a && a.machine_type) || '').trim(); if (mt.length > 40 || !/^[a-z][a-z0-9]*-[a-z0-9-]+$/.test(mt)) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'blocked: machine_type must look like e2-medium or e2-standard-2 (lowercase letters, digits and hyphens only) -- got: ' + mt.slice(0, 40) }) }] }; } const cmd = 'gcloud compute instances stop' + HARVM_T + '; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type ' + mt + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_resize', 'RESIZE ' + HARVM_NAME + ' to ' + mt + ' (STOPS it first; does NOT start it again)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
+  }  // [SEC-VM-UNCONFIGURED-V1] end WS_VM/WS_ZONE guard
   // VERIFY-GREP: F13-JOBLOG-OWNERSHIP-V1
   // F13. read_job_log had no ownership check: any principal holding any connector token read any job's
   // stdout_tail (up to 6 KB of privileged output staged by other strains). who(a) is the token-bound
@@ -2833,10 +3073,10 @@ app.get('/', (req: any, res: any) => {
 // unauthenticated path: a fresh clone is closed by default and unauthenticated requests get 403.
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
   const p = req.path;
-  const isHarness = p === '/cockpit' || p === '/chat' || p.startsWith('/api/shell') || p === '/api/chat' || p.startsWith('/api/keys') || p.startsWith('/api/vm/') || p.startsWith('/api/ops/') || p.startsWith('/api/security/');
+  const isHarness = p === '/chat' || p.startsWith('/api/shell') || p === '/api/chat' || p.startsWith('/api/keys') || p.startsWith('/api/vm/') || p.startsWith('/api/ops/') || p.startsWith('/api/security/');
   if (isHarness) {
     if (!waSessionOk(req)) {
-      if (p === '/cockpit' || p === '/chat') { res.redirect('/gate'); return; }
+      if (p === '/chat') { res.redirect('/gate'); return; }
       res.status(403).json({ error: 'forbidden: unlock the gate first (passkey session required)' }); return;
     }
   }
@@ -2844,7 +3084,7 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
 });
 
 const HAR_HARNESS_HTML: string = pcHtml('harness.html');
-// [SEC-DEBLOB-V1] The chat document constant is gone: it decoded byte-identical to the cockpit document, so both routes now serve one file, harness.html, through one constant.
+// [SEC-DEBLOB-V1] The chat document constant is gone: it decoded byte-identical to the harness document, so both routes now serve one file, harness.html, through one constant.
 const WS_VM = process.env.WS_VM || 'fleet-navigator';
 const WS_ZONE = process.env.WS_ZONE || 'us-central1-a';
 const HAR_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
@@ -3342,20 +3582,26 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
 // core on your own GCP + Gmail, run the Gemini bus, clone strains, and pull the paste-ready prompt
 // here to do the Claude half on whatever plan you already have (free, $20, or Max). The in-Flowhood
 // Claude console is the part that needs a key; everything else degrades gracefully without one.
-// try/catch: this block sits early in the bundle, so if waGate/app are not yet initialised the
-// route simply does not register instead of throwing at module init and killing the service.
-try {
-  app.get('/api/cowork-prompt', waGate(async (req: any, res: any) => {
-    try {
-      const strain = String((req.query && req.query.strain) || 'fleet-archivist');
-      const task = String((req.query && req.query.task) || '');
-      const txt = await harCoworkPromptTool({ strain: strain, task: task }, strain);
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-store, max-age=0');
-      res.send(txt);
-    } catch (e: any) { harFail(res, e, 'harness'); }
-  }));
-} catch (e) { /* route unavailable in this init order; tool path still works */ }
+// [SEC-ROUTE-VISIBILITY-V1] NO try/catch AROUND THIS REGISTRATION, AND IT STAYS AT COLUMN ZERO.
+// The wrapper that used to sit here said the block "sits early in the bundle, so waGate/app may
+// not be initialised". MEASURED FALSE: app is `const app = express()` at line 93, and waGate,
+// harFail and harCoworkPromptTool are all hoisted function declarations. The catch could never
+// fire for the reason it gave. What it COULD swallow is the PC_SURFACE registrar's deliberate
+// throw for a path missing from PC_SURFACE_MAP -- converting a route stranded on BOTH services
+// into a silent one, which is the precise failure that throw exists to make impossible.
+// The indentation was the worse half: route-audit.mjs anchors at column zero, so this
+// registration was invisible to it and this handler was NEVER searched for a guard. The waGate
+// below could have been deleted and the audit would have reported nothing.
+app.get('/api/cowork-prompt', waGate(async (req: any, res: any) => {
+  try {
+    const strain = String((req.query && req.query.strain) || 'fleet-archivist');
+    const task = String((req.query && req.query.task) || '');
+    const txt = await harCoworkPromptTool({ strain: strain, task: task }, strain);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.send(txt);
+  } catch (e: any) { harFail(res, e, 'harness'); }
+}));
 
 async function harRunChatTool(name: string, input: any, agentId: string): Promise<string> {
   const who = agentId || 'fleet-archivist';
@@ -3499,8 +3745,6 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
 }
 
 // ---- pages (gated: must have an unlocked passkey session; otherwise bounce to /gate) ----
-// SESSION-GATED-VIA-MIDDLEWARE: waSessionOk is enforced for '/cockpit' by the harness app.use gate above, which redirects to /gate when the session is absent. This line only 301s an ALREADY-authenticated caller on to /harness. NOT public -- do not restamp this as PUBLIC-BY-DESIGN.
-app.get('/cockpit', (req: express.Request, res: express.Response) => { res.redirect(301, '/harness'); });
 app.get('/chat', (req: express.Request, res: express.Response) => { if (!waSessionOk(req)) { res.redirect('/gate'); return; } res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Cache-Control', 'no-store, max-age=0'); res.send(HAR_HARNESS_HTML); });
 
 // ---- VM control ----
@@ -4003,8 +4247,16 @@ const HAR_REFLECT_EVERY = Number(process.env.CHAT_REFLECT_EVERY || 10);
 // ONCE via Cloud KMS ML-KEM decapsulate over shared/vault/master.kem, HKDF-SHA256 -> 32B, held in RAM
 // only, NEVER logged. Reuses existing primitives: waAccessToken(), waFetch(), getStorage().
 const vCrypto = require('crypto');
-const VAULT_KMS_KEY_VERSION_E1 = ('projects/' + PC_PROJECT + '/locations/us-east1/keyRings/paracoding-vault/cryptoKeys/vault-kem/cryptoKeyVersions/1');
-const VAULT_KMS_KEY_VERSION_E2 = ('projects/' + PC_PROJECT + '/locations/us-east1/keyRings/paracoding-vault/cryptoKeys/vault-kem-xwing/cryptoKeyVersions/1');
+// [SEC-VAULT-REGION-V1] THE VAULT KEYRING LIVES IN THE INSTALL REGION, NOT ALWAYS us-east1.
+// These two lines hardcoded us-east1 while install.sh takes the region as $2, so a keyring
+// created in, say, europe-west1 was named here in us-east1 and every decapsulate 404'd. A
+// non-us-east1 adopter could not have a working vault at all, and because harWriteLake calls
+// vaultMaster() before file.save() that presented as every lake write throwing. GCP_REGION is
+// set on the service by install.sh at 6/10; the fallback keeps an existing us-east1 deployment
+// byte-identical if it is ever absent, which is also why epoch 1 needs no separate pin.
+const VAULT_KMS_LOCATION = (process.env.GCP_REGION || 'us-east1');
+const VAULT_KMS_KEY_VERSION_E1 = ('projects/' + PC_PROJECT + '/locations/' + VAULT_KMS_LOCATION + '/keyRings/paracoding-vault/cryptoKeys/vault-kem/cryptoKeyVersions/1');
+const VAULT_KMS_KEY_VERSION_E2 = ('projects/' + PC_PROJECT + '/locations/' + VAULT_KMS_LOCATION + '/keyRings/paracoding-vault/cryptoKeys/vault-kem-xwing/cryptoKeyVersions/1');
 const VAULT_KMS_KEY_VERSION = VAULT_KMS_KEY_VERSION_E2;
 const VAULT_MASTER_KEM_PATH = 'shared/vault/master.kem';
 const VAULT_MASTER_INFO = Buffer.from('paracoding-vault master v1', 'utf8');
@@ -4335,7 +4587,7 @@ app.post('/api/chat', waGate(async (req, res) => {
         });
       } catch (e) {}
     }
-    if (agentId) { try { await db.collection('chat_history').add({ agent_id: agentId, role: 'user', text: message, tags: ['cockpit'], timestamp: FieldValue.serverTimestamp() }); await db.collection('chat_history').add({ agent_id: agentId, role: 'assistant', text: reply, tags: ['cockpit'], timestamp: FieldValue.serverTimestamp() }); } catch (e) {} }
+    if (agentId) { try { await db.collection('chat_history').add({ agent_id: agentId, role: 'user', text: message, tags: ['harness'], timestamp: FieldValue.serverTimestamp() }); await db.collection('chat_history').add({ agent_id: agentId, role: 'assistant', text: reply, tags: ['harness'], timestamp: FieldValue.serverTimestamp() }); } catch (e) {} }
     if (agentId && HAR_REFLECT_EVERY > 0) { try { const cc = await db.collection('chat_history').where('agent_id', '==', agentId).count().get(); const n = (cc.data() && cc.data().count) || 0; const turns = Math.floor(n / 2); if (turns > 0 && turns % HAR_REFLECT_EVERY === 0) { await harReflect(agentId, provider, apiModel, key); } } catch (e) {} }
     res.json({ reply, usage, model: usedModel, effort: usedEffort });
   } catch (e: any) { console.error('[api/chat] fail', (e && e.stack) || String(e)); res.status(502).json((console.error('[gate] error detail withheld from client:', e), { error: 'request failed' })); }

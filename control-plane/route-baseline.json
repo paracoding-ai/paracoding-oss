@@ -1,5 +1,5 @@
 {
-  "note": "Routes that are PUBLIC (no auth guard found in the handler) as of the commit that created this file. A NEW public route not listed here fails the build. Removing an entry here is how you assert a route has been given a guard. Adding one is a deliberate decision to ship a public route -- say why in the commit message. | 2026-08-01: assertIdentity added to BOTH scanners (route-audit.mjs and gen-baseline.py, kept in step deliberately). 5 route(s) that were always bearer-token guarded are no longer listed public. Verified a strict subset of the previous baseline -- nothing newly blessed.",
+  "note": "Routes that are PUBLIC (no auth guard found in the handler) as of the commit that created this file. A NEW public route not listed here fails the build. Removing an entry here is how you assert a route has been given a guard. Adding one is a deliberate decision to ship a public route -- say why in the commit message. | 2026-08-01: assertIdentity added to BOTH scanners (route-audit.mjs and gen-baseline.py, kept in step deliberately). 5 route(s) that were always bearer-token guarded are no longer listed public. Verified a strict subset of the previous baseline -- nothing newly blessed. | 2026-08-09 [SEC-ROUTE-RETIRE-V2]: ONE entry removed -- the retired legacy console page alias whose whole handler was a 301 to /harness. That route is deleted from src/index.ts in this SAME commit under a standing order that its name must not appear in the source, which is also why neither this note nor the source names it. This is the deliberate deletion of a VANISHED route, not the blessing of a new guard: it was only ever listed public because a one-line redirect handler contains no guard token, while the harness app.use middleware actually gated it -- and that middleware entry is deleted too. Exactly one line was removed. The baseline was NOT regenerated.",
   "generated_from": "src/index.ts",
   "public": [
     "GET /.well-known/agent.json",
@@ -11,7 +11,6 @@
     "GET /.well-known/openid-configuration",
     "GET /agents/:role/.well-known/agent-card.json",
     "GET /agents/:role/.well-known/agent.json",
-    "GET /cockpit",
     "GET /dash",
     "POST /api/confirm/verify",
     "POST /api/mcp",
@@ -19,5 +18,21 @@
     "POST /api/webauthn/unlock/verify",
     "POST /mcp",
     "POST /oauth/register"
-  ]
+  ],
+  "surface_split": {
+    "note": "2026-08-09 [SEC-SURFACE-SMOKE-V1]. The release now serves this ONE route table from TWO Cloud Run services built from ONE image (console: PC_SURFACE=console, IAP on; mcp: PC_SURFACE=mcp, IAP off). DECISION: the `public` list above stays WHOLE-IMAGE and its meaning is unchanged. route-audit.mjs parses src/index.ts SOURCE, runs as a build step BEFORE esbuild, and hard-fails the image; it knows nothing of runtime surfaces and must not be taught about them here. Per-surface facts are recorded in THIS key instead, which route-audit.mjs provably ignores -- it reads only baseline.public. Splitting `public` per surface would also be wrong on the merits: a route's guard is a property of its handler, not of which service happens to register it, and the public set is identical either way.",
+    "surface_map_symbol": "PC_SURFACE_MAP in control-plane/src/index.ts",
+    "audit_visible_total": 87,
+    "audit_visible_guarded": 71,
+    "audit_visible_public": 16,
+    "total": 87,
+    "guarded": 71,
+    "public_count": 16,
+    "console": 62,
+    "mcp": 25,
+    "both": 0,
+    "audit_blind_spots": [],
+    "blind_spot_note": "RE-MEASURED 2026-08-09 [SEC-ROUTE-RETIRE-V2] at main 045dd7e7 -- THERE IS NO BLIND SPOT LEFT, so audit_blind_spots is now empty and audit_visible_* equals the real totals. Evidence: `node route-audit.mjs src/index.ts route-baseline.json` over the PRE-change index.ts (blob e8f6f3b8) printed 88/71/17 and PASS; over the POST-change index.ts it prints 87/71/16. The hole closed because [SEC-ROUTE-VISIBILITY-V1] de-indented GET /api/cowork-prompt and made any registration off column zero a hard build failure. PC_SURFACE_MAP was counted directly, not inferred: 88 entries (63 console / 25 mcp) before, 87 (62 console / 25 mcp) after. The original note is kept below because it is the only record of why the two totals ever differed. MEASURED 2026-08-09 at main 03697fdd, index.ts blob db767766. route-audit.mjs's regex is anchored at column zero (/^app\\./gm), so a registration indented into an if or a try is invisible to it. GET /api/cowork-prompt is registered at index.ts:3651 indented inside a try{} and is therefore NOT scanned: its handler is never searched for a guard, so removing that guard would never be reported as a new public route. That is a hole in the guard scanner, not merely a count. It is why audit_visible_total (87) and total (88) differ, and both are recorded rather than reconciled.",
+    "disappearance_defect": "CLOSED -- DO NOT ACT ON THE SUPERSEDED TEXT BELOW. Re-measured 2026-08-09 [SEC-ROUTE-RETIRE-V2] against route-audit.mjs blob d54e3634: deleting one route from src/index.ts and running the audit against the UNEDITED baseline exits 1 with 'ROUTE AUDIT FAIL: 1 baseline route(s) NO LONGER REGISTERED'. A vanished route is a HARD FAILURE in route-audit.mjs itself now, which is exactly why the one-line deletion above had to land in the SAME commit as the source change. smoke.py F7.1/F7.2/F7.3 stay as defence in depth. SUPERSEDED ORIGINAL: MEASURED 2026-08-09: route-audit.mjs EXITS 0 WHEN A ROUTE VANISHES. It hard-fails only on a NEW public route, a wildcard, or a missing connector route. Indenting one guarded registration moved it to 86/69/17 and still PASSED; indenting a PUBLIC one (GET /dash) moved it to 86/70/16 and PASSED while printing 'now guarded (was public): GET /dash' -- reporting a disappeared route as a security IMPROVEMENT. This cannot be fixed from the baseline, which is inert data that route-audit.mjs only reads `public` out of, and fixing it in route-audit.mjs risks bricking the build for a file this lane does not own. It is therefore ENFORCED in shared/state/security-lane/devgate/smoke.py -- F7.1.ROUTE_TABLE_UNCHANGED catches the disappearance, F7.3.AUDIT_SEES_EVERY_REGISTRATION catches the blind spot, F7.2.SURFACE_PARTITION_TOTAL catches a dead map entry -- where a false positive costs a report instead of a deploy. The counts in this key are what smoke.py compares against; a route that vanishes changes them and fails there."
+  }
 }

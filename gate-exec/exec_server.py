@@ -376,13 +376,22 @@ def pc_verify_approval_signature(job, job_id, cmd_sha, now=None):
 
 
 
-# [SEC-MINTER-V1] Self-test endpoint. Exercises the assertion verifier and the KMS->STS mint
-# INSIDE the running service, so we find out here rather than during an approval. Read-only:
-# it mints a credential and reports its shape, it never runs a command and never logs a token.
+# [SEC-MINTER-V1] Self-test endpoint. Exercises the assertion verifier INSIDE the running
+# service, so we find out here rather than during an approval. Read-only: it never runs a
+# command and never logs a credential.
+#
+# [SEC-MINTER-REMOVE-V1] THE "mint" ROW IS GONE, NOT BROKEN, AND THAT IS THE HONEST STATE.
+# It called pcmint.mint_job_credential() -- a KMS -> JWT -> STS -> impersonate chain needing
+# PC_KMS_KEY, PC_PROJECT_NUMBER, PC_EXEC_SA and a Workload Identity pool, none of which any
+# installer ever created and none of which any execution path ever used. It therefore
+# reported mint:{ok:false} on every deployment that has ever existed. A self-test row that
+# can only ever fail teaches its reader to skim the self-test, which is worse than having no
+# row at all. The chain is deleted from pcmint.py and this row is deleted with it, so
+# /selftest no longer reports on a component that does not exist.
 @app.get("/selftest")
 def selftest():
     import os, json, base64, hashlib
-    out = {"verifier": [], "mint": None}
+    out = {"verifier": []}
     try:
         import pcwebauthn as W
         from cryptography.hazmat.primitives import hashes as _h
@@ -413,13 +422,66 @@ def selftest():
         out["verifier"].append("bound-other:%s" % W.challenge_is_bound(chal, "j2", "approve"))
     except Exception as e:
         out["verifier"].append("MODULE_ERROR:%s" % e)
-    try:
-        import pcmint
-        tok, exp = pcmint.mint_job_credential("selftest-job", "0" * 64, "selftest@local", ttl=300)
-        out["mint"] = {"ok": True, "token_len": len(tok), "expires": exp}
-    except Exception as e:
-        out["mint"] = {"ok": False, "error": str(e)[:300]}
     return jsonify(out)
+
+
+# ---- [SEC-SSHKEY-PREFLIGHT-V1] AN SSH JOB MUST NOT SPEND AN APPROVAL AND THEN DIE ----
+# WHAT WAS WRONG. The ssh branch below used to read a Secret Manager secret whose name was
+# HARDCODED here, that no installer has ever created, and it read it INSIDE the try block --
+# which sits BELOW claim_job_for_execution(). So a command_type=="ssh" job passed every
+# check, CONSUMED the one-shot approval a human had just spent a passkey tap on, and only
+# then raised "Failed to get SSH key". One approval, no run, nothing left to re-spend, and
+# the operator had to be asked for a second tap to learn the same thing.
+#
+# TWO CHANGES, AND THE ORDER OF THEM IS THE POINT.
+#
+#  1. THE SECRET NAME IS CONFIGURATION AND HAS NO DEFAULT. An unset EXEC_SSH_KEY_SECRET
+#     means this deployment has no SSH key and ssh jobs are REFUSED. It does not mean "guess
+#     a name". The guessed default this replaces was a private, operator-specific resource
+#     name that reached a public tree, and a name nobody creates is indistinguishable at
+#     runtime from a name nobody has permission to read.
+#
+#  2. THE READ HAPPENS ABOVE THE CLAIM, beside the refusals the EXEC-SINGLE-USE-V1 comment
+#     already promises "consume nothing". Unconfigured, unreadable, and empty-payload all
+#     refuse before the approval is spent, so a refused ssh job costs the operator nothing
+#     and the same approval can be re-presented once the key exists.
+#
+# WHAT THIS DOES NOT CLAIM TO FIX. The refusal still arrives AFTER the human has tapped,
+# because this service is only reached post-approval. Refusing to STAGE an ssh job on a
+# deployment with no key configured belongs in the control plane's ssh_executor handler and
+# is not this file's to make.
+EXEC_SSH_KEY_SECRET = os.environ.get("EXEC_SSH_KEY_SECRET", "")
+
+
+def ssh_key_preflight(env):
+    """Resolve the private key for a command_type=='ssh' job BEFORE the approval is claimed.
+
+    Returns (key, None) or (None, reason). Never raises. An empty payload is a REASON, not a
+    key: writing a zero-byte identity file would push the failure back down into ssh, i.e.
+    below the claim, which is the whole defect being closed here.
+    """
+    if not EXEC_SSH_KEY_SECRET:
+        return (None, "this deployment has no SSH key configured -- EXEC_SSH_KEY_SECRET "
+                      "names no Secret Manager secret, so ssh jobs cannot run here. Create a "
+                      "secret holding the private key, grant this service secretAccessor on "
+                      "THAT SECRET ONLY, and set EXEC_SSH_KEY_SECRET to its name")
+    try:
+        p = subprocess.run(["gcloud", "secrets", "versions", "access", "latest",
+                            "--secret=" + EXEC_SSH_KEY_SECRET],
+                           env=env, capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        return (None, "the SSH key secret %r could not be read (%s)"
+                      % (EXEC_SSH_KEY_SECRET, str(e)[:160]))
+    if p.returncode != 0:
+        # The exit code only. gcloud's stderr on this command can echo back the resource
+        # path, and job stdout is permanent in Firestore.
+        return (None, "the SSH key secret %r could not be read (gcloud exit %d); check that "
+                      "the secret exists and that this service holds secretAccessor on it"
+                      % (EXEC_SSH_KEY_SECRET, p.returncode))
+    if not (p.stdout or "").strip():
+        return (None, "the SSH key secret %r resolved to an EMPTY payload; refusing rather "
+                      "than writing a zero-byte identity file" % EXEC_SSH_KEY_SECRET)
+    return (p.stdout, None)
 
 
 @app.get("/healthz")
@@ -679,6 +741,27 @@ def run():
 
     access_token = body.get("access_token")
 
+    env = dict(os.environ)
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    if access_token:
+        # Bind gcloud/gsutil/bq to the approver's identity
+        env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = access_token
+
+    # [SEC-SSHKEY-PREFLIGHT-V1] ABOVE THE CLAIM, DELIBERATELY. env is built here rather than
+    # after the claim for exactly this: the secret read runs as the approver, and a job that
+    # cannot get its key must refuse while the approval is still unspent.
+    ssh_key = None
+    if command_type == "ssh":
+        ssh_key, _ssh_why = ssh_key_preflight(env)
+        if ssh_key is None:
+            log_journal("exec_refused_ssh_key_unavailable",
+                        "REFUSED job %s: %s. NOTHING RAN and the approval was NOT consumed, "
+                        "so it can be presented again once the key is configured."
+                        % (job_id, _ssh_why),
+                        job_id)
+            return jsonify({"error": "refused: ssh jobs are not usable on this deployment",
+                            "detail": _ssh_why}), 412
+
     # ---- [EXEC-SINGLE-USE-V1] ----
     # Bound the age of the approval, then consume it -- both BEFORE anything
     # runs. Every refusal above this line (status, sha mismatch, allowlist)
@@ -711,22 +794,14 @@ def run():
 
     log_journal("exec_start", f"Starting execution of job {job_id} ({command_type}) with approver-scoped creds", job_id)
 
-    env = dict(os.environ)
-    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
-    if access_token:
-        # Bind gcloud/gsutil/bq to the approver's identity
-        env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = access_token
-    
     exit_code = -1
     stdout, stderr = "", ""
     try:
         if command_type == "ssh":
-            # pull SSH key from Secret Manager (assume fleet-ssh-key)
-            key_proc = subprocess.run(["gcloud", "secrets", "versions", "access", "latest", "--secret=fleet-ssh-key"], env=env, capture_output=True, text=True)
-            if key_proc.returncode != 0:
-                raise Exception(f"Failed to get SSH key: {key_proc.stderr}")
-            ssh_key = key_proc.stdout
-
+            # [SEC-SSHKEY-PREFLIGHT-V1] ssh_key was resolved, validated non-empty and
+            # refused-on-failure ABOVE the claim. Nothing is fetched here, so there is no
+            # longer any way for this branch to fail on a missing key after the approval
+            # has been spent.
             with tempfile.NamedTemporaryFile("w", delete=True) as key_file:
                 key_file.write(ssh_key)
                 key_file.flush()
