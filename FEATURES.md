@@ -9,18 +9,23 @@ page cannot drift from the release that carries it.
 
 ## 1. It installs itself into a bare GCP project
 
-- **One command.** `bash install.sh YOUR_PROJECT_ID` takes an empty project to a running
-  control plane in 10 phases.
-- **It stops where a human is genuinely required** and says exactly what to do — passkey
-  registration, the Google OAuth client, the org-policy decisions.
+- **One command, unattended.** `./install.sh` takes an empty project to a running control
+  plane in 10 phases with **zero blocking prompts**. It resolves the project from `--project`,
+  else the first positional argument, else whatever project `gcloud` is already set to.
+- **Flags, not questions.** `--project ID`, `--region REGION`, `--no-adopt`, `--plan`.
+  Adopting resources that are already in the project is the announced default: the installer
+  lists exactly what it would adopt before it creates anything, and `--no-adopt` refuses
+  instead of asking you to type a word.
 - **Resume, not restart.** A failed run picks up where it stopped instead of re-creating
   what already exists. Every phase is existence-checked.
 - **A refusal is never a silent skip.** Missing sources, absent files, a step that declines
-  — each one prints `##PCSTEP FAIL` or a named warning. Optional components (the Windows
-  workstation) *warn* and continue; required ones abort.
+  — each one prints `##PCSTEP FAIL` or a named warning. Optional components *warn* and
+  continue; required ones abort.
 - **`uninstall.sh` removes what it made**, including secrets it created and nothing it didn't.
-- **A workstation VM** is optional, idle-stopped, and refuses to be created with a public
-  RDP port — the refusal is the feature.
+- **A workstation VM** is optional and is no longer part of the install. It lives in
+  `workstation.sh`, shipped beside the installer and run separately, whenever you want one.
+  It is idle-stopped and refuses to be created with a public RDP port — the refusal is the
+  feature.
 
 ## 2. Two services from one image
 
@@ -40,24 +45,31 @@ the auth they require.
 
 ## 3. Access control that fails closed
 
-- **Google IAP** as the outer door, with hardware-key or passkey accounts.
-- **WebAuthn passkey session** as the inner door. A weak `WA_SESSION_SECRET` means *no valid
-  sessions at all*, because an empty-key HMAC is forgeable.
-- **A session minted while passkeys were off does not survive turning them back on.**
+- **Google IAP** as the outer door. Put a hardware key or a passkey on the Google account
+  and reaching the console costs a physical touch.
+- **The approver allow-list as the inner door.** The install ships `PC_REQUIRE_PASSKEY=0`, so
+  a verified IAP identity on `WA_APPROVER_EMAILS` — seeded with the installing account — is
+  what satisfies the application's own session check. Two independent doors, no enrolment step.
+- **A weak `WA_SESSION_SECRET` means *no valid sessions at all***, because an empty-key HMAC
+  is forgeable. The session layer fails closed rather than degrading.
+- **The legacy WebAuthn gate is intact but unwired.** `locked.html` and all fifteen `webauthn`
+  routes stay in the tree, referenced by no console page. A session minted while that gate was
+  off does not survive turning it back on.
 - **Org policy** (`allowedPolicyMemberDomains`) makes out-of-domain access *impossible to
   grant*, not merely discouraged — enforced when the binding is written.
 - **401 served in place**, at the URL you asked for. No `?next=` redirect, so no enumeration
   oracle and no browser credential dialog.
 - **Elevation is separate from session** and is bound to *one job id and one command digest*
-  — an edited command is refused. "The human did a Face ID recently" has never been enough.
+  — an edited command is refused. A generic "this browser authenticated recently" has never
+  been enough to authorise a command.
 
 ## 4. Agent identity — strains
 
 - A **strain** is a role: its own lake folder, journal lane, work items, lessons file, scope.
 - **Scope is real.** A strain reads `shared/…` and its own `agents/<role>/…` and nothing
   else. It cannot read another strain's private folder.
-- **A leaked session key is a leaked *role*, not a leaked system** — and still buys nothing
-  privileged, because execution sits behind the passkey regardless of who asks.
+- **A leaked session key is a leaked *role*, not a leaked system** — the key resolves to one
+  role's scope and reads nothing outside it, regardless of who presents it.
 - **Attribution is a fact, not an inference.** Every journal row, staged job and lake write
   carries the role that did it.
 - Three ship by default (advisor, gcp, security). Two service identities are seeded hidden.

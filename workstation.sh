@@ -38,6 +38,25 @@ while [ $# -gt 0 ]; do
 done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# [SEC-LIVE-OUTPUT-V90] SHARED OUTPUT HELPERS. They live INSIDE the PC_COMMON region because
+# workstation.sh is composed from it and its say()/die() call tell(). They were once above the
+# fence, and the emitted workstation.sh then called a function it did not define -- which bash -n
+# does NOT catch, because an undefined function is a RUNTIME error. Measured before it shipped:
+# tell() defined 0 times and called 8 times in workstation.sh. Keep them here.
+# They are deliberately trivial. An earlier cut made tell() write to both a log file and a saved
+# terminal fd; that is what hid the 6d/10 prompt and made a working install look hung.
+tell() { printf '%s\n' "$*"; }
+tellblock() { cat >&2; }
+pc_urls() {
+  # [SEC-LAST-TWO-LINES-V90] THE LAST TWO LINES OF THIS INSTALL ARE THE TWO URLS AND NOTHING
+  # ELSE. Everything above them is in the log. An operator who has just watched a long install
+  # should not have to scroll a screen of prose to find the two strings the whole thing exists
+  # to hand over. Printed on success AND on failure: a check that failed does not make these
+  # wrong, and 8b/10 is known to be able to fail falsely.
+  tell ""
+  tell "console        ${CP_URL}/harness"
+  tell "MCP connector  ${MC_URL}/mcp"
+}
 # [SEC-SINGLEPROJ-V2] PC_LANE -- ONE VARIABLE THAT NAMESPACES EVERY RESOURCE THIS INSTALLER
 # CREATES, so a rehearsal lane and the real thing can share ONE project.
 #
@@ -76,14 +95,20 @@ PC_TOK=""
 # therefore needs no per-step instrumentation and cannot drift as steps are renumbered.
 PC_STEP=""
 say() {
-  if [ -n "$PC_STEP" ]; then printf '##PCSTEP OK %s\n' "$PC_STEP"; fi
+  # [SEC-QUIET-LOG-V90] A STEP HEADER GOES TO BOTH THE TERMINAL AND THE LOG, and the ##PCSTEP
+  # markers MUST go to both: the Flowhood parses them out of this script's stdout to draw
+  # progress, so routing them to the log alone would leave the harness blind while looking
+  # perfectly healthy from here. Everything else a step prints stays in the log.
+  if [ -n "$PC_STEP" ]; then tell "##PCSTEP OK $PC_STEP"; fi
   PC_STEP="${1%% *}"
-  printf '##PCSTEP BEGIN %s\n' "$PC_STEP"
-  printf '\n\033[1m== %s\033[0m\n' "$*"
+  tell "##PCSTEP BEGIN $PC_STEP"
+  tell ""
+  tell "== $*"
 }
 die() {
-  if [ -n "$PC_STEP" ]; then printf '##PCSTEP FAIL %s\n' "$PC_STEP"; fi
-  printf '\n!! %s\n' "$*" >&2
+  if [ -n "$PC_STEP" ]; then tell "##PCSTEP FAIL $PC_STEP"; fi
+  tell ""
+  tell "!! $*"
   exit 1
 }
 

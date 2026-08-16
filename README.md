@@ -1,4 +1,4 @@
-# Paracoding — v8.5
+# Paracoding — v10.0
 
 Most agent demos end with "…and then it deployed to production."
 
@@ -7,12 +7,12 @@ This one ends with a refusal.
 Paracoding is an agent platform that installs into **your own** Google Cloud project in one
 command. Agents propose. You commit. Then it builds the next version of itself.
 
-    bash install.sh YOUR_PROJECT_ID
+./install.sh
 
-One command, one argument, a brand-new GCP project with billing enabled. The installer
+One command, no arguments, and a GCP project with billing enabled. The installer runs
 enables APIs, creates Firestore, mints three service accounts, generates every secret into
 Secret Manager, deploys the console, the MCP service and the gated executor, walks you
-through registering your first passkey, and then **tests itself**. If the self-test fails it
+end to end with nobody watching, and then **tests itself**. If the self-test fails it
 says so and exits non-zero — a green run means it works, not that nothing errored.
 
 Apache-2.0. Your project, your bill, your key.
@@ -73,29 +73,37 @@ this release was cut, correctly.
 **A chat that can actually build.**
 Claude and Gemini side by side, Gemini 3.7 Flash live out of the gate, wired straight into
 GCP — ask a strain for a service and it builds the container and deploys it to Cloud Run.
-Effectively a Claude-to-GCP connector with a passkey in front of it.
+Effectively a Claude-to-GCP connector with Identity-Aware Proxy in front of it.
 
-**An agent cannot execute. It can only ask.**
-On a default install `install.sh` sets `PC_AUTO_APPROVE=0`, so a privileged job an agent
-stages goes to `pending` and **does not run** — not on a timer, not on a retry, not ever.
-Nothing in the product will come along and run it for you. You either run the command
-yourself, or you turn auto-approve on and accept what that means. There is no approval queue
-and no per-job tap: the console page that offered one was deleted, and the honest version of
-this claim is that the product stops, not that it asks.
+**An agent stages its privileged work, and every stage is recorded.**
+On a default install `install.sh` sets `PC_AUTO_APPROVE=1`: a job an agent stages is signed and
+executed in the same call, and the journal records who staged it, what the command was and what
+it returned. That is the deliberate posture. This is built to ACCELERATE security-minded
+agentic engineering, and a human tap in front of every command does not make a system safer --
+it makes it slower and teaches everyone to click through.
+Set `PC_AUTO_APPROVE=0` and a staged job goes to `pending` and **does not run** -- not on a
+timer, not on a retry, not ever. Nothing in the product will come along and run it for you.
+There is no approval queue and no per-job tap: the console page that offered one was deleted,
+so with that switch on the honest description is that the product STOPS, not that it asks.
 
-**With auto-approve on, the executor still refuses more than it accepts.**
-Set `PC_AUTO_APPROVE=1` and a staged job is signed with a Cloud KMS asymmetric key and
-executed in the same call. The signature covers the job id and the command digest, the
-control plane holds the private half, and the executor holds only the public half — so it
-verifies a signature it could not produce, refuses a command edited after signing, claims
-each approval exactly once in a transaction, bounds its age, and runs it under a `PATH`
-jail. `install.sh` also sets `PC_GUARDRAILS=1`, so a destructive body is refused outright
-and handed back to you in chat rather than run.
+**The executor refuses more than it accepts.**
+A staged job is signed with a Cloud KMS asymmetric key and executed in the same call. The
+signature covers the job id and the command digest, the control plane holds the private half,
+and the executor holds only the public half -- so it verifies a signature it could not produce,
+refuses a command edited after signing, claims each approval exactly once in a transaction,
+bounds its age, and runs it under a `PATH` jail.
+`install.sh` ships `PC_GUARDRAILS=0`, so the two RUNTIME refusals are off by decision.
+`PC_GUARDRAILS=1` restores them and a destructive or lockout-class body is handed back to you
+in chat rather than run. Note what that switch does NOT touch: every check that can fail a
+release CUT is unconditional and stays exactly where it is.
 
-**The passkey guards the console, not the job.**
-`PC_REQUIRE_PASSKEY=1` is the installed default and the console is behind Identity-Aware
-Proxy on top of it, so reaching the browser surface takes both. That is what the passkey is
-for in this release. It is not a per-command approval, and this document will not describe
+**Identity-Aware Proxy guards the console, not the job.**
+`PC_REQUIRE_PASSKEY=0` is the installed default: a verified IAP identity on the approver
+allow-list (`WA_APPROVER_EMAILS`) is what reaches the console, with no cookie and no credential
+of its own. The passkey gate is not deleted -- every WebAuthn route stays in the tree and
+`PC_REQUIRE_PASSKEY=1` re-arms the whole of it for an operator who wants that posture.
+Either way it decides who reaches the browser surface, not what runs. It is not a per-command
+approval, and this document will not describe
 it as one.
 
 **Jobs run inside a binary jail.**
