@@ -1702,6 +1702,24 @@ def run():
     if access_token:
         # Bind gcloud/gsutil/bq to the approver's identity
         env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = access_token
+    else:
+        # [SEC-EXEC-TOKEN-V90] NO APPROVER TOKEN MEANS RUN AS OURSELVES -- IT MUST NOT MEAN RUN
+        # WITH NOTHING. The auto-approve and pre-approve paths deliberately forward '' (there is
+        # no human in them), and this branch used to simply leave CLOUDSDK_AUTH_ACCESS_TOKEN
+        # UNSET. gcloud tolerates that: it falls back to the metadata server on its own. curl does
+        # NOT. Every gcp_api job is a curl carrying -H "Authorization: Bearer
+        # $CLOUDSDK_AUTH_ACCESS_TOKEN", so the header went out as a literal "Bearer " and Google
+        # answered 401 UNAUTHENTICATED / CREDENTIALS_MISSING. MEASURED on a fresh v9.0 install
+        # 2026-08-16: every single GCP read an agent attempted failed this way.
+        # Filling it from the metadata server changes nothing for gcloud (that is already the
+        # identity it would have chosen) and is what makes curl work.
+        try:
+            env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = _pc_metadata_token()
+        except Exception as _pc_te:
+            log_journal("exec_token_unavailable",
+                        "job %s: no approver token was forwarded and the metadata server "
+                        "returned none (%r). Any command in this job that needs Google "
+                        "credentials will fail with 401." % (job_id, _pc_te), job_id)
 
     # ---- [EXEC-SINGLE-USE-V1] ----
     # Bound the age of the approval, then consume it -- both BEFORE anything
