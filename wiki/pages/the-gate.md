@@ -118,8 +118,8 @@ Both variables are read with a shell default, so they are set on the command lin
 time:
 
 ```
-PC_GUARDRAILS=1 ./install.sh                          # refusals back
-PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 ./install.sh        # the older system entire
+PC_GUARDRAILS=1 bash install.sh                          # refusals back
+PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 bash install.sh        # the older system entire
 ```
 
 `PC_GUARDRAILS=1` restores exactly three behaviours, and it is worth being precise about
