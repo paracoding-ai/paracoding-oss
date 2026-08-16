@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>wiki</title>
+<!--
+  shared/wiki/_shell.html
+
+  A LAKE OBJECT. The /wiki route reads it per request with Cache-Control: no-store, so editing this
+  file -- including the renderer below -- is a file write and never a deploy. It must contain the
+  route's payload token (see the "var P =" line in the script) exactly once; the route substitutes
+  a JSON blob there. Do not mention that token anywhere else in this file, including in comments:
+  the substitution replaces every occurrence.
+
+  THIS IS WHERE THE WIKI'S BRANDING LIVES. Palette, fonts, nav and footer copy are all below, and
+  changing them takes effect on the next page load. See the "Changing the code" page.
+
+  THE RENDERER IS INLINE ON PURPOSE. The control plane's CSP is
+  script-src 'self' 'unsafe-inline' https://accounts.google.com. A CDN is NOT on that list, so a
+  CDN markdown library would generate violation reports now and block any future move to an
+  enforcing policy. An inline block is already permitted by 'unsafe-inline'.
+
+  IT ESCAPES BEFORE IT RENDERS AND IT NEVER EMITS RAW HTML FROM A PAGE BODY. Pages may be written by
+  agents, and an agent that read an untrusted artifact is a plausible injection path into a body.
+  Every transform below runs over ALREADY-ESCAPED text; the only tags that reach the DOM are the
+  ones this file constructs itself. If you edit the renderer, keep that property.
+-->
+<style>
+  :root{--bg:#12100c;--fg:#f2ece0;--dim:#a9a093;--line:#33302a;--card:#1b1813;
+        --green:#3fa45b;--amber:#e0982e;--red:#d0453a;--link:#ffd479}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  .wrap{display:flex;min-height:100vh;align-items:flex-start}
+  nav{width:250px;flex:none;padding:1rem .9rem;border-right:1px solid var(--line);position:sticky;top:0;max-height:100vh;overflow:auto}
+  nav h1{font-size:.95rem;margin:.2rem 0 .9rem;letter-spacing:.02em}
+  nav .sec{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin:1rem 0 .35rem}
+  nav a{display:block;color:var(--fg);text-decoration:none;padding:.2rem .4rem;border-radius:6px;font-size:.85rem}
+  nav a:hover{background:#241f18}
+  nav a.on{background:#2c261c;color:var(--link)}
+  main{flex:1;padding:1.4rem 1.8rem 4rem;max-width:56rem;min-width:0}
+  .badge{display:inline-flex;gap:.5rem;align-items:center;border-radius:999px;padding:.22rem .7rem;font-size:.75rem;font-weight:700;letter-spacing:.04em}
+  .b-green{background:rgba(63,164,91,.16);color:var(--green);border:1px solid rgba(63,164,91,.45)}
+  .b-amber{background:rgba(224,152,46,.16);color:var(--amber);border:1px solid rgba(224,152,46,.5)}
+  .b-red{background:rgba(208,69,58,.16);color:var(--red);border:1px solid rgba(208,69,58,.55)}
+  .banner{border-radius:10px;padding:.8rem 1rem;margin:.9rem 0 1.2rem;font-size:.86rem}
+  .ban-amber{background:rgba(224,152,46,.1);border:1px solid rgba(224,152,46,.45)}
+  .ban-red{background:rgba(208,69,58,.1);border:1px solid rgba(208,69,58,.5)}
+  .banner ul{margin:.45rem 0 0;padding-left:1.1rem}
+  .meta{color:var(--dim);font-size:.76rem;margin:.5rem 0 0}
+  .unres{background:rgba(224,152,46,.08);border-left:3px solid var(--amber);padding:.6rem .9rem;border-radius:0 8px 8px 0;margin:1rem 0;font-size:.87rem}
+  article h1{font-size:1.7rem;margin:.2rem 0 .6rem;line-height:1.25}
+  article h2{font-size:1.2rem;margin:1.8rem 0 .5rem;border-bottom:1px solid var(--line);padding-bottom:.3rem}
+  article h3{font-size:1rem;margin:1.3rem 0 .4rem;color:var(--link)}
+  article code{background:#241f18;padding:.1rem .35rem;border-radius:5px;font-size:.86em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  article pre{background:#0d0b08;border:1px solid var(--line);border-radius:9px;padding:.85rem 1rem;overflow:auto}
+  article img{display:block;max-width:100%;height:auto;margin:1.1rem 0;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+  article pre code{background:none;padding:0;font-size:.82rem;line-height:1.5}
+  article a{color:var(--link)}
+  article table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.87rem;display:block;overflow:auto}
+  article th,article td{border:1px solid var(--line);padding:.4rem .6rem;text-align:left;vertical-align:top}
+  article th{background:#1b1813}
+  article blockquote{border-left:3px solid var(--line);margin:1rem 0;padding:.2rem 0 .2rem 1rem;color:var(--dim)}
+  article hr{border:0;border-top:1px solid var(--line);margin:1.6rem 0}
+  footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--dim);font-size:.78rem}
+  .q{background:rgba(208,69,58,.12);border:1px solid rgba(208,69,58,.5);border-radius:10px;padding:1.1rem}
+</style>
+</head><body>
+<div class="wrap">
+  <nav id="nav"></nav>
+  <main>
+    <div id="head"></div>
+    <article id="doc"></article>
+    <footer>
+      If this page disagrees with the source, the SOURCE wins and this page is stale &mdash; say so
+      out loud rather than reporting from it.
+      <div id="stamp" class="meta"></div>
+    </footer>
+  </main>
+</div>
+<script>
+(function(){
+  "use strict";
+  var P = __WIKI_PAYLOAD__;
+
+  // ---- escape FIRST. Everything after this operates on text that can no longer become a tag. ----
+  // NOTE ON STYLE, AND IT IS DELIBERATE: these two helpers exist so that NOTHING in this file
+  // depends on a backslash escape for a control character. An earlier revision used backslash-u
+  // escapes for NUL and for the C0 range, and a copy-paste through a rendering surface flattened
+  // both of them into literal
+  // control bytes -- turning the NUL strip into a SPACE strip, which silently deletes every space
+  // on every page. Pure-ASCII source cannot be corrupted that way.
+  function stripNul(s){ return s.split(String.fromCharCode(0)).join(""); }
+  function hasCtl(s){ for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) <= 32) return true; } return false; }
+  function esc(s){
+    return stripNul(String(s))
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+  }
+  // Only http, https and same-document/relative targets. Blocks javascript: and data: outright.
+  function safeHref(u){
+    var t = String(u).trim();
+    if (/^(https?:\/\/|\/|#|\.\/|\.\.\/)/.test(t) && !hasCtl(t)) return esc(t);
+    return "";
+  }
+  function inline(t){
+    // t is ALREADY escaped. `&#39;` and `&quot;` are inert here.
+    var out = t;
+    out = out.replace(/`([^`]+)`/g, function(_m,c){ return "<code>"+c+"</code>"; });
+    // [WIKI-IMG-V77] Images. This renderer had NO image syntax at all, so an ![alt](src)
+    // rendered as a stray '!' beside a link -- which is why the architecture diagrams could
+    // not be shipped as pictures however they were served. It runs BEFORE the link rule on
+    // purpose: the link pattern matches the [alt](src) tail of an image and would consume it.
+    // safeHref is reused unchanged, so data: and javascript: stay blocked here too; a relative
+    // target must be written /wiki/assets/x.png or ./x.png because a bare 'x.png' is not one
+    // of the four accepted shapes and is deliberately dropped rather than guessed at.
+    out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function(m,alt,url){
+      var h = safeHref(url);
+      if (!h) return alt + " (image removed: unsupported scheme)";
+      return '<img src="'+h+'" alt="'+alt+'" loading="lazy">';
+    });
+    out = out.replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, function(m,txt,url){
+      var h = safeHref(url);
+      if (!h) return txt + " (link removed: unsupported scheme)";
+      return '<a href="'+h+'" rel="noreferrer">'+txt+"</a>";
+    });
+    out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    out = out.replace(/(^|[^*\w])\*([^*\n]+)\*(?![*\w])/g, "$1<em>$2</em>");
+    return out;
+  }
+  function cells(line){
+    var s = line.trim().replace(/^\|/,"").replace(/\|$/,"");
+    return s.split("|").map(function(c){ return inline(esc(c.trim())); });
+  }
+  function render(md){
+    var src = stripNul(String(md)).split("\r\n").join("\n");
+    var lines = src.split("\n");
+    var html = [], i = 0;
+    while (i < lines.length){
+      var ln = lines[i];
+      var fence = /^\s*```(.*)$/.exec(ln);
+      if (fence){
+        var buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])){ buf.push(lines[i]); i++; }
+        i++;
+        html.push("<pre><code>"+esc(buf.join("\n"))+"</code></pre>");
+        continue;
+      }
+      if (/^\s*(---+|===+|\*\*\*+)\s*$/.test(ln)){ html.push("<hr>"); i++; continue; }
+      var h = /^(#{1,6})\s+(.*)$/.exec(ln);
+      if (h){ var n = h[1].length; html.push("<h"+n+">"+inline(esc(h[2]))+"</h"+n+">"); i++; continue; }
+      if (/^\s*\|.*\|\s*$/.test(ln) && i+1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+        var head = cells(ln); i += 2;
+        var rows = [];
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ rows.push(cells(lines[i])); i++; }
+        var t = "<table><thead><tr>";
+        head.forEach(function(c){ t += "<th>"+c+"</th>"; });
+        t += "</tr></thead><tbody>";
+        rows.forEach(function(r){ t += "<tr>"; r.forEach(function(c){ t += "<td>"+c+"</td>"; }); t += "</tr>"; });
+        html.push(t + "</tbody></table>");
+        continue;
+      }
+      if (/^\s*>\s?/.test(ln)){
+        var q = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])){ q.push(lines[i].replace(/^\s*>\s?/,"")); i++; }
+        html.push("<blockquote>"+render(q.join("\n"))+"</blockquote>");
+        continue;
+      }
+      var ul = /^\s*[-*+]\s+(.*)$/.exec(ln), ol = /^\s*\d+[.)]\s+(.*)$/.exec(ln);
+      if (ul || ol){
+        var tag = ul ? "ul" : "ol", items = [];
+        while (i < lines.length){
+          var m2 = tag === "ul" ? /^\s*[-*+]\s+(.*)$/.exec(lines[i]) : /^\s*\d+[.)]\s+(.*)$/.exec(lines[i]);
+          if (!m2) break;
+          items.push("<li>"+inline(esc(m2[1]))+"</li>");
+          i++;
+        }
+        html.push("<"+tag+">"+items.join("")+"</"+tag+">");
+        continue;
+      }
+      if (ln.trim() === ""){ i++; continue; }
+      var para = [];
+      while (i < lines.length && lines[i].trim() !== "" && !/^\s*(```|#{1,6}\s|>|\||[-*+]\s|\d+[.)]\s)/.test(lines[i])){
+        para.push(lines[i]); i++;
+      }
+      if (para.length) html.push("<p>"+inline(esc(para.join("\n")))+"</p>");
+      else { html.push("<p>"+inline(esc(lines[i]))+"</p>"); i++; }
+    }
+    return html.join("\n");
+  }
+
+  // ---- nav ----------------------------------------------------------------------------------
+  var nav = document.getElementById("nav");
+  var h1 = document.createElement("h1");
+  h1.textContent = (P.nav && P.nav.title) ? P.nav.title : "wiki";
+  nav.appendChild(h1);
+  var order = (P.nav && P.nav.sections) || [];
+  var pages = (P.nav && P.nav.pages) || [];
+  order.forEach(function(sec){
+    var inSec = pages.filter(function(p){ return p.section === sec.id && p.status !== "retired"; });
+    if (!inSec.length) return;
+    var d = document.createElement("div"); d.className = "sec"; d.textContent = sec.title; nav.appendChild(d);
+    inSec.forEach(function(p){
+      var a = document.createElement("a");
+      a.href = "/wiki/" + encodeURIComponent(p.slug);
+      a.textContent = p.title || p.slug;
+      if (p.slug === P.slug) a.className = "on";
+      nav.appendChild(a);
+    });
+  });
+
+  // ---- freshness badge and banner -------------------------------------------------------------
+  var head = document.getElementById("head");
+  var f = P.fresh || { verdict: "red", reason: "UNVERIFIED", drift: [], unknown: [] };
+  var v = (f.verdict === "green" || f.verdict === "amber") ? f.verdict : "red";
+  var b = document.createElement("span");
+  b.className = "badge b-" + v;
+  var fm = P.front || {};
+  if (v === "green") b.textContent = "GREEN  verified " + (fm.verified_at || "?") + " by " + (fm.verified_by || "?") + " against " + (f.checked||0) + " artifacts";
+  else if (v === "amber") b.textContent = "AMBER  STALE  " + (f.drift||[]).length + " artifact(s) drifted";
+  else b.textContent = "RED  " + (f.reason || "UNVERIFIED");
+  head.appendChild(b);
+
+  if (v !== "green"){
+    var ban = document.createElement("div");
+    ban.className = "banner " + (v === "amber" ? "ban-amber" : "ban-red");
+    var msg = document.createElement("div");
+    msg.textContent = v === "amber"
+      ? "STALE: artifacts this page describes have changed since it was verified."
+      : (f.reason || "UNVERIFIED") + (f.detail ? " — " + f.detail : "");
+    ban.appendChild(msg);
+    var list = document.createElement("ul");
+    (f.drift||[]).forEach(function(d){
+      var li = document.createElement("li");
+      li.textContent = d.artifact + "  changed  " + d.was + " → " + d.now;
+      list.appendChild(li);
+    });
+    (f.unknown||[]).forEach(function(u){
+      var li = document.createElement("li");
+      li.textContent = "could not read " + u.artifact + " — " + u.why;
+      list.appendChild(li);
+    });
+    if (list.childNodes.length) ban.appendChild(list);
+    head.appendChild(ban);
+  }
+
+  var m = document.createElement("div");
+  m.className = "meta";
+  m.textContent = "/wiki/" + P.slug
+    + (fm.owner ? "  ·  owner " + fm.owner : "")
+    + (fm.status ? "  ·  " + fm.status : "")
+    + "  ·  audience " + (fm.audience || "internal")
+    + (fm.generated_by ? "  ·  generated by " + fm.generated_by : "");
+  head.appendChild(m);
+
+  // ---- body ------------------------------------------------------------------------------------
+  var doc = document.getElementById("doc");
+  if (P.quarantined){
+    var q = document.createElement("div");
+    q.className = "q";
+    var qh = document.createElement("h1"); qh.textContent = P.title || P.slug; q.appendChild(qh);
+    var qp = document.createElement("p");
+    qp.textContent = "WITHHELD. This page matched a credential pattern (" + P.quarantined
+      + ") and its body was not rendered. Remove the value from shared/wiki/pages/"
+      + P.slug + ".md and rotate whatever it named. The match was logged.";
+    q.appendChild(qp);
+    doc.appendChild(q);
+  } else {
+    if (fm.status === "retired"){
+      var r = document.createElement("div");
+      r.className = "banner ban-red";
+      r.textContent = "RETIRED. This page is kept only so its URL does not 404. Do not act on it.";
+      doc.appendChild(r);
+    }
+    var un = fm.unresolved;
+    if (un && un.length){
+      var u = document.createElement("div");
+      u.className = "unres";
+      var ut = document.createElement("strong"); ut.textContent = "Unresolved on this page:"; u.appendChild(ut);
+      var ul2 = document.createElement("ul");
+      (Array.isArray(un) ? un : [un]).forEach(function(x){
+        var li = document.createElement("li"); li.textContent = x; ul2.appendChild(li);
+      });
+      u.appendChild(ul2);
+      doc.appendChild(u);
+    }
+    var host = document.createElement("div");
+    host.innerHTML = render(P.markdown || "");
+    doc.appendChild(host);
+  }
+  document.title = (P.title || P.slug) + " · wiki";
+  document.getElementById("stamp").textContent =
+    "served " + P.served_at + "  ·  freshness computed per request, never cached in your browser";
+})();
+</script>
+</body></html>

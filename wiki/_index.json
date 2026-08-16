@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "title": "Operator wiki",
+  "note": "This file is the slug ALLOW-LIST as well as the nav tree. The /wiki route serves a slug only if it matches the flat-slug regex AND appears in `pages` below. Both checks run before any path is joined. A page whose object exists in shared/wiki/pages/ but which is absent here is NOT served; a page listed here whose object is absent 404s. Adding a slug here is the deliberate act of publishing it.",
+  "sections": [
+    { "id": "start", "title": "Start here" },
+    { "id": "operate", "title": "Operating it" },
+    { "id": "extend", "title": "Changing it" },
+    { "id": "help", "title": "When it breaks" }
+  ],
+  "pages": [
+    {
+      "slug": "index",
+      "title": "Start here",
+      "section": "start",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "the-gate",
+      "title": "Authorisation -- how work is allowed to run",
+      "section": "start",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "operators-guide",
+      "title": "Operators guide",
+      "section": "operate",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "connect-an-agent",
+      "title": "Connecting an agent",
+      "section": "operate",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "the-strains",
+      "title": "The strains",
+      "section": "operate",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "the-workstation",
+      "title": "The workstation",
+      "section": "operate",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "architecture",
+      "title": "Architecture and code walkthrough",
+      "section": "extend",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "systems-manual",
+      "title": "Systems manual",
+      "section": "extend",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "change-the-code",
+      "title": "Changing the code",
+      "section": "extend",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "model-config",
+      "title": "Model configuration",
+      "section": "extend",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "troubleshooting",
+      "title": "Troubleshooting",
+      "section": "help",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    }
+  ]
+}

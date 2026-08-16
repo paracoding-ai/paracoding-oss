@@ -1,0 +1,25 @@
+paracoding starter wiki
+edition: starter-2
+This object is the freshness anchor for the starter wiki pages.
+
+Every page shipped with this installation carries the line
+
+    watch:
+      - "lake:shared/wiki/_release.txt@<sha256 of this file>"
+
+in its front-matter. The /wiki route reads this object on every page render,
+hashes it, and compares. Equal means the page is still the starter page that
+shipped with this edition, and the badge reads GREEN.
+
+That is the only thing the badge claims. It does not claim the page is correct,
+and it does not watch the source tree. These pages are objects in your lake rather
+than code, so the anchor a starter page can rely on is another object beside it --
+one that is there on the first render, before anything else has been configured.
+
+When you edit a starter page, point its watch at something you actually maintain
+and re-stamp verified_at / verified_by. When you replace this edition wholesale,
+change this file and every unedited starter page goes AMBER at once, which is the
+correct signal: they describe an edition you no longer run.
+
+Do not delete this object while any page still watches it. A missing watch target
+is UNKNOWN, and UNKNOWN is RED.
