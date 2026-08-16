@@ -1,19 +1,19 @@
-# release manifest v8.4
-# generated from source commit unknown
+# release manifest v8.5
+# generated from source commit a735d63541efaafa3b80a573dcaa90cf40fd3972
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 90152fa50cc43b11     15331  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 b2feedda8e7894e9      4074  NOTICE
-e7062ed17c5b95dc     11314  README.md
-98ac48c24ec48816     10263  SECURITY.md
-e7cd3a9d7adf221c    496435  install.sh
+fe69ad3cafc56248     12259  README.md
+b302a8ca471570bd     10434  SECURITY.md
+3f1a9790a26a8eb9    496468  install.sh
 d026c02745cfd8ae     45586  uninstall.sh
 30dfd3b04171f4ef    149949  workstation.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-23a712bd461a7b8b       425  agent-plugin/plugin.json
+1d59e1ff65554c2c       425  agent-plugin/plugin.json
 20e61656b84e9132     11584  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
@@ -28,7 +28,7 @@ fe5d3e41d95ee509     23060  control-plane/mcp2026/DUAL-ERA.md
 254fb5f8ee0786e0     32371  control-plane/src/gittools.ts
 1308f3f465cf1114     23327  control-plane/src/gppatch.ts
 5943af689bf4a6b0    161564  control-plane/src/harness.html
-8e024e4700c16d00    750262  control-plane/src/index.ts
+04fcab815fda2517    750682  control-plane/src/index.ts
 83201c9415cfce34     19007  control-plane/src/locked.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
 0822f926ce6e5727     32916  control-plane/src/mcp2026.ts

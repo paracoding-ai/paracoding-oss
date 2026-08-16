@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v8.4**
+**Paracoding — v8.5**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim
@@ -11,63 +11,70 @@ matches the code, that is a defect and we want the report — see **Reporting** 
 
 ## The claim, stated tightly enough to attack
 
-> **No agent holds a credential that can change your infrastructure. The only principal that
-> can is you. The only mechanism is a WebAuthn assertion produced on your own device, seconds
-> before the command runs, bound to the exact command the console showed you.**
+> **No agent holds a credential that can change your infrastructure, and on a default
+> install no agent can cause a privileged command to run at all. It can write a request into
+> a database. Something outside the agent has to run it, and on a fresh install that
+> something is you, by hand.**
 
-Four moving parts:
+That is the claim this release can actually support. It is narrower than "you approve every
+command with a passkey", which is what earlier versions of this document said, and it is
+narrower on purpose: the console page that offered a per-job approval was deleted, and a
+security document that keeps describing a control after the control is gone is worse than no
+document, because it stops you looking.
+
+Three moving parts:
 
 1. **Staging.** An agent that wants to do something privileged does not do it. It writes a
-   document into the Firestore collection `pending_confirms` with `status: 'pending'`, carrying
-   the literal command it wants run and the identity it was authenticated as.
-2. **Approval, in the console.** There is no separate approval site. The queue and the approve
-   action live in the console at `/harness`, behind Identity-Aware Proxy and behind the
-   application's own passkey session. Reading the queue needs a valid session; approving live
-   needs a fresh WebAuthn assertion (`/api/webauthn/confirm/options` then `confirm/verify`).
-3. **Authority forwarding.** The control plane's own service account is deliberately weak. On a
-   live approval it takes *your* short-lived Google access token, forwards it to a separate
-   private Cloud Run executor for one request, and never stores it. The command runs as you,
-   with your scope, for the lifetime of one token.
-4. **Journalling.** Every execution, refusal and pre-approval appends to the Firestore
+   document into the Firestore collection `pending_confirms` with `status: 'pending'`,
+   carrying the literal command it wants run and the identity it was authenticated as.
+2. **Nothing runs it.** `install.sh` sets `PC_AUTO_APPROVE=0`. A staged job sits at
+   `pending` indefinitely — there is no queue anyone comes to tap, no retry, no timer. The
+   shipped tool descriptions say this in as many words, and `list_pending_confirm` exists to
+   show you the pile.
+3. **Journalling.** Every execution, refusal and state change appends to the Firestore
    `journal` collection.
 
-All standing privilege is concentrated in a human holding a hardware-backed key. The agents are
-left with a database write.
+## If you turn auto-approve on
 
-## Two approval modes, and what separates them
+`PC_AUTO_APPROVE=1` makes a staged job sign and execute in the same call, with no human in
+the loop. That is a real change of posture and it should be a deliberate one. What still
+holds when you make it:
 
-**Live approval** is the one above: a fresh assertion at the moment of execution, and your token
-carried to the executor for that single request.
+- **The approval is signed.** The control plane signs with a Cloud KMS asymmetric key over a
+  length-prefixed canonical message (`PC-APPROVAL-CANON-V2`) covering the job id, the command
+  digest, the command type, the argument digest, the key version, the approver, the issued-at
+  and the expiry.
+- **The executor holds only the public half.** It verifies a signature it cannot produce.
+  Firestore IAM has no per-collection granularity, so something with database access can
+  *corrupt* an approval — it cannot forge one.
+- **One approval is one run.** The executor claims the job in a transaction before running
+  anything, so a crash mid-run cannot leave it spendable, and the age of the approval is
+  bounded from the signed issued-at.
+- **A destructive body is still refused.** `install.sh` sets `PC_GUARDRAILS=1`, so a command
+  the classifier reads as destructive is not run and is handed back to you in chat. Setting
+  `PC_GUARDRAILS=0` removes that, and then a destructive body runs like any other.
 
-**Pre-approval** (`POST /api/webauthn/preapprove`) exists because useful work happens while you
-are away. It stamps the job `preapproved` with a single-use `run_token`, a 12-hour expiry, and
-the digest of the command as approved. When the job later fires through `/api/jobs/fire`, the
-token is re-checked constant-time, the status must still be `preapproved`, and the command digest
-is re-verified — a command edited after pre-approval reverts the job to `pending` and returns 409.
-A pre-approved job deliberately forwards an **empty** user token, so it runs under the executor's
-own scoped service identity rather than yours.
+## The passkey, described accurately
 
-**A destructive command cannot be pre-approved at all.** The route refuses it outright with 403
-and journals the refusal, because a Face ID collected now cannot be re-demanded hours later with
-nobody present to abort. Destructive work stays on the live path where a human is in front of it.
+`PC_REQUIRE_PASSKEY=1` is the installed default, and Identity-Aware Proxy sits in front of
+the console on top of it. Together they control **who can reach the browser surface**. That
+is what the WebAuthn credential does in this release.
 
-`PC_REQUIRE_PASSKEY=0` trades the passkey for IAP identity alone during development. It defaults
-to on, and the session token records which mode minted it.
+It is not a per-command approval. The routes for one still exist — `/api/webauthn/confirm/*`
+for a live assertion, `/api/webauthn/preapprove` and `/api/jobs/fire` for a signed
+run-later token with a single-use secret, a 12-hour expiry and a command-digest recheck that
+returns 409 if the command moved — and `preapprove` hard-refuses a destructive body with 403.
+But **no console page calls any of them**: `harness.html` does not reference `preapprove` at
+all. They are an API surface, not something you can go and use.
 
 ---
 
 ## What the approval is bound to
 
-An approval is signed at approval time with a Cloud KMS asymmetric key. The signature covers the
-job id **and** the digest of the command exactly as it was shown to you when you approved it.
-
-- The control plane holds the private half. The executor that runs the job holds only the public
-  half — it can verify a signature without being able to produce one.
-- Edit the command after approval and the digest no longer matches; the executor refuses it.
-- A claim is single-use: the executor claims the job for execution in a transaction, so the same
-  approval cannot be replayed into a second run.
-- Firestore IAM has no per-collection granularity. Something with database access can *corrupt*
-  an approval. It cannot forge one.
+Covered above under auto-approve, and repeated here as the short form: the signature covers
+the job id and the digest of the command as signed, the executor verifies with the public
+half only, edit the command afterwards and the digest no longer matches, and a claim is
+single-use.
 
 ## The binary jail
 
@@ -133,19 +140,19 @@ every file in the release, so a truncated or mis-copied download is detected on 
 
 ## Non-goals
 
-- This is not a sandbox for untrusted code. It is an approval boundary: the control is that a
-  human approved one exact command, not that the command is confined afterwards.
-- It does not defend a compromised approver device. A passkey on a machine an attacker already
-  controls approves what that attacker asks for.
-- It does not attempt bit-for-bit reproducible builds. A rebuild produces a working, equivalent
-  deployment.
+- This is not a sandbox for untrusted code. The `PATH` jail narrows what an approved script
+  reaches for; it does not confine one.
+- It does not offer a per-command human approval surface. It offers a stop.
+- It does not attempt bit-for-bit reproducible builds. A rebuild produces a working,
+  equivalent deployment.
 
 ## If you are evaluating this
 
-Read `gate-exec/exec_server.py` first — signature verification, job claim and the jail are all
-there, in one file. Then `control-plane/src/index.ts` for the surface map and the staging path.
-Then install it into a throwaway project and try to make it run something you did not approve.
-That is the interesting test, and the answer we want is a refusal.
+Install it into a throwaway project, ask a strain for something privileged, and watch it
+stage and stop. Then read `gate-exec/exec_server.py` — signature verification, the job claim
+and the jail are all in one file — and `control-plane/src/index.ts` for the surface map and
+the staging path. The interesting test is whether you can make it run something you did not
+turn on. The answer we want is a refusal.
 
 ---
 

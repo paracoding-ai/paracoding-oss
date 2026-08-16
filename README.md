@@ -1,4 +1,4 @@
-# Paracoding — v8.4
+# Paracoding — v8.5
 
 Most agent demos end with "…and then it deployed to production."
 
@@ -75,14 +75,28 @@ Claude and Gemini side by side, Gemini 3.7 Flash live out of the gate, wired str
 GCP — ask a strain for a service and it builds the container and deploys it to Cloud Run.
 Effectively a Claude-to-GCP connector with a passkey in front of it.
 
-**Every privileged action needs that passkey.**
-The Autoclave is a WebAuthn gate: an agent can stage anything, and nothing runs until you
-approve it with Face ID, Touch ID or a security key. Approvals are signed with a Cloud KMS
-asymmetric key and bound to one job id and one command digest — edit the command after
-approval and it is refused. The control plane holds the private half; the executor that runs
-the job holds only the public half, so it can verify a signature without being able to
-produce one. It fails closed: with no strong session secret and no approver, it refuses to
-run at all.
+**An agent cannot execute. It can only ask.**
+On a default install `install.sh` sets `PC_AUTO_APPROVE=0`, so a privileged job an agent
+stages goes to `pending` and **does not run** — not on a timer, not on a retry, not ever.
+Nothing in the product will come along and run it for you. You either run the command
+yourself, or you turn auto-approve on and accept what that means. There is no approval queue
+and no per-job tap: the console page that offered one was deleted, and the honest version of
+this claim is that the product stops, not that it asks.
+
+**With auto-approve on, the executor still refuses more than it accepts.**
+Set `PC_AUTO_APPROVE=1` and a staged job is signed with a Cloud KMS asymmetric key and
+executed in the same call. The signature covers the job id and the command digest, the
+control plane holds the private half, and the executor holds only the public half — so it
+verifies a signature it could not produce, refuses a command edited after signing, claims
+each approval exactly once in a transaction, bounds its age, and runs it under a `PATH`
+jail. `install.sh` also sets `PC_GUARDRAILS=1`, so a destructive body is refused outright
+and handed back to you in chat rather than run.
+
+**The passkey guards the console, not the job.**
+`PC_REQUIRE_PASSKEY=1` is the installed default and the console is behind Identity-Aware
+Proxy on top of it, so reaching the browser surface takes both. That is what the passkey is
+for in this release. It is not a per-command approval, and this document will not describe
+it as one.
 
 **Jobs run inside a binary jail.**
 The approved script executes with `PATH` restricted to an enumerated set, so an unlisted
