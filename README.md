@@ -183,21 +183,10 @@ than putting IAP in front of a console that would be readable by anyone the mome
 off. If it cannot enable IAP it says so and prints the command to enable it yourself, rather
 than reporting a clean install. `uninstall.sh` removes both services.
 
-## Where the installer stops for you
-
-Twice. Step 5d asks whether to create a workstation VM and defaults to no. Step 9 stops to
-register your passkey; that moment cannot be automated and should not be, because it is the
-whole point of the gate.
-
-Open Cloud Shell and point the installer at a project that has billing linked -- Cloud Shell
-already provides `gcloud`, `python3`, `openssl`, `curl` and an interactive terminal. Step 0
-checks everything it needs and stops with the exact missing permission rather than the
-symptom.
 
 ## The workstation VM
 
-Declining at step 5d is not a one-way door. `workstation.sh` ships in this release and
-creates the VM later, on its own:
+`workstation.sh` ships in this release and creates the VM later, on its own:
 
     bash workstation.sh              asks: none, linux or windows
     bash workstation.sh linux        non-interactive, scriptable
