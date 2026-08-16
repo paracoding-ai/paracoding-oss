@@ -3,17 +3,21 @@
 <!--
   [SEC-GATE-STAGES-V1]  THE LOCKED STAGE.
 
-  What this is: the ONLY document /gate serves to a caller with no valid session.
-  It carries the four flows that must work before a session can exist, and nothing
-  else. No pending jobs. No commands. No strain pastes. No mint. No approve buttons.
-  No QR generator. Those live in gate.html and gate.html is now served only to an
-  authenticated session.
+  What this is: the ONLY document ANY console URL serves to a caller with no valid
+  session. It carries the four flows that must work before a session can exist, and
+  nothing else. No pending jobs. No commands. No strain pastes. No mint. No approve
+  buttons. No QR generator.
 
   Why it exists: GET /gate returned 111,618 bytes to anyone who asked. It could not
   populate -- every data API checks the session and 401s -- but it handed a stranger
   the full route map, the enrollment design and the approval flow for free. The
-  operator's instruction was exact: the gate should hand out the bare minimum HTML
-  for each stage.
+  operator's instruction was exact: hand out the bare minimum HTML for each stage.
+
+  [SEC-NOGATE-V1] 2026-08-14: /gate and the 142KB document behind it are DELETED. This
+  page did not move with them -- it is now served IN PLACE, under a 401, at whichever
+  console URL the caller asked for (/harness, /wiki, /flow, /chat, /lakeview,
+  /flowhood). That is why landed() below reloads instead of navigating: there is no
+  destination to carry and no ?next= to get wrong.
 
   THE FOUR FLOWS, and every one of them is load-bearing. Removing any of them locks
   the operator out of his own gate with no way back except a manual Cloud Shell
@@ -25,33 +29,39 @@
 
     2. FIRST SETUP POST /api/webauthn/register/options {bootstrapSecret}
                    POST /api/webauthn/register/verify  {bootstrapSecret,response}
-       install.sh sends a brand-new operator to  /gate?setup=<secret> .
+       install.sh sends a brand-new operator to  /harness?setup=<secret> .
        If this is missing, every fresh install is bricked at step 8 of 9.
 
     3. ADD A DEVICE POST /api/webauthn/enroll/options {enrollToken}
                     POST /api/webauthn/enroll/verify  {enrollToken,response}
-       Consumed from  /gate?enrollToken=<token> . This page CONSUMES an enroll
-       token; it never MINTS one. Minting (/api/webauthn/enroll/link) stays in the
-       authenticated document, because handing out an enrolment link is a
-       privileged act and must not be reachable from the locked stage.
+       Consumed from  /harness?enroll=<token> . This page CONSUMES an enroll
+       token; it never MINTS one. Minting (/api/webauthn/enroll/link) stays behind a
+       session check, because handing out an enrolment link is a privileged act and
+       must not be reachable from the locked stage.
 
     4. STATUS      GET /api/webauthn/status
        Chooses which of the three to show.
 
-  KNOWN AND DELIBERATE: /api/webauthn/status is anonymous and reports
-  {registered, setupEnabled, sessionMin}. setupEnabled is !!WA_BOOTSTRAP_SECRET,
-  so an anonymous poller can watch for the first-registration window opening. That
-  is a real finding, filed separately -- it is NOT introduced here, and this page
-  needs the endpoint. Fixing it means moving the branch server-side, which is a
-  larger change than this one.
+  WHAT /api/webauthn/status DISCLOSES, stated accurately -- the note here used to say
+  "anonymous" and that was wrong in the direction that alarms a reader. The route is
+  mapped 'console', and the console service runs with IAP ON, so every caller has
+  already been admitted by Google IAP against an in-domain account; it answers
+  without a PASSKEY SESSION, which is necessarily true because this page must choose
+  a flow before a session can exist. It reports {registered, setupEnabled, sessionMin,
+  iap}. Acting on setupEnabled is not possible without the bootstrap secret: both
+  setup endpoints refuse unless a constant-time waEq() matches WA_BOOTSTRAP_SECRET.
+  [SEC-STATUS-SETUPFLAG-V83] narrows it anyway, because narrowing costs nothing --
+  setupEnabled is now reported ONLY while no credential is registered, which is the
+  only state in which this page reads it (the branch below sits after
+  `else if (st.registered)`). Once a passkey exists the field is constant false.
 
   Google is NOT part of this page. Unlocking is passkey-only; the Google token is
   for executing approved work and is obtained inside the authenticated document.
   That is why no third-party script tag appears below.
 
-  The simplewebauthn browser bundle is spliced in at PCVENDOR-SLOT by the deploy
-  job, copied byte-identically out of gate.html so the two documents can never
-  drift to different library versions.
+  The simplewebauthn browser bundle is vendored inline below, pinned by tarball
+  sha512 and file sha384. It used to be described as a byte-identical copy of the
+  one in gate.html; that file is gone, so this is now the only copy in the tree.
 -->
 <html lang="en">
 <head>
@@ -135,9 +145,11 @@
   // One place decides what happens on success, so no flow can forget to land.
   function landed() {
     say('Unlocked. Loading…', 'ok');
-    // Re-request /gate. With a session cookie the server now returns the full
-    // document instead of this one. A reload is the whole handoff.
-    location.replace('/gate');
+    // Re-request THIS url. With a session cookie the server now returns the real page
+    // instead of this one, so a reload is the whole handoff and the caller lands back
+    // where they were. The query string is dropped on purpose: it can carry a one-time
+    // ?setup= secret or an ?enroll= token, and neither should survive into history.
+    location.replace(location.pathname);
   }
 
   function fail(e, what) {

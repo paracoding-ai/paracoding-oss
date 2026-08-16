@@ -24,6 +24,13 @@
   .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 10px rgba(240,194,74,.45));mix-blend-mode:screen}
   .hdr .ttl{font-weight:800;letter-spacing:.02em;font-size:1.02rem}
   .hdr .sub{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-dim)}
+  /* [HARNESSUI-THINKING-V75] THE WAIT USED TO LOOK LIKE A CRASH. The pending bubble was the single
+     character U+2026 and never changed, so a turn that takes 30-90 seconds -- which every turn that
+     builds anything does -- presented as a small dark box that had frozen. The operator read it as
+     hung and said so. Motion is the whole point: a static ellipsis and a stopped process are
+     indistinguishable, a moving one cannot be mistaken for either. */
+  .pcdots{display:inline-block;min-width:3.2em;font-weight:700;letter-spacing:.12em;color:var(--ink-dim);animation:pcpulse 1.6s ease-in-out infinite}
+  @keyframes pcpulse{0%,100%{opacity:.45}50%{opacity:1}}
   .hdr .rt{margin-left:auto;display:flex;gap:.4rem}
   .hbtn{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.45rem .7rem;font-size:.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.4rem}
   .hbtn:hover{background:var(--glass-2)}
@@ -82,12 +89,29 @@
   .chat .cbar{display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--glass-line);background:rgba(255,255,255,.06)}
   .chat .cbar .who{font-weight:800}
   .chat .cbar .via{margin-left:auto;font-size:.72rem;color:var(--ink-soft);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:.2rem .6rem}
+  /* [HARNESSUI-PROVSW-V1] The bar pill used to print the model VERSION ("3.1 Pro"). It is a
+     two-state provider toggle now — Claude on the left, Gemini on the right, click to switch —
+     because the operator switches substrate mid-conversation and the switch was buried in
+     Layers > Settings. The version moved onto each message (.msg .nmtag .mdl below), which is
+     where it has to be for a window that mixes both to be readable after the fact. */
+  .chat .cbar .via.provsw{display:inline-flex;align-items:center;gap:.34rem;cursor:pointer;user-select:none;padding:.16rem .3rem}
+  .chat .cbar .via.provsw:hover{background:var(--glass-2,rgba(255,255,255,.12))}
+  .chat .cbar .via.provsw:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+  .chat .cbar .via.provsw b{font-weight:700;opacity:.42;padding:.04rem .3rem;border-radius:999px;transition:opacity .12s}
+  .chat .cbar .via.provsw b.on{opacity:1;color:#fff;background:rgba(255,255,255,.13)}
+  .chat .cbar .via.provsw b[data-p="claude"].on{box-shadow:inset 0 0 0 1px rgba(217,119,87,.65)}
+  .chat .cbar .via.provsw b[data-p="gemini"].on{box-shadow:inset 0 0 0 1px rgba(75,139,245,.65)}
+  .chat .cbar .via.provsw i{font-style:normal;opacity:.4;font-size:.7rem}
   .chat .cbar .meter{font-size:.66rem;color:var(--ink-dim);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:.2rem .55rem;margin-left:.35rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44ch;flex:0 1 auto}
   .stream{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.7rem}
   .msg{max-width:76%;padding:.65rem .85rem;border-radius:15px;line-height:1.45;font-size:.94rem;white-space:pre-wrap;word-wrap:break-word;box-shadow:var(--shadow)}
   .msg.me{align-self:flex-end;background:rgba(255,255,255,.22);border:1px solid var(--glass-line);border-bottom-right-radius:5px}
   .msg.ag{align-self:flex-start;background:rgba(6,18,26,.30);border:1px solid var(--glass-line);border-bottom-left-radius:5px}
   .msg .nmtag{display:block;font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:.25rem}
+  /* [HARNESSUI-PROVSW-V1] the per-message model stamp: "FLEET ADVISOR - Gemini 3.1 Pro". Dimmer
+     than the strain name so the name still reads first, but present on every assistant turn we
+     know the model for, because that is the only way a switched history stays legible. */
+  .msg .nmtag .mdl{opacity:.62;font-weight:600;letter-spacing:.06em}
   .empty{margin:auto;text-align:center;color:var(--ink-soft);max-width:340px}
   .empty img{width:64px;height:64px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 16px rgba(240,194,74,.45));mix-blend-mode:screen;margin-bottom:.6rem}
   .composer{padding:.7rem 1rem;border-top:1px solid var(--glass-line);background:rgba(255,255,255,.06)}
@@ -153,16 +177,14 @@
 </head>
 <body>
   <div class="hdr">
-    <img src="/assets/brain.png" alt="logo" onerror="this.style.display='none'">
-    <div><div class="sub">Paracoding.ai</div><div class="ttl">Agentic Harness</div></div>
+    <img src="/brand/logo.png" alt="logo" onerror="this.style.display='none'">
+    <div><div class="sub">Paracoding.ai</div><div class="ttl">Paracoding.AI - Agentic Harness</div></div>
     <div class="rt">
       <span class="vmlight off" id="vmLight" title="VM stopped"></span>
       <button class="hbtn startb" id="vmBtn" onclick="toggleVM()">▶ Start VM</button>
-      <button class="hbtn" id="rdpBtn" onclick="openRDP()" disabled>🖥 Remote Desktop</button>
       <span class="divb"></span>
       <button class="hbtn" id="rdpBtn2" onclick="window.open('https://remotedesktop.google.com/access','_blank','noopener')" title="Chrome Remote Desktop (new tab)">🖥️ Remote Desktop</button>
       <button class="hbtn" onclick="window.open('/dash','pcdash')">📊 Dashboard</button>
-      <button class="hbtn" onclick="window.open('/gate','pcgate')">⌂ Gate</button>
       <button class="hbtn" onclick="window.open('/wiki','pcwiki')" title="Internal system wiki">📖 Docs</button>
     </div>
   </div>
@@ -187,13 +209,20 @@
       <div class="cbar">
         <span class="st s-idle" id="cWhoDot" style="width:9px;height:9px;border-radius:50%">●</span>
         <span class="who" id="cWho" onclick="pickStrainNav()" style="cursor:pointer" title="Pick a strain">Select an agent</span><button id="pcStatusBtn" onclick="pcStatus()" title="Status - reads this strain's identity, its last journal actions and its work-item backlog. Local read, NO model call, no API credit." style="margin-left:.6rem;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:8px;padding:.2rem .55rem;font-size:.74rem;font-weight:700;cursor:pointer">&#9679; Status</button>
-        <span class="via" id="cVia">via Gemini</span>
+        <!-- [HARNESSUI-PROVSW-V1] This pill printed the model version and nothing else. It is the
+             provider toggle now. It does NOT own the selection: every click goes through
+             setProvider(), the same function the Layers > Settings substrate buttons call, so
+             there is exactly one PROVIDER and both controls repaint from it. -->
+        <span class="via provsw" id="cVia" role="button" tabindex="0"
+              onclick="pcToggleProvider()"
+              onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pcToggleProvider();}"
+        ><b data-p="claude">Claude</b><i>&#8646;</i><b data-p="gemini">Gemini</b></span>
         <span class="meter" id="cMeter">session 0 in / 0 out</span>
       </div>
       <div class="stream" id="stream">
         <div class="empty" id="empty">
-          <img src="/assets/brain.png" onerror="this.style.display='none'">
-          <div><b>Pick a strain</b> on the left to start chatting.<br>Status up top reads its live state; the model lives in Layers &rsaquo; Settings.</div>
+          <img src="/brand/logo.png" alt="" onerror="this.style.display='none'">
+          <div><b>Pick a strain</b> on the left to start chatting.<br>Status up top reads its live state; Claude &#8646; Gemini up top switches substrate, and the model version is stamped on each reply. Which model within a substrate still lives in Layers &rsaquo; Settings.</div>
         </div>
       </div>
       <div class="composer"><div class="cin">
@@ -206,18 +235,22 @@
     <aside class="rdp" id="rdpPanel">
       <div class="rdpwrap"><div class="rdpinner">
         <div class="rdpbar">
-          <span class="rdplight" id="rdpLight" style="color:#ff8f86;background:#ff8f86"></span>
           <span class="t">Paracoding Workstation</span>
           <button class="exp" onclick="toggleRdp()" title="Collapse">›</button>
-          <button class="exp" id="rdpExp" onclick="breakout()" title="Open desktop in its own full tab">⛶ Break out</button>
         </div>
         <div class="rdptabs" id="rdpTabs">
-          <button class="on" data-v="chrome" onclick="setView('chrome')">🌐 Chrome</button>
-          <button data-v="claude" onclick="setView('claude')">✦ Claude</button>
-          <button data-v="terminal" onclick="setView('terminal')">⌨ Terminal</button>
+          <button class="on" data-v="terminal" onclick="setView('terminal')">⌨ Terminal</button>
         </div>
         <div class="rdpbody" id="rdpBody">
-          <div class="rdpph" id="rdpPh"><div class="em">🖥️</div><div><b>Workstation</b><br>Start &amp; connect to bring it live.</div><button class="btn" id="rdpConnect" onclick="connectRDP()">▶ Start &amp; connect</button></div>
+          <div class="rdpph" id="rdpPh"><div class="em">🖥️</div>
+            <div><b>Workstation</b><br>No desktop is streamed here. The box has no public IP, so a
+            remote desktop reaches it only through a tunnel that terminates on <b>your own
+            machine</b> &mdash; a browser tab cannot open one.</div>
+            <div style="font-family:ui-monospace,Menlo,monospace;font-size:.68rem;text-align:left;background:rgba(0,0,0,.28);border-radius:8px;padding:.45rem .55rem;max-width:100%;overflow-x:auto;white-space:pre">gcloud compute start-iap-tunnel &lt;VM&gt; 3389 \
+  --local-host-port=localhost:13389 --zone &lt;ZONE&gt; --project &lt;PROJECT&gt;</div>
+            <div>Then point an RDP client at localhost:13389 (Windows), or use Chrome Remote
+            Desktop (Linux). The installer prints both with your real values.</div>
+            <button class="btn" onclick="setView('terminal')">⌨ Open the terminal instead</button></div>
         </div>
       </div></div>
     </aside>
@@ -252,7 +285,6 @@
       if(DEMO){ setTimeout(()=>{ vmRunning=true; paintVM(); },1500); return; }
       try{ await api('/api/vm/start',{method:'POST'}); }catch(e){} pollVM();
     } else { if(!DEMO){ try{ await api('/api/vm/stop',{method:'POST'}); }catch(e){} } vmRunning=false; paintVM(); } }
-  function openRDP(){ connectRDP(); }
   async function pollVM(){ if(DEMO) return; try{ const d=await api('/api/vm/status'); vmProvisioned=d.provisioned!==false; vmRunning=(d.state==='RUNNING'); if(vmRunning){ vmStarting=false; } else if(vmStarting && vmStartAt && (Date.now()-vmStartAt>120000)){ vmStarting=false; } paintVM(); }catch(e){} }
   /* [HARNESSUI-MODEL-DERIVE-V1] EMPTY on purpose. Every model name the page shows comes from
      /api/models, which builds the catalog from the CHAT_API_* environment. A literal here is
@@ -264,7 +296,11 @@
   var PCRUNTIME={model:'',effort:''}; /* what /api/chat reported it ACTUALLY answered with */
   function renderModelToggle(){ const el=$('modelToggle'); el.innerHTML='';
     for(const m of (MODELS[PROVIDER]||[])){ const b=document.createElement('button'); b.className=(MODEL[PROVIDER]===m.id)?'on':'';
-      b.innerHTML=esc(m.label)+(m.sub?'<small>'+esc(m.sub)+'</small>':''); b.onclick=()=>{ MODEL[PROVIDER]=m.id; renderModelToggle(); updateVia(); }; el.appendChild(b); } }
+      /* [HARNESSUI-PROVSW-V1] Picking a different chip invalidates PCRUNTIME for the same reason a
+         substrate flip does: it is the report of the last answer, and the last answer came from
+         the model you just moved off. Left stale it made updateVia()'s tooltip name the previous
+         model, which is now also the value the message stamp is checked against. */
+      b.innerHTML=esc(m.label)+(m.sub?'<small>'+esc(m.sub)+'</small>':''); b.onclick=()=>{ if(MODEL[PROVIDER]!==m.id) PCRUNTIME={model:'',effort:''}; MODEL[PROVIDER]=m.id; renderModelToggle(); updateVia(); }; el.appendChild(b); } }
   /* [HARNESSUI-MODEL-DERIVE-V1] The badge is derived from the api model id, in this order of
      authority: (1) what /api/chat reported the provider actually answered with, (2) the
      /api/models catalog entry's api id. The effort suffix is the server's configured effort.
@@ -277,17 +313,56 @@
       return /^[0-9]/.test(w)?w:(w.charAt(0).toUpperCase()+w.slice(1)); }).join(' '); }
   function pcEffortLabel(e){ var s=String(e||'').trim().toLowerCase();
     if(!s||s==='none') return ''; return s.charAt(0).toUpperCase()+s.slice(1); }
+  /* [HARNESSUI-PROVSW-V1] pcProviderName / pcModelStamp -- the two halves the version split into.
+     pcProviderName is what the header toggle shows: the substrate NAME, no version, because the
+     operator asked for "just a toggle between the two names Claude <--> Gemini".
+     pcModelStamp is what gets written onto a message: "Gemini 3.1 Pro". It is derived by the same
+     [HARNESSUI-MODEL-DERIVE-V1] rules as before -- pcModelLabel() off the api model id, effort
+     suffix on Claude only -- so nothing here is typed and nothing here can outlive the config.
+     It returns '' when the id cannot be derived, and an undecided stamp renders as NO stamp
+     rather than as a guess. */
+  function pcProviderName(p){ p=String(p||'').toLowerCase();
+    return p==='claude'?'Claude':(p==='gemini'?'Gemini':(p?(p.charAt(0).toUpperCase()+p.slice(1)):'')); }
+  function pcModelStamp(prov,api,eff){
+    var name=pcProviderName(prov), lab=pcModelLabel(api),
+        e=(String(prov||'').toLowerCase()==='claude')?pcEffortLabel(eff):'';
+    var tail=[lab,e].filter(function(x){return !!x;}).join(' ');
+    if(!name) return tail; return tail?(name+' '+tail):name; }
+  /* The stamp for a turn we are about to send: catalog api id for the CURRENT selection, plus
+     the server's configured effort. send() overwrites it with what /api/chat says it actually
+     answered with, which is the higher authority of the two. */
+  function pcStampNow(){
+    var m=(MODELS[PROVIDER]||[]).find(function(x){return x.id===MODEL[PROVIDER];});
+    return pcModelStamp(PROVIDER,(m&&m.api)||MODEL[PROVIDER]||'',PCRUNTIME.effort||PCEFFORT); }
+  /* updateVia now paints the toggle, not the version. The version it used to print is still
+     derived here -- it goes into the tooltip, so the currently-selected model is still one hover
+     away from the bar for anyone who wants it without opening Layers > Settings. */
   function updateVia(){ var el=$('cVia'); if(!el) return;
     var m=(MODELS[PROVIDER]||[]).find(function(x){return x.id===MODEL[PROVIDER];});
     var api=PCRUNTIME.model||(m&&m.api)||'';
     var lab=pcModelLabel(api);
     var eff=(PROVIDER==='claude')?pcEffortLabel(PCRUNTIME.effort||PCEFFORT):'';
-    el.textContent=lab?(lab+(eff?(' '+eff):'')):'model unavailable';
-    el.title=api?('api model: '+api+(eff?(' · effort: '+eff.toLowerCase()):'')+' — derived from '
-      +(PCRUNTIME.model?'the last /api/chat response':'/api/models'))
-      :'model unknown: /api/models has not answered'; }
+    var bs=el.querySelectorAll('b[data-p]');
+    if(bs.length){ for(var i=0;i<bs.length;i++) bs[i].classList.toggle('on',bs[i].getAttribute('data-p')===PROVIDER); }
+    else { el.textContent=pcProviderName(PROVIDER); }   /* pill markup missing -- degrade, do not throw */
+    el.title='Substrate: '+(pcProviderName(PROVIDER)||'—')+' — click to switch. '
+      +(api?('Model '+(lab?(lab+(eff?(' '+eff):'')):api)+' (api id '+api+') — derived from '
+             +(PCRUNTIME.model?'the last /api/chat response':'/api/models')
+             +'. Every message is stamped with the model that produced it.')
+           :'Model unknown: /api/models has not answered.'); }
   window.pcModelLabel=pcModelLabel; window.pcEffortLabel=pcEffortLabel;
-  function setProvider(p){ PROVIDER=p; document.querySelectorAll('#toggle button').forEach(b=>b.classList.toggle('on',b.dataset.p===p)); renderModelToggle(); updateVia(); }
+  window.pcModelStamp=pcModelStamp; window.pcStampNow=pcStampNow;
+  /* [HARNESSUI-PROVSW-V1] The header toggle's click handler. It flips to the OTHER provider and
+     hands off to setProvider() -- it deliberately holds no state of its own, so the Layers >
+     Settings substrate buttons and this pill can never disagree. */
+  function pcToggleProvider(){ setProvider(PROVIDER==='claude'?'gemini':'claude'); }
+  window.pcToggleProvider=pcToggleProvider;
+  /* PCRUNTIME is "what /api/chat reported it ACTUALLY answered with". After a substrate flip that
+     report describes the substrate you just left, so it is cleared: keeping it would have made
+     the tooltip (and the pre-send stamp) claim a Gemini id under Claude until the first reply
+     came back. Catalog-derived values stand in until the new substrate answers for itself. */
+  function setProvider(p){ if(p!==PROVIDER) PCRUNTIME={model:'',effort:''};
+    PROVIDER=p; document.querySelectorAll('#toggle button').forEach(b=>b.classList.toggle('on',b.dataset.p===p)); renderModelToggle(); updateVia(); }
   async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.effort) PCEFFORT=String(d.effort);
       if(!MODELS.claude.some(m=>m.id===MODEL.claude)) MODEL.claude=MODELS.claude[0]&&MODELS.claude[0].id; if(!MODELS.gemini.some(m=>m.id===MODEL.gemini)) MODEL.gemini=MODELS.gemini[0]&&MODELS.gemini[0].id;
       renderModelToggle(); updateVia(); }catch(e){} }
@@ -324,7 +399,12 @@
       d.innerHTML='<span class="st '+statusClass(a.status)+'">●</span><div style="min-width:0"><div class="nm">'+esc(a.name)+'</div><div class="rl">'+esc(a.role||a.id)+'</div></div><div class="meta"><div class="rl">'+(a.last_ts?ago(a.last_ts):'')+'</div>'+(a.backlog?'<div class="rl" style="color:var(--gold)">'+a.backlog+' queued</div>':'')+'</div>'; el.appendChild(d); } }
   function selectAgent(id){ SEL=AGENTS.find(a=>a.id===id)||null; window.SEL=SEL; renderAgents(); $('cWho').textContent=SEL?SEL.name:'Select an agent';
     $('cWhoDot').className='st '+(SEL?statusClass(SEL.status):'s-idle'); $('ta').disabled=!SEL; $('send').disabled=!SEL; renderStream(); $('ta').focus(); if(SEL){ HIST[SEL.id]=[]; renderStream(); loadHistory(SEL.id,true); } }
-  async function loadHistory(id,force){ if(DEMO) return; try{ const d=await api('/api/chat/history?agentId='+encodeURIComponent(id)+(force?'&full=1':'')); if(d&&d.history){ const cur=HIST[id]||[]; if(force||cur.length<=d.history.length){ HIST[id]=d.history.map(function(h){return {role:h.role,text:h.text};}); if(SEL&&SEL.id===id) renderStream(); } } }catch(e){} }
+  async function loadHistory(id,force){ if(DEMO) return; try{ const d=await api('/api/chat/history?agentId='+encodeURIComponent(id)+(force?'&full=1':'')); if(d&&d.history){ const cur=HIST[id]||[]; if(force||cur.length<=d.history.length){ HIST[id]=d.history.map(function(h){
+        /* [HARNESSUI-PROVSW-V1] h.stamp / h.model / h.provider are read on the chance the route
+           starts carrying them; measured today it returns {role,text} only, so this resolves to
+           '' and the turn renders unstamped. Nothing is inferred from the current toggle. */
+        var st=h.stamp||(h.model?pcModelStamp(h.provider||'',h.model,h.effort||''):'');
+        return {role:h.role,text:h.text,stamp:st||''};}); if(SEL&&SEL.id===id) renderStream(); } } }catch(e){} }
   function refreshHistory(){ if(!SEL) return; loadHistory(SEL.id,true); }
   function md(t){
     t=String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -347,12 +427,23 @@
     var s=document.getElementById('side');
     if(s && s.classList.contains('collapsed') && typeof toggleSide==='function') toggleSide();
   }
+  /* [HARNESSUI-PROVSW-V1] Each assistant turn carries its own `stamp` -- "Gemini 3.1 Pro" -- set
+     when the turn was produced and never recomputed here. That is the whole point: flipping the
+     header toggle must NOT relabel what is already on screen, or a window that mixes both
+     substrates lies about which one did what. A turn with no stamp renders with none.
+     WHAT IS NOT STAMPED, stated plainly because it is visible to anyone who reloads: the server
+     does not persist the model on a chat_history row (the collection stores id/agent_id/role/
+     text/tags/session/timestamp) and GET /api/chat/history projects only {role,text}. So turns
+     restored from the server after a reload come back UNSTAMPED. loadHistory() below reads
+     h.model/h.provider if they ever appear so the client is ready, but as of this change they do
+     not, and an unstamped turn is left unstamped rather than being labelled with whatever the
+     toggle happens to be pointing at now. */
   function renderStream(){ const s=$('stream');
     if(!SEL){ s.innerHTML=''; s.appendChild(mkEmpty()); return; }
     const h=HIST[SEL.id]||[];
     if(!h.length){ s.innerHTML=''; const e=mkEmpty(); e.querySelector('div:last-child').innerHTML='<b>'+esc(SEL.name)+'</b><br>'+esc(SEL.role||'')+' — no messages yet. Status reads its live state.'; s.appendChild(e); return; }
-    s.innerHTML=''; for(const m of h){ const d=document.createElement('div'); d.className='msg '+(m.role==='me'?'me':'ag'); d.innerHTML=(m.role==='me'?'':'<span class="nmtag">'+esc(SEL.name)+'</span>')+((m.imgs&&m.imgs.length)?m.imgs.map(function(im){return '<img src="data:'+im.media_type+';base64,'+im.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">';}).join(''):(m.img&&m.img.data?'<img src="data:'+m.img.media_type+';base64,'+m.img.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">':''))+md(m.text); s.appendChild(d); } s.scrollTop=s.scrollHeight; }
-  function mkEmpty(){ const e=document.createElement('div'); e.className='empty'; e.innerHTML='<img src="/assets/brain.png" onerror="this.style.display=\'none\'"><div>No messages yet.</div>'; return e; }
+    s.innerHTML=''; for(const m of h){ const d=document.createElement('div'); d.className='msg '+(m.role==='me'?'me':'ag'); d.innerHTML=(m.role==='me'?'':'<span class="nmtag">'+esc(SEL.name)+(m.stamp?('<span class="mdl"> - '+esc(m.stamp)+'</span>'):'')+'</span>')+((m.imgs&&m.imgs.length)?m.imgs.map(function(im){return '<img src="data:'+im.media_type+';base64,'+im.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">';}).join(''):(m.img&&m.img.data?'<img src="data:'+m.img.media_type+';base64,'+m.img.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">':''))+md(m.text); s.appendChild(d); } s.scrollTop=s.scrollHeight; }
+  function mkEmpty(){ const e=document.createElement('div'); e.className='empty'; e.innerHTML='<img src="/brand/logo.png" alt="" onerror="this.style.display=\'none\'"><div>No messages yet.</div>'; return e; }
   function grow(t){ t.style.height='auto'; t.style.height=Math.min(140,t.scrollHeight)+'px'; }
   function keyd(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } }
   let PENDIMG=[];
@@ -361,13 +452,54 @@
   async function send(){ const ta=$('ta'); const text=ta.value.trim(); if((!text&&!PENDIMG.length)||!SEL) return;
     const imgs=PENDIMG; PENDIMG=[]; var _ub=$('upBtn'); if(_ub)_ub.textContent='📎';
     (HIST[SEL.id]=HIST[SEL.id]||[]).push({role:'me',text,imgs}); ta.value=''; grow(ta); renderStream();
-    const pending={role:'ag',text:'…'}; HIST[SEL.id].push(pending); renderStream();
-    try{ let reply; const mlabel=(MODELS[PROVIDER]||[]).find(x=>x.id===MODEL[PROVIDER]); const mname=mlabel?mlabel.label:MODEL[PROVIDER];
-      if(DEMO){ await new Promise(r=>setTimeout(r,500)); reply='(demo) '+SEL.name+' via '+(PROVIDER==='claude'?'Claude ':'Gemini ')+mname+': got "'+text+'".'; }
-      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:PROVIDER,model:MODEL[PROVIDER],agentId:SEL.id,message:text,images:imgs,history:[]})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage); if(d&&d.model) PCRUNTIME.model=String(d.model); if(d&&d.effort) PCRUNTIME.effort=String(d.effort); updateVia(); }
+    /* [HARNESSUI-PROVSW-V1] The stamp is fixed at SEND time from the selection this turn is
+       actually going out on, so flipping the toggle while the reply is in flight cannot change
+       the label on this turn. It is upgraded below to what /api/chat says it answered with. */
+    const pending={role:'ag',text:'',stamp:pcStampNow()}; HIST[SEL.id].push(pending); renderStream(); pcThinkStart();
+    /* [HARNESSUI-PROVSW-V1] Pin the substrate and the model id this turn is being sent on. The
+       toggle is one click away and the request is in flight for seconds; reading PROVIDER again
+       after the await would attribute the reply to whatever is selected when it lands. */
+    const _turnProv=PROVIDER, _turnModel=MODEL[PROVIDER];
+    try{ let reply; const mlabel=(MODELS[_turnProv]||[]).find(x=>x.id===_turnModel); const mname=mlabel?mlabel.label:_turnModel;
+      if(DEMO){ await new Promise(r=>setTimeout(r,500)); reply='(demo) '+SEL.name+' via '+pcProviderName(_turnProv)+' '+mname+': got "'+text+'".'; }
+      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:_turnProv,model:_turnModel,agentId:SEL.id,message:text,images:imgs,history:[]})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage);
+        /* [HARNESSUI-PROVSW-V1] Re-stamp this turn from what the server says it ACTUALLY answered
+           with -- d.model beats the catalog entry we guessed from at send time. PCRUNTIME is only
+           updated when the substrate has not been flipped out from under this reply, otherwise a
+           late Gemini response would rewrite the tooltip of a bar that now says Claude. */
+        var _rm=(d&&d.model)?String(d.model):'', _re=(d&&d.effort)?String(d.effort):'';
+        if(_rm||_re) pending.stamp=pcModelStamp(_turnProv,_rm||( mlabel&&mlabel.api )||_turnModel||'',_re||PCEFFORT);
+        if(_turnProv===PROVIDER){ if(_rm) PCRUNTIME.model=_rm; if(_re) PCRUNTIME.effort=_re; }
+        updateVia(); }
       pending.text=reply;
-    }catch(e){ pending.text=(e.status===401)?'🔒 Session expired — unlock at the Gate.':(e.status===412?'No '+PROVIDER+' API key set — add one with the 🔑 key button.':'Error talking to '+PROVIDER+((e&&e.body&&e.body.error)?(': '+String(e.body.error).slice(0,300)):'')+'.'); }
-    renderStream(); }
+    /* [SEC-FLEETMODE-CONSOLE-V1] SAY WHY IT FAILED -- the sibling repair at the keys dialog,
+       applied to the call site that was missed. The server computes the real cause and sends
+       it as `detail`; `error` on this route is the fixed string 'request failed'. Reading only
+       `error` threw the computed cause away at the last hop, which is exactly why the
+       console-chat-gate outage was undiagnosable from the page: the server KNEW, and the UI
+       discarded it. detail is preferred and error is the fallback. */
+    /* [HARNESSUI-PROVSW-V1] Two changes to a line otherwise left alone. (1) The failure names
+       _turnProv, the substrate the request actually went out on, not PROVIDER -- with the toggle
+       now one click away in the bar, reading PROVIDER here would name the substrate the operator
+       flipped TO while the failing request was in flight and send him to the wrong key. (2) The
+       stamp is cleared, so a model stamp on a message always means a model produced that text;
+       this text is the page talking, and it should not wear a model's name. */
+    }catch(e){ const _why=(e&&e.body&&(e.body.detail||e.body.error))||''; pending.stamp=''; pending.text=(e.status===401)?'🔒 Session expired — reload this page to sign in again.':(e.status===412?'No '+_turnProv+' API key set — add one with the 🔑 key button.':'Error talking to '+_turnProv+(_why?(': '+String(_why).slice(0,300)):'')+'.'); }
+    pcThinkStop(); renderStream(); }
+  /* [HARNESSUI-THINKING-V75] Growing dots, driven by a timer rather than by CSS `content`
+     keyframes -- animating `content` is a Chrome-only trick and this console is also opened from
+     phones. The span is appended to the LAST bubble after renderStream() has drawn it, so nothing
+     in the render path needs to know about it; the stop is paired with the single renderStream()
+     that always runs after the request settles, success or failure, which is why there is exactly
+     one clear site and no way to leak the interval. */
+  var PCTHINK=null;
+  function pcThinkStart(){ pcThinkStop(); try{
+      var s=$('stream'), b=s&&s.lastChild; if(!b) return;
+      var d=document.createElement('span'); d.className='pcdots'; d.textContent='.';
+      b.appendChild(d); s.scrollTop=s.scrollHeight;
+      var n=1; PCTHINK=setInterval(function(){ n=(n%6)+1; d.textContent=new Array(n+1).join('.'); },380);
+    }catch(e){} }
+  function pcThinkStop(){ if(PCTHINK){ try{ clearInterval(PCTHINK); }catch(e){} PCTHINK=null; } }
   function playLast(){ try{ var syn=window.speechSynthesis; if(!syn){ alert('Read-aloud is not supported in this browser.'); return; } if(syn.speaking||syn.pending){ syn.cancel(); return; } var h=(SEL&&HIST[SEL.id])||[]; var last=''; for(var i=h.length-1;i>=0;i--){ if(h[i] && h[i].role!=='me' && h[i].text && h[i].text!==String.fromCharCode(8230)){ last=h[i].text; break; } } if(!last) return; var u=new SpeechSynthesisUtterance(String(last).replace(/[#*_>]/g,' ').slice(0,4000)); u.rate=1.02; try{ syn.cancel(); }catch(e){} syn.speak(u); }catch(e){} }  // ---- mic: browser Web Speech API dictation (mobile-friendly, no deps) ----
   let _rec=null, _listening=false, _micWant=false, _micBase='';
   function toggleMic(){ const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -381,8 +513,10 @@
       _rec.onend=()=>{ _listening=false; if(_micWant){ _micBase=ta.value; try{ _rec.start(); }catch(e){ setTimeout(()=>{ try{ _rec.start(); }catch(_){} }, 300); } } else { $('micBtn').classList.remove('rec'); if(SEL) $('send').disabled=!ta.value.trim(); ta.focus(); } };
       try{ _rec.start(); }catch(e){} };
     mk(); }
-  function openKeys(){ $('keyModal').classList.add('on'); }
-  function closeKeys(){ $('keyModal').classList.remove('on'); }
+  /* Null-guarded: once the Settings panel has been opened the key fields are MOVED into it
+     and #keyModal is removed, so these can be called with no modal present. */
+  function openKeys(){ var m=$('keyModal'); if(m) m.classList.add('on'); }
+  function closeKeys(){ var m=$('keyModal'); if(m) m.classList.remove('on'); }
   function paintKeyState(st){ const c=!!(st&&st.claude), g=!!(st&&st.gemini);
     const now = Date.now();
     let cColor = 'miss', cText = 'not set';
@@ -412,27 +546,30 @@
   async function loadKeys(){ try{ paintKeyState(await api('/api/keys/status')); }catch(e){ if(DEMO) paintKeyState({claude:false,gemini:false}); else $('keyState').innerHTML='<span class="miss">—</span>'; } }
   async function saveKey(p){ const v=$('in'+(p==='claude'?'Claude':'Gemini')).value.trim(); if(!v) return;
     if(DEMO){ paintKeyState(Object.assign({claude:$('tagClaude').textContent==='set',gemini:$('tagGemini').textContent==='set'},{[p]:true})); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; return; }
-    try{ await api('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:v})}); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; loadKeys(); }catch(e){ alert('Could not save key ('+(e.status||'net')+').'); } }
+    try{ await api('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:v})}); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; loadKeys(); }catch(e){ /* [SEC-FLEETMODE-CONSOLE-V1] SAY WHY IT FAILED. api() already throws {status, body} with the parsed JSON body, and every refusal on this route sends {error}; this used to print the bare code and drop the sentence that explained it, so a 409 read as an unexplained no. */ const _why=(e&&e.body&&(e.body.error||e.body.detail))||''; alert('Could not save key ('+(e.status||'net')+')'+(_why?': '+_why:'')+'.'); } }
   /* [STRAINLIFE-UI-PROVISION-V1] this used to do location.href to a route that has never existed, so the
      only fleet-facing way to make a strain was a 404. It now runs the create flow, which asks
      for a name first. If the lifecycle script failed to load we say so rather than navigating
      somewhere that 404s. */
   function provision(){ if(DEMO){ alert('Creating a strain is disabled in the demo view.'); return; } if(typeof window.slNewStrain==='function'){ window.slNewStrain(); return; } alert('Create a new strain is unavailable: the strain-lifecycle script did not load.'); }
-  const DEMO_AGENTS=[{id:'fleet-engineer',name:'Fleet Engineer',role:'engineer - example strain',status:'working',last_ts:Date.now()-120000,backlog:0},{id:'fleet-archivist',name:'Fleet Archivist',role:'archivist - example strain',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-inspector',name:'Fleet Inspector',role:'inspector - example strain',status:'idle',last_ts:Date.now()-7200000,backlog:0}];
+  const DEMO_AGENTS=[{id:'fleet-advisor',name:'Fleet Advisor',role:'strategy · planning',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-gcp',name:'Fleet GCP',role:'cloud · deploys/IAM/billing',status:'working',last_ts:Date.now()-300000,backlog:0},{id:'fleet-security',name:'Fleet Security',role:'review · audits and refusals',status:'idle',last_ts:Date.now()-1800000,backlog:1}];
   async function loadFleet(){ try{ const d=await api('/api/fleet/agents'); AGENTS=d.agents||d||[]; }catch(e){ DEMO=true; AGENTS=DEMO_AGENTS; } renderAgents(); }
-  let rdpConnected=false;
-  function paintRDPLight(){ const l=$('rdpLight'); const on=(rdpConnected||vmRunning); l.style.color=on?'#4df5b0':'#ff8f86'; l.style.background=on?'#4df5b0':'#ff8f86'; }
-  function toggleFull(){ const p=$('rdpPanel'); p.classList.toggle('full'); $('rdpExp').textContent=p.classList.contains('full')?'⤢ Collapse':'⛶ Break out'; }
-  let VIEW='chrome';
-  const VIEWMETA={ chrome:{em:'🌐',t:'Chrome',d:'The workstation desktop — Chrome with the Claude extension, streamed live.'}, claude:{em:'✦',t:'Claude',d:'The workstation desktop (Claude runs in Chrome here), streamed live.'}, terminal:{em:'⌨',t:'Terminal',d:'A live shell into the box — runs as you.'} };
-  function setView(v){ VIEW=v; document.querySelectorAll('#rdpTabs button').forEach(b=>b.classList.toggle('on',b.dataset.v===v)); (rdpConnected||vmRunning)?connectRDP():showViewPh(); }
-  function showViewPh(){ if(VIEW==='terminal'){ mountTerminal(); return; } const m=VIEWMETA[VIEW]; $('rdpBody').innerHTML='<div class="rdpph"><div class="em">'+m.em+'</div><div><b>'+m.t+'</b><br>'+m.d+'</div><button class="btn" onclick="connectRDP()">▶ Start & connect</button></div>'; }
-  async function connectRDP(){
-    const m=VIEWMETA[VIEW]; const body=$('rdpBody');
-    if(VIEW==='terminal'){ rdpConnected=true; paintRDPLight(); mountTerminal(); return; }
-    if(!vmRunning){ await toggleVM(); }
-    if(DEMO){ body.innerHTML='<div class="rdpph"><div class="em">'+m.em+'</div><div><b>'+m.t+' — connected (demo)</b><br>'+m.d+'</div></div>'; rdpConnected=true; paintRDPLight(); return; }
-    body.innerHTML='<iframe src="/rdp" title="'+m.t+'" allow="clipboard-read; clipboard-write; fullscreen"></iframe>'; rdpConnected=true; paintRDPLight(); }
+  /* [SEC-RDP-DEAD-V1] THE DESKTOP STREAM IS GONE AND IT CANNOT COME BACK AS AN IFRAME.
+     index.ts records the /rdp reverse proxy and guacd as deleted ("Guacamole and the /rdp
+     proxy are GONE"), so the desktop iframe and the new-window call that used to live
+     here were both pointing at a route that returns 404. They were unreachable only
+     because a later CSS block hides this chrome -- one edit away from shipping a broken
+     feature -- so they are removed rather than re-hidden.
+     Nothing replaces them: the workstation has no public IP and RDP is reachable only over
+     an IAP tunnel that terminates on the OPERATOR'S OWN machine, which a page served from
+     Cloud Run cannot reach. The placeholder above now prints the tunnel command instead of
+     pretending to embed a session. The one view with a backend that exists is the terminal,
+     which talks to /api/shell, and it is kept. */
+  let VIEW='terminal';
+  const VIEWMETA={ terminal:{em:'⌨',t:'Terminal',d:'Run commands on the workstation through /api/shell.'} };
+  function setView(v){ VIEW=VIEWMETA[v]?v:'terminal';
+    document.querySelectorAll('#rdpTabs button').forEach(b=>b.classList.toggle('on',b.dataset.v===VIEW));
+    mountTerminal(); }
   // ---- live web terminal (wired to /api/shell on the running box) ----
   let TERMHIST=[], THI=0;
   function termPrint(out,text,cls){ const d=document.createElement('div'); d.className='tl '+(cls||'out'); d.textContent=text; out.appendChild(d); out.scrollTop=out.scrollHeight; }
@@ -453,7 +590,7 @@
       else { if(j.stdout) termPrint(out,String(j.stdout).replace(/\n$/,''),'out'); if(j.stderr) termPrint(out,String(j.stderr).replace(/\n$/,''),'err'); termPrint(out,'[exit '+(j.exit||0)+(j.authed?' · as you':'')+']','sys'); }
     }catch(e){ wait.remove(); termPrint(out,'network error','err'); } out.scrollTop=out.scrollHeight; }
   function toggleSide(){ const s=$('side'); const c=s.classList.toggle('collapsed'); $('railL').classList.toggle('show', c); }
-  function toggleRdp(){ const p=$('rdpPanel'); if(p.classList.contains('full')) toggleFull();
+  function toggleRdp(){ const p=$('rdpPanel');
     const c=p.classList.toggle('collapsed'); $('railR').classList.toggle('show', c); $('split').classList.toggle('hidden', c); if(!c) p.style.width='400px'; }
   let _rz=null;
   function startResize(e){ _rz={x:e.clientX, w:$('rdpPanel').offsetWidth}; document.body.style.userSelect='none'; window.addEventListener('mousemove',onResize); window.addEventListener('mouseup',stopResize); e.preventDefault(); }
@@ -461,13 +598,23 @@
     if(w<70){ $('rdpPanel').classList.add('collapsed'); $('railR').classList.add('show'); $('split').classList.add('hidden'); }
     else { $('rdpPanel').classList.remove('collapsed'); $('railR').classList.remove('show'); $('split').classList.remove('hidden'); $('rdpPanel').style.width=w+'px'; } }
   function stopResize(){ _rz=null; document.body.style.userSelect=''; window.removeEventListener('mousemove',onResize); window.removeEventListener('mouseup',stopResize); }
-  function breakout(){ window.open('/rdp?view='+VIEW,'paracoding-workstation'); }
-  (async function(){ setProvider('claude'); paintVM(); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{ var _adv=(AGENTS||[]).find(function(a){return a.id==='fleet-archivist';})||(AGENTS||[])[0]; if(_adv && !SEL) selectAgent(_adv.id); }catch(e){} pollVM(); setInterval(pollVM,8000); paintRDPLight(); showViewPh(); })();
+  /* [GCP-FLOWHOOD-DEFAULT-V70] GEMINI, NOT CLAUDE, AND THIS LINE IS THE ONE THAT DECIDES IT.
+     PROVIDER is initialised to 'gemini' where it is declared above, which reads like this was
+     already the default -- it was not: this call runs first and overwrote it on every load, so
+     the declaration was dead and the page always opened on Claude.
+     WHY IT MATTERS RATHER THAN BEING A PREFERENCE: a fresh install has NO Anthropic API key
+     (Settings shows Claude 'not set'), while Gemini reads 'token auth' and needs no key because
+     it rotates through Vertex OAuth. A Flowhood that opens on Claude is therefore dead on first
+     contact for every new adopter, which is exactly when someone decides whether this works.
+     The Claude button and the key-rotation UI are untouched -- this changes which one is
+     preselected, nothing else. */
+  (async function(){ setProvider('gemini'); paintVM(); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{ var _adv=(AGENTS||[]).find(function(a){return a.id==='fleet-advisor';})||(AGENTS||[])[0]; if(_adv && !SEL) selectAgent(_adv.id); }catch(e){} pollVM(); setInterval(pollVM,8000); })();
 </script>
 <style id="pcfungi">
 :root{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30}
 .agent .st{box-shadow:none!important}
 </style>
+<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png">
 <style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(240,194,74,.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style><script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js"></script>
 
 <script id="pcdecor">
@@ -530,7 +677,7 @@
     document.body.appendChild(w);
   }
   window.slNewStrain=async function(){
-    var name=prompt('Create a new strain.\n\nName it (e.g. ads, or fleet-analyst):','');
+    var name=prompt('Create a new strain.\n\nName it (e.g. ads, or fleet-archivist):','');
     if(!name)return;name=name.trim();if(!name)return;
     var slug=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+/,'').replace(/-+$/,'').slice(0,40);
     if(!slug){alert('That name has no usable letters.');return;}
@@ -548,23 +695,49 @@
       else{alert('Created '+id+'. No session key was minted: this role is not pasteable.');}
     }catch(e){}
   };
+  /* [HARNESSUI-LEXICON-V1] labels() USED to be the mushroom lexicon: seven hand-written
+     string swaps -- Agentic Harness -> Agentic Fungi, Paracoding Fleet -> Strain Collection,
+     Provider -> Substrate, Provision a new agent -> Create a new strain, and so on -- applied
+     unconditionally on every paint(), whether the operator wanted mushroom mode or not.
+
+     TWO THINGS WERE WRONG WITH THAT and both are why it moved.
+       1. It was IN-PLACE and therefore ONE-WAY. It read the live DOM, matched the professional
+          word and overwrote it. Once "Provider" had become "Substrate" there was nothing left
+          in the document that said "Provider", so turning mushroom mode off could not put it
+          back. Reversibility is not a nicety here; it is the whole feature the operator asked
+          for. The replacement keeps an untouched snapshot of the AUTHORED text of every node
+          and renders each mode from that snapshot, so both directions are a fresh derivation
+          and neither is a guess about what used to be there.
+       2. It covered seven strings. The operator's complaint, verbatim, was that "mushroom
+          theme is to toggling full lexion like on the website now on the demo" -- on
+          paracoding.ai the whole vocabulary moves at once, driven by an ordered dictionary in
+          af-theme.js. Seven strings is not a lexicon.
+
+     The dictionaries, the snapshot and the toggle now live in the [HARNESSUI-DEMOLOOK-V1]
+     block at the bottom of this file. labels() is kept as the call site because paint() and
+     its MutationObserver already run on exactly the cadence the lexicon needs: on every mutation
+     of the strain list and every 2.5s otherwise. The guard is there because this block is
+     parsed long before that one. */
   function labels(){
-    if(document.title!=='Agentic Fungi')document.title='Agentic Fungi';
-    document.querySelectorAll('.ttl').forEach(function(e){if(e.textContent.indexOf('Agentic Harness')>=0)setText(e,e.textContent.replace('Agentic Harness','Agentic Fungi'));});
-    document.querySelectorAll('.lbl').forEach(function(e){if(e.textContent.indexOf('Paracoding Fleet')>=0)setText(e,e.textContent.replace('Paracoding Fleet','Strain Collection'));if(e.textContent.indexOf('Provider')>=0)setText(e,e.textContent.replace('Provider','Substrate'));});
-    document.querySelectorAll('.hbtn').forEach(function(e){if(e.textContent.indexOf('Gate')>=0)setText(e,e.textContent.replace('Gate','Autoclave'));});
-    /* [STRAINLIFE-UI-LABEL-V1] the bottom link is a CREATE action now, not a fork of somebody else. */
-    document.querySelectorAll('.provision').forEach(function(e){if(e.textContent.indexOf('Provision a new agent')>=0)setText(e,e.textContent.replace('Provision a new agent','Create a new strain'));});
-    var who=document.getElementById('cWho');if(who&&who.textContent==='Select an agent')setText(who,'Select a strain');
-    document.querySelectorAll('.empty div').forEach(function(e){if(e.innerHTML&&e.innerHTML.indexOf('fleet agent')>=0)e.innerHTML=e.innerHTML.replace(/fleet agent/g,'strain');});
+    if(window.pcLex && typeof window.pcLex.apply==='function') window.pcLex.apply();
   }
   function decorate(){
     document.querySelectorAll('#agents .agent').forEach(function(a){
-      var nm=a.querySelector('.nm');if(nm){var m=nm.textContent.match(/^Fleet\s+(.+)$/);if(m)setText(nm,m[1]+' strain');}
+      /* [HARNESSUI-LEXICON-V1] the "Fleet advisor" -> "advisor strain" rename was here, and it
+         had the same one-way problem labels() had: it overwrote the name the roster actually
+         returned, so nothing downstream could get "Fleet advisor" back. It is a dictionary rule
+         now (PRO2MUSH, the /\bFleet\s+([a-z]\w*)/ entry) and fires only in mushroom mode.
+         Stripping the "fleet-" prefix off the role line below is NOT lexicon -- it is dropping a
+         redundant namespace off an identifier -- so it stays here and runs in both modes. */
       var rl=a.querySelector('.rl');if(rl){setText(rl,rl.textContent.replace(/^fleet-/,''));}
       var st=a.querySelector('.st');if(st&&!st.querySelector('svg')){st.textContent='';st.innerHTML=mush(sc(rid(a)));}
       var meta=a.querySelector('.meta')||a;
-      if(!meta.querySelector('.pcsubx')){var fx=document.createElement('span');fx.className='pcsubx';fx.title='Subculture (clone this strain with its full history)';fx.style.cssText='margin-left:.35rem;cursor:pointer;opacity:.55;display:inline-flex;align-items:center';fx.innerHTML=FORK;fx.onmouseenter=function(){fx.style.opacity='1';};fx.onmouseleave=function(){fx.style.opacity='.55';};fx.onclick=function(ev){ev.stopPropagation();subStrain(a);};meta.insertBefore(fx,meta.firstChild);}
+      if(!meta.querySelector('.pcsubx')){var fx=document.createElement('span');fx.className='pcsubx';/* [HARNESSUI-LEXICON-V1] was 'Subculture (clone this strain with its full history)' -- one
+         mushroom word glossed with its professional one in the same breath, which the dictionary
+         then stuttered into "Subculture (subculture this strain...)" going one way and
+         "Clone (clone this agent...)" going the other. Rephrased so the string is single-lexicon
+         and translates cleanly in both directions. Same meaning, same action. */
+      fx.title='Subculture this strain — it inherits the full history';fx.style.cssText='margin-left:.35rem;cursor:pointer;opacity:.55;display:inline-flex;align-items:center';fx.innerHTML=FORK;fx.onmouseenter=function(){fx.style.opacity='1';};fx.onmouseleave=function(){fx.style.opacity='.55';};fx.onclick=function(ev){ev.stopPropagation();subStrain(a);};meta.insertBefore(fx,meta.firstChild);}
       if(!meta.querySelector('.pcdelx')){var dx=document.createElement('span');dx.className='pcdelx';dx.innerHTML='&times;';dx.title='Delete strain';dx.style.cssText='margin-left:.35rem;color:#ff6b6b;font-weight:900;cursor:pointer;font-size:1.05rem;line-height:1;opacity:.5';dx.onmouseenter=function(){dx.style.opacity='1';};dx.onmouseleave=function(){dx.style.opacity='.5';};dx.onclick=function(ev){ev.stopPropagation();delStrain(a);};meta.appendChild(dx);}
     });
   }
@@ -636,7 +809,11 @@
   document.body.appendChild(btn); document.body.appendChild(panel);
   applyMush(mush); markSw();
   btn.onclick=function(ev){ ev.stopPropagation(); panel.classList.toggle('show'); };
-  sw.onclick=function(){ mush=!mush; sw.classList.toggle('on',mush); s('pc_mush',mush?'1':'0'); if(mush && theme==='green') theme='purple'; else if(!mush && theme==='purple') theme='green'; s('pc_theme',theme); applyTheme(theme); applyMush(mush); markSw(); };
+  /* [HARNESSUI-LEXICON-V1] reads pc_mush rather than the closure variable, because there are
+     now FOUR controls for one setting -- this one, the dashboard panel's, LAYERS > Settings',
+     and the floating pill -- and a closure that has not been clicked since page load holds a
+     stale value. The trailing sync() repaints the other three and re-renders the lexicon. */
+  sw.onclick=function(){ mush=(g('pc_mush','1')!=='1'); sw.classList.toggle('on',mush); s('pc_mush',mush?'1':'0'); if(mush && theme==='green') theme='purple'; else if(!mush && theme==='purple') theme='green'; s('pc_theme',theme); applyTheme(theme); applyMush(mush); markSw(); if(window.pcMush&&window.pcMush.sync)window.pcMush.sync(); };
   document.addEventListener('click',function(e){ if(panel.classList.contains('show') && !panel.contains(e.target) && e.target!==btn) panel.classList.remove('show'); });
 })();
 </script>
@@ -716,7 +893,8 @@
     function markSm(){[].forEach.call(sm.children,function(c){c.classList.toggle('on',c.getAttribute('data-t')===theme);});}
     PAL.forEach(function(pp){var b=document.createElement('button');b.type='button';b.title=pp[0];b.setAttribute('data-t',pp[0]);b.style.background='linear-gradient(135deg,'+pp[1]+','+pp[2]+')';b.onclick=function(){theme=pp[0];s('pc_theme',theme);applyTheme(theme);markSm();};sm.appendChild(b);});
     r2.appendChild(sm); sec.appendChild(r2); markSm();
-    sw.onclick=function(){mush=!mush;sw.classList.toggle('on',mush);s('pc_mush',mush?'1':'0');if(mush&&theme==='green')theme='purple';else if(!mush&&theme==='purple')theme='green';s('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();};
+    /* [HARNESSUI-LEXICON-V1] same as the theme-button switch: read pc_mush, then sync the rest. */
+    sw.onclick=function(){mush=(g('pc_mush','1')!=='1');sw.classList.toggle('on',mush);s('pc_mush',mush?'1':'0');if(mush&&theme==='green')theme='purple';else if(!mush&&theme==='purple')theme='green';s('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();if(window.pcMush&&window.pcMush.sync)window.pcMush.sync();};
     return sec;
   }
 
@@ -777,7 +955,7 @@
 </style>
 
 <!-- ===== Paracoding in-Flow-Hood Approvals drawer (advisor) — inject before </body> ===== -->
-<!-- LAYERS panel: Settings | Flow | Claude | Gate | Browser — resizable left slide-out -->
+<!-- LAYERS panel: Settings | Flow — resizable left slide-out -->
 <style id="pcl-css">
 #pcl-btn{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:99996;background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;font-weight:800;border:0;border-radius:11px 0 0 11px;padding:.85rem .32rem;cursor:pointer;box-shadow:0 3px 14px rgba(0,0,0,.45);font-size:.72rem;letter-spacing:.12em;writing-mode:vertical-rl;text-orientation:mixed;display:flex;align-items:center;gap:.35rem}
 #pcl-btn .dotp{width:8px;height:8px;border-radius:50%;background:#c0392b;display:none;box-shadow:0 0 7px #ff6b5b}
@@ -808,22 +986,40 @@
 #pcl .ssm{display:flex;gap:.55rem;flex-wrap:wrap;margin-top:.5rem}
 #pcl .ssm button{width:32px;height:32px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
 #pcl .ssm button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
+/* [UI-ACCORDION-V55] Two collapsible blocks, both driven by the CHOSEN palette rather than
+   their own colours. The key fields and the session pastes each arrived from a modal that
+   carried its own teal, which is why the panel read as two applications bolted together.
+   var(--glass)/--glass-line/--ink-soft are the same tokens the rest of the app themes on, so
+   these follow the colour picker instead of ignoring it. */
+#pcl .acc{margin-top:.9rem;border:1px solid var(--glass-line,#3a2864);border-radius:11px;overflow:hidden;background:var(--glass,#160e2b)}
+#pcl .acc>.acch{display:flex;align-items:center;gap:.5rem;width:100%;background:transparent;border:0;color:#efe9ff;
+  font-weight:800;font-size:.86rem;padding:.7rem .8rem;cursor:pointer;text-align:left}
+#pcl .acc>.acch .cv{margin-left:auto;transition:transform .18s;opacity:.7;font-size:.8rem}
+#pcl .acc.open>.acch .cv{transform:rotate(180deg)}
+#pcl .acc>.accb{display:none;padding:0 .8rem .85rem}
+#pcl .acc.open>.accb{display:block}
+#pcl .kwrap{margin-top:.4rem}
+#pcl .kwrap p{color:#8a78b6;font-size:.76rem;line-height:1.5;margin:.2rem 0 .8rem}
+#pcl .kwrap .kfield{margin:.75rem 0}
+#pcl .kwrap label{display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:700;color:#efe9ff;margin-bottom:.35rem}
+#pcl .kwrap .row{display:flex;gap:.4rem}
+#pcl .kwrap input{flex:1;min-width:0;background:#160e2b;border:1px solid #3a2864;color:#efe9ff;border-radius:9px;padding:.45rem .6rem;font-size:.82rem}
+#pcl .kwrap input:disabled{opacity:.55}
+#pcl .kwrap button{background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border:0;border-radius:9px;padding:.45rem .75rem;font-weight:800;cursor:pointer;font-size:.78rem}
+#pcl .kwrap button:disabled{opacity:.5;cursor:default}
+#pcl .kwrap .hint{color:#8a78b6;font-size:.72rem;line-height:1.45;margin-top:.3rem}
 #pcl-grip{position:absolute;top:0;left:-3px;width:9px;height:100%;cursor:ew-resize;z-index:6}
 #pcl-grip:hover{background:rgba(255,214,107,.25)}
 </style>
-<button id="pcl-btn" onclick="pclOpen()"><span class="dotp"></span>⧉ LAYERS</button>
+<button id="pcl-btn" onclick="pclOpen()"><span class="dotp"></span>⚙ SETTINGS</button>
 <div id="pcl-ov" onclick="pclClose()"></div>
 <div id="pcl">
   <div class="tabs">
     <button class="tb" data-t="settings" onclick="pclTab('settings')"><span class="ic">⚙️</span>Settings</button>
-    <button class="tb" data-t="flow" onclick="pclTab('flow')"><span class="ic">🍄</span>Flow</button>
-    <button class="tb" data-t="gate" onclick="pclTab('gate')"><span class="ic">🔑</span>Gate</button>
     <button class="cx" title="Close" onclick="pclClose()">&times;</button>
   </div>
   <div class="body">
     <div class="pane" data-p="settings"><div class="sset" id="pcl-set"></div></div>
-    <div class="pane" data-p="flow"><iframe data-src="/flow" title="Fleet Flow"></iframe></div>
-    <div class="pane" data-p="gate"><iframe data-src="/gate" title="Approvals Gate" allow="publickey-credentials-get; publickey-credentials-create"></iframe></div>
   </div>
   <div id="pcl-grip"></div>
 </div>
@@ -834,10 +1030,13 @@
   function ls(k,v){try{localStorage.setItem(k,v);}catch(e){}}
   var panel=document.getElementById('pcl'), ov=document.getElementById('pcl-ov');
   function loadPane(name){ var p=document.querySelector('#pcl .pane[data-p="'+name+'"]'); if(!p)return; var f=p.querySelector('iframe'); if(f && !f.getAttribute('src') && f.getAttribute('data-src')) f.setAttribute('src', f.getAttribute('data-src')); if(name==='settings') buildSettings(); }
-  var PCL_TABS=['settings','flow','gate'];
-  function pclSafeTab(t){ return PCL_TABS.indexOf(String(t))>=0?String(t):'gate'; }
+  /* [UI-ONE-PANEL-V55] One tab. 'flow' is gone (operator ruling 2026-08-15) and 'gate' was
+     never a pane at all -- it was the FALLBACK, so any unrecognised saved value opened this
+     panel onto an empty body. Both removed; the fallback is now the pane that exists. */
+  var PCL_TABS=['settings'];
+  function pclSafeTab(t){ return PCL_TABS.indexOf(String(t))>=0?String(t):'settings'; }
   window.pclTab=function(name){ name=pclSafeTab(name); document.querySelectorAll('#pcl .tb').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-t')===name);}); document.querySelectorAll('#pcl .pane').forEach(function(p){p.classList.toggle('on',p.getAttribute('data-p')===name);}); loadPane(name); ls('pcl_tab',name); };
-  window.pclOpen=function(){ var w=lg('pcl_w',''); if(w){ panel.classList.add('notrans'); panel.style.width=w; setTimeout(function(){panel.classList.remove('notrans');},30); } panel.classList.add('on'); ov.classList.add('on'); pclTab(pclSafeTab(lg('pcl_tab','gate'))); };
+  window.pclOpen=function(){ if(typeof window.closeDash==='function') window.closeDash(); hideLegacy(); var w=lg('pcl_w',''); if(w){ panel.classList.add('notrans'); panel.style.width=w; setTimeout(function(){panel.classList.remove('notrans');},30); } panel.classList.add('on'); ov.classList.add('on'); pclTab(pclSafeTab(lg('pcl_tab','settings'))); };
   window.pclClose=function(){ panel.classList.remove('on'); ov.classList.remove('on'); };
   function buildSettings(){ var host=document.getElementById('pcl-set'); if(!host || host.getAttribute('data-built'))return; host.setAttribute('data-built','1');
     var mush=lg('pc_mush','1')==='1', theme=lg('pc_theme','purple');
@@ -851,14 +1050,20 @@
     function markSm(){[].forEach.call(sm.children,function(c){c.classList.toggle('on',c.getAttribute('data-t')===theme);});}
     PAL.forEach(function(pp){var b=document.createElement('button');b.title=pp[0];b.setAttribute('data-t',pp[0]);b.style.background='linear-gradient(135deg,'+pp[1]+','+pp[2]+')';b.onclick=function(){theme=pp[0];ls('pc_theme',theme);applyTheme(theme);markSm();};sm.appendChild(b);});
     r2.appendChild(sm); host.appendChild(r2); markSm();
-    sw.onclick=function(){mush=!mush;sw.classList.toggle('on',mush);ls('pc_mush',mush?'1':'0');if(mush&&theme==='green'){theme='purple';}else if(!mush&&theme==='purple'){theme='green';}ls('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();};
-    var note=document.createElement('div'); note.style.cssText='margin-top:1.2rem;color:#8a78b6;font-size:.76rem;line-height:1.5'; note.innerHTML='Drag the left edge to resize. Flow and the Gate are in the tabs above; everything configurable lives on this panel.'; host.appendChild(note);
+    /* [HARNESSUI-LEXICON-V1] same as the other two: read pc_mush, then sync the rest. This
+       switch is not going away even though the pill now floats over the top right -- an
+       adopter who has collapsed the pill still needs somewhere to find the setting -- but the
+       pill is the one the operator asked for and the one the demo has. */
+    sw.onclick=function(){mush=(lg('pc_mush','1')!=='1');sw.classList.toggle('on',mush);ls('pc_mush',mush?'1':'0');if(mush&&theme==='green'){theme='purple';}else if(!mush&&theme==='purple'){theme='green';}ls('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();if(window.pcMush&&window.pcMush.sync)window.pcMush.sync();};
+    var note=document.createElement('div'); note.style.cssText='margin-top:1.2rem;color:#8a78b6;font-size:.76rem;line-height:1.5'; note.innerHTML='Drag the left edge to resize. Everything configurable lives on this panel.'; host.appendChild(note);
   }
   var grip=document.getElementById('pcl-grip'), rz=false;
   grip.addEventListener('mousedown',function(e){rz=true;panel.classList.add('notrans');document.body.style.userSelect='none';e.preventDefault();});
   document.addEventListener('mousemove',function(e){ if(!rz)return; var w=Math.max(300,Math.min(window.innerWidth*0.96,window.innerWidth-e.clientX)); panel.style.width=w+'px'; });
   document.addEventListener('mouseup',function(){ if(rz){rz=false;panel.classList.remove('notrans');document.body.style.userSelect='';ls('pcl_w',panel.style.width);} });
-  function hideLegacy(){ var rr=document.getElementById('railR'); if(rr) rr.style.display='none'; }
+  function hideLegacy(){ var rr=document.getElementById('railR');
+    if(rr){ rr.classList.remove('show'); rr.onclick=null; rr.setAttribute('style','display:none!important'); }
+    var rp=document.getElementById('rdpPanel'); if(rp){ rp.classList.add('collapsed'); rp.style.width=''; } }
   if(document.readyState!=='loading') hideLegacy(); else document.addEventListener('DOMContentLoaded',hideLegacy);
   async function pollPending(){ try{ var r=await fetch('/api/webauthn/pending',{credentials:'include'}); if(r.ok){ var j=await r.json(); var b=document.getElementById('pcl-btn'); if(b) b.classList.toggle('hasjobs', Array.isArray(j)&&j.length>0); } }catch(e){} }
   setInterval(pollPending,15000); setTimeout(pollPending,2500);
@@ -876,7 +1081,6 @@
 #rdpBtn,#rdpBtn2,.hdr .divb,.hdr .rt button[onclick*="/dash"]{display:none!important}
 .hdr .rt{gap:.3rem!important}
 .hbtn{padding:.26rem .5rem!important;font-size:.76rem!important;border-radius:8px!important}
-.hdr .rt button[onclick*="/gate"]{opacity:.7;font-size:.72rem!important;padding:.22rem .44rem!important}
 .chat .cbar{padding:.3rem .7rem!important;gap:.5rem!important}
 .chat .cbar .via{font-size:.68rem!important;padding:.14rem .5rem!important}
 .stream{padding:.7rem .8rem!important}
@@ -1015,7 +1219,177 @@
     var h=document.createElement('h4'); h.textContent='Model'; box.appendChild(h);
     var tog=$('toggle'); var sec=tog?tog.closest('.sec'):null;
     if(sec) box.appendChild(sec);
-    var keys=document.querySelector('#side .keys'); if(keys){ keys.style.display='flex'; box.appendChild(keys); }
+    /* [UI-KEYS-INLINE-V55] The API-keys row was a launcher: one line, a green dot, and a
+       modal in a DIFFERENT palette. The operator asked for the fields themselves, in the
+       panel, in one colour. The fields are MOVED out of the modal, not copied -- a copy would
+       duplicate #inClaude/#tagClaude and quietly break saveKey() and paintKeyState(), which
+       both look those ids up by id. The launcher row and the now-empty modal are removed. */
+    /* one builder for both blocks. `open` persists so the panel reopens the way it was left. */
+    /* onOpen (optional) runs every time the block is expanded, so a list that can go stale --
+       strains provisioned or retired elsewhere, keys revoked -- is refreshed on view rather
+       than only once at build time. */
+    function acc(id,title,fill,onOpen){
+      var w=document.createElement('div'); w.className='acc';
+      var h=document.createElement('button'); h.type='button'; h.className='acch';
+      h.innerHTML=title+'<span class="cv">\u25BE</span>';
+      var b=document.createElement('div'); b.className='accb';
+      fill(b);
+      h.onclick=function(){ var on=!w.classList.contains('open'); w.classList.toggle('open',on);
+        h.setAttribute('aria-expanded',on?'true':'false');
+        if(on&&typeof onOpen==='function'){ try{ onOpen(); }catch(e){} }
+        try{localStorage.setItem('pcl_acc_'+id,on?'1':'0');}catch(e){} };
+      h.setAttribute('aria-expanded','false');
+      try{ if(localStorage.getItem('pcl_acc_'+id)==='1'){ w.classList.add('open'); h.setAttribute('aria-expanded','true'); } }catch(e){}
+      w.appendChild(h); w.appendChild(b); box.appendChild(w); return w;
+    }
+    acc('keys','\uD83D\uDD11 API keys',function(b){
+      var kp=document.createElement('div'); kp.className='kwrap';
+      var sheet=document.querySelector('#keyModal .sheet');
+      if(sheet){
+        var blurb=sheet.querySelector('p'); if(blurb) kp.appendChild(blurb);
+        [].slice.call(sheet.querySelectorAll('.kfield')).forEach(function(f){ kp.appendChild(f); });
+      }
+      b.appendChild(kp);
+    });
+    /* SESSION PASTES: same move-don't-copy rule. #pcps-out, #pcps-text, #pcps-msg and
+       #pcps-roles are all looked up BY ID by the minting code, so relocating the nodes keeps
+       every handler working; rebuilding them would duplicate those ids and break minting.
+       The modal SHELL is left in the DOM on purpose -- close() still calls
+       modal.classList.remove('on') -- it is simply empty and never shown again. */
+    acc('pastes','\uD83C\uDF44 Session pastes',function(b){
+      var kp=document.createElement('div'); kp.className='kwrap';
+      var ps=document.querySelector('#pcps-sheet');
+      if(ps){
+        var pb=ps.querySelector('p'); if(pb) kp.appendChild(pb);
+        /* [UI-PASTES-MINT-V60] #pcps-btns is NOT moved any more, and that is the fix for the
+           Done button that shipped into the panel in v5.5. That div holds BOTH #pcps-copy and
+           #pcps-done; moving it dragged a modal-dismiss button into a panel that has no modal
+           to dismiss, and hiding it afterwards was one more thing to get wrong. Only the copy
+           button is wanted here, so only the copy button moves. #pcps-btns and #pcps-done stay
+           in the (now unused) modal shell, where close() and the onclick bound at parse time
+           still find them -- nothing is removed, so no existing handler can null-dereference. */
+        ['#pcps-note','#pcps-roles','#pcps-out','#pcps-msg','#pcps-copy'].forEach(function(sel){
+          var n=ps.querySelector(sel); if(n) kp.appendChild(n); });
+      }
+      b.appendChild(kp);
+      var hb=document.getElementById('pcps-open'); if(hb) hb.style.display='none';
+      /* [UI-PASTES-MINT-V60] THE STRAIN LIST WAS EMPTY IN v5.5 AND THIS IS WHY: the loader is
+         published as window.pcpsRefreshRoles by an IIFE further DOWN this file, and relocate()
+         can run before that assignment has happened. The old call was a bare
+         `if(typeof ...==='function')` with no else -- so when it lost the race it did nothing,
+         silently, once, forever, because relocate() is guarded to run a single time. The panel
+         then showed the blurb and an empty list and looked like a server problem.
+         Retried until the loader exists (2s ceiling), AND re-run on every accordion open so a
+         list that was minted, revoked or provisioned elsewhere is never stale. */
+      function pcpsKick(tries){
+        if(typeof window.pcpsRefreshRoles==='function'){ try{ window.pcpsRefreshRoles(); }catch(e){} return; }
+        if(tries<=0) return;
+        setTimeout(function(){ pcpsKick(tries-1); },100);
+      }
+      pcpsKick(20);
+      window.__pcpsKick=function(){ pcpsKick(20); };
+    },function(){ if(typeof window.__pcpsKick==='function') window.__pcpsKick(); });
+    /* [UI-ALLOWLIST-V54] Allowed Google accounts. Sign-in is Google (IAP on the authorize page),
+       so this list is the thing that decides WHICH Google account may finish a connector
+       authorization. It is served from Firestore, not from the env var, precisely so it can be
+       edited from here -- an env var needs a redeploy of both services and the person who needs
+       to edit it is by definition the person locked out.
+       Two rules are enforced on the SERVER as well as here, because a UI rule is a suggestion:
+       an install-time address has no x (removing it would not stick -- it comes from the env and
+       reappears on the next read), and the last remaining address cannot be removed. */
+    acc('allow','👤 Allowed Google accounts',function(b){
+      var kp=document.createElement('div'); kp.className='kwrap';
+      var note=document.createElement('p');
+      note.textContent='Google accounts that may authorize an MCP connector. Sign-in goes through Google; only these addresses can complete it.';
+      kp.appendChild(note);
+      var list=document.createElement('div'); list.id='pcal-list'; kp.appendChild(list);
+      var row=document.createElement('div');
+      row.style.cssText='display:flex;gap:.4rem;margin-top:.55rem';
+      var inp=document.createElement('input');
+      inp.id='pcal-new'; inp.type='email'; inp.placeholder='name@example.com';
+      inp.autocomplete='off'; inp.spellcheck=false;
+      inp.style.cssText='flex:1;min-width:0;padding:.4rem .55rem;border-radius:9px;font-size:.85rem;'
+        + 'border:1px solid var(--glass-line);background:var(--glass);color:inherit';
+      var add=document.createElement('button');
+      add.type='button'; add.textContent='+'; add.title='Add this address';
+      add.style.cssText='flex:0 0 auto;width:2.1rem;border-radius:9px;cursor:pointer;font-size:1.05rem;'
+        + 'line-height:1;border:1px solid var(--glass-line);background:var(--glass);color:inherit';
+      row.appendChild(inp); row.appendChild(add); kp.appendChild(row);
+      var msg=document.createElement('div');
+      msg.id='pcal-msg'; msg.style.cssText='font-size:.76rem;min-height:1.1em;margin-top:.35rem;color:var(--ink-soft)';
+      kp.appendChild(msg); b.appendChild(kp);
+
+      var all=[], locked=[], busy=false;
+      function say(t,bad){ msg.textContent=t||''; msg.style.color=bad?'#ffb4a8':'var(--ink-soft)'; }
+      function render(){
+        list.innerHTML='';
+        all.forEach(function(em){
+          var r=document.createElement('div');
+          r.style.cssText='display:flex;align-items:center;gap:.5rem;padding:.34rem .5rem;margin-top:.3rem;'
+            + 'border:1px solid var(--glass-line);background:var(--glass);border-radius:9px;font-size:.83rem';
+          var t=document.createElement('span');
+          t.textContent=em; t.style.cssText='flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+          r.appendChild(t);
+          var isLocked=locked.indexOf(em)>=0;
+          /* the last address standing keeps no x either -- removing it allows nobody in */
+          if(!isLocked && all.length>1){
+            var x=document.createElement('button');
+            x.type='button'; x.textContent='×'; x.title='Remove '+em;
+            x.style.cssText='flex:0 0 auto;border:0;background:none;color:var(--ink-soft);cursor:pointer;'
+              + 'font-size:1.05rem;line-height:1;padding:0 .15rem';
+            x.onclick=function(){ save(all.filter(function(e){ return e!==em; })); };
+            r.appendChild(x);
+          }else{
+            var lk=document.createElement('span');
+            lk.textContent=isLocked?'install':'required';
+            lk.title=isLocked
+              ? 'Set at install time. Remove it by changing WA_APPROVER_EMAILS.'
+              : 'The last address cannot be removed, or nobody could sign in.';
+            lk.style.cssText='flex:0 0 auto;font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-soft);opacity:.75';
+            r.appendChild(lk);
+          }
+          list.appendChild(r);
+        });
+      }
+      function load(){
+        fetch('/api/oauth/allowed',{credentials:'same-origin'}).then(function(r){
+          if(r.status===401){ say('Unlock the gate to manage this list.'); return null; }
+          return r.json();
+        }).then(function(d){
+          if(!d) return;
+          all=d.all||[]; locked=d.locked||[]; render();
+        }).catch(function(e){ say(String(e),true); });
+      }
+      /* The server takes the WHOLE intended list, so add and remove are one code path and
+         cannot drift. It replies with the merged truth and that is what we draw -- never the
+         optimistic local copy, or the panel would show a state the server refused. */
+      function save(next){
+        if(busy) return; busy=true; say('Saving…');
+        fetch('/api/oauth/allowed',{method:'POST',credentials:'same-origin',
+          headers:{'Content-Type':'application/json'},body:JSON.stringify({emails:next})})
+          .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+          .then(function(o){
+            busy=false;
+            if(!o.ok){ say((o.d&&o.d.error)||'could not save',true); return; }
+            all=o.d.all||[]; render(); say('Saved.');
+          }).catch(function(e){ busy=false; say(String(e),true); });
+      }
+      function addOne(){
+        var v=(inp.value||'').trim().toLowerCase();
+        if(!v){ say('Enter an address first.',true); return; }
+        if(all.indexOf(v)>=0){ say('Already on the list.'); inp.value=''; return; }
+        inp.value='';
+        save(all.filter(function(e){ return locked.indexOf(e)<0; }).concat([v]));
+      }
+      add.onclick=addOne;
+      inp.addEventListener('keydown',function(e){ if(e.key==='Enter'){ e.preventDefault(); addOne(); } });
+      load();
+    });
+    /* HIDDEN, NOT REMOVED. #keyState lives inside this row and paintKeyState() writes to it
+       on every /api/keys/status poll -- removing the node would turn a working poll into a
+       null dereference on a timer. Hidden satisfies the operator ("get rid of that") without
+       breaking a caller that still, correctly, expects the element to exist. */
+    var launcher=document.querySelector('#side .keys'); if(launcher) launcher.style.display='none';
     host.appendChild(box);
   }
   var origTab=window.pclTab;
@@ -1028,7 +1402,667 @@
 })();
 </script>
 
+<!-- ===== [PCSESSIONPASTE-V1] Strain session pastes, moved off the gate. ==============
+     SAME CONSTRUCTION AS [HARNESSUI-V1] ABOVE AND FOR THE SAME REASON: appended before
+     </body>, finds its own targets at runtime, and no-ops when they are absent. A
+     line-anchored edit into the middle of this document has already failed once.
+
+     WHY THIS IS HERE AT ALL. Minting a strain session key was ONLY on the gate console,
+     and the gate is being removed. This is the feature the operator said he could not
+     lose -- without it a Cowork chat has no identity, because an MCP connector in Claude
+     is ACCOUNT-level: one connector serves every chat, so every unbound chat resolves to
+     the same default role and none of them is the strain you meant.
+
+     NOTHING SERVER-SIDE CHANGED. GET /api/sessions/roles and POST /api/sessions/mint are
+     both already classed 'console' in PC_SURFACE_MAP, and the harness IS the console
+     surface -- /flowhood redirects to /harness on the same service that served the gate.
+     So this is a move of the UI, not a new capability and not a new route.
+
+     THE KEY IS SHOWN ONCE. Only its hash is stored, so a mint that is not copied is
+     gone; the panel says so where the operator will read it, not in a comment.       -->
+<style id="pcsessionpaste-css">
+#pcps-sheet{max-width:560px}
+#pcps-roles button{display:block;width:100%;text-align:left;margin-top:.35rem;background:var(--glass);
+  border:1px solid var(--glass-line);color:#fff;border-radius:9px;padding:.4rem .6rem;
+  font-size:.82rem;font-weight:600;cursor:pointer}
+#pcps-roles button:hover{background:var(--glass-2)}
+#pcps-roles button[disabled]{opacity:.55;cursor:default}
+#pcps-note{color:var(--ink-soft);font-size:.76rem;margin:.1rem 0 .35rem}
+#pcps-text{width:100%;height:13em;background:rgba(0,0,0,.32);color:#d7ecff;border:1px solid var(--glass-line);
+  border-radius:9px;padding:.5rem .6rem;font-family:ui-monospace,Menlo,monospace;font-size:.72rem}
+#pcps-once{color:#ffd77a;font-size:.75rem;margin:.35rem 0}
+#pcps-msg{font-size:.78rem;min-height:1.2em;color:#ffd7d0}
+#pcps-btns{display:flex;gap:.45rem;margin-top:.45rem}
+#pcps-btns button{flex:1;border-radius:9px;padding:.45rem .6rem;font-size:.82rem;font-weight:700;cursor:pointer}
+</style>
+<script id="pcsessionpaste-js">
+(function(){
+  if (window.__pcsessionpaste) return; window.__pcsessionpaste = true;
+
+  function el(tag, attrs, html){
+    var e = document.createElement(tag);
+    if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (html != null) e.innerHTML = html;
+    return e;
+  }
+  function $(id){ return document.getElementById(id); }
+  function say(t, bad){ var m = $('pcps-msg'); if (m) { m.style.color = bad ? '#ffd7d0' : '#c6ffe4'; m.textContent = t || ''; } }
+
+  // ---- the modal ------------------------------------------------------------------
+  var modal = el('div', {class:'modal', id:'pcps-modal'});
+  modal.appendChild(el('div', {class:'sheet', id:'pcps-sheet'},
+      '<h3>&#127812; Strain session pastes</h3>'
+    + '<p>One connector serves every Cowork chat, so a chat has no identity until you give '
+    + 'it one. Minting a key here is what makes a chat actually <b>be</b> that strain.</p>'
+    + '<div id="pcps-note"></div>'
+    + '<div id="pcps-roles"></div>'
+    + '<div id="pcps-out" style="display:none">'
+    +   '<p id="pcps-for" style="margin:.6rem 0 .3rem"></p>'
+    +   '<textarea id="pcps-text" readonly></textarea>'
+    +   '<div id="pcps-once">Shown once. Only its hash is stored, so it cannot be recovered later.</div>'
+    + '</div>'
+    + '<div id="pcps-msg"></div>'
+    + '<div id="pcps-btns">'
+    +   '<button class="save" id="pcps-copy" style="display:none">Copy paste</button>'
+    +   '<button class="close" id="pcps-done">Done</button>'
+    + '</div>'));
+  document.body.appendChild(modal);
+
+  function close(){ modal.classList.remove('on'); $('pcps-out').style.display='none';
+                    $('pcps-text').value=''; $('pcps-copy').style.display='none'; say(''); }
+  function open(){ modal.classList.add('on'); say(''); roles(); }
+  $('pcps-done').onclick = close;
+  modal.addEventListener('click', function(ev){ if (ev.target === modal) close(); });
+
+  // ---- the entry point: a header button, placed beside the other console links -----
+  // NO-OP IF THE HEADER IS NOT THERE. That is the whole point of this construction.
+  var rt = document.querySelector('.hdr .rt');
+  if (rt) {
+    var b = el('button', {class:'hbtn', id:'pcps-open', title:'Mint a session key that makes a Cowork chat a strain'},
+               '&#127812; Session pastes');
+    b.onclick = open;
+    // [SEC-NOGATE-V1] The Gate link this used to sit beside is gone, and so is the search for
+    // it. The construction was written to survive exactly this and it did: with no button
+    // matching /Gate/ the old code already appended. Kept as a plain append rather than left
+    // scanning for a string that can no longer appear, which would read as live logic.
+    rt.appendChild(b);
+  }
+  /* [UI-ACCORDION-V55] The list used to be filled by open() when the modal appeared. The
+     fields now live in the Settings panel, so expose the loader directly and point the old
+     entry point at the panel instead of a modal that no longer has any content in it. */
+  window.pcpsRefreshRoles = roles;
+  window.pcSessionPastes = function(){ try{ if(typeof window.pclOpen==='function'){ window.pclOpen(); return; } }catch(e){} open(); };
+
+  // ---- data ------------------------------------------------------------------------
+  async function roles(){
+    var host = $('pcps-roles'); host.textContent = 'loading...';
+    var r;
+    try { r = await fetch('/api/sessions/roles', { credentials:'include' }); }
+    catch (e) { host.textContent = ''; say('could not reach the server: ' + e, true); return; }
+    if (!r.ok) {
+      host.textContent = '';
+      say(r.status === 401
+          ? 'Your console session expired. Reload this page and sign in again.'
+          : 'could not load strains (' + r.status + ')', true);
+      return;
+    }
+    var d = await r.json().catch(function(){ return {}; });
+    var list = (d && d.roles) || [];
+    $('pcps-note').textContent = d.enforcing
+      ? 'Enforcing: a chat with no key gets no tools.'
+      : 'NOT enforcing yet: unbound chats still work. Set PC_SESSION_ENFORCE=1 when you are ready.';
+    host.textContent = '';
+    if (!list.length) { host.textContent = 'no pasteable strains'; return; }
+    list.forEach(function(row){
+      var role = row.role;
+      var btn = el('button', null, role);
+      btn.onclick = function(){ mint(role, btn); };
+      host.appendChild(btn);
+    });
+  }
+
+  async function mint(role, btn){
+    var was = btn.textContent; btn.disabled = true; btn.textContent = 'minting ' + role + '...';
+    say('');
+    var r, d = {};
+    try {
+      r = await fetch('/api/sessions/mint', { method:'POST', credentials:'include',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ role: role, label: 'flowhood' }) });
+      d = await r.json().catch(function(){ return {}; });
+    } catch (e) { btn.disabled=false; btn.textContent=was; say('mint failed: ' + e, true); return; }
+    btn.disabled = false; btn.textContent = was;
+    if (!r.ok) {
+      say(r.status === 401
+          ? 'Your console session expired. Reload this page and sign in again.'
+          : 'mint failed: ' + (d.error || r.status), true);
+      return;
+    }
+    var key = d.key || '';
+    if (!key) { say('mint returned no key', true); return; }
+    $('pcps-for').textContent = 'Paste this into a NEW Cowork chat to make it ' + role + '.';
+    $('pcps-text').value = pasteText(role, key);
+    $('pcps-out').style.display = 'block';
+    $('pcps-copy').style.display = 'block';
+    $('pcps-text').scrollIntoView({ behavior:'smooth', block:'center' });
+  }
+
+  $('pcps-copy').onclick = function(){
+    var t = $('pcps-text');
+    t.select(); t.setSelectionRange(0, 999999);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t.value).then(function(){ say('paste copied'); },
+                                                  function(){ say('select and copy manually', true); });
+    } else {
+      try { document.execCommand('copy'); say('paste copied'); }
+      catch (e) { say('select and copy manually', true); }
+    }
+  };
+
+  // THE BRIEF IS CARRIED OVER VERBATIM FROM THE GATE. It is the product, not decoration:
+  // every paragraph in it was written because a strain got something wrong without it.
+  function pasteText(role, key){
+    return [
+      'You are ' + role.toUpperCase() + ' in this Paracoding.AI fleet, running as a Cowork',
+      'session. Read this whole brief before your first tool call.',
+      '',
+      'PC-SESSION-KEY: ' + key,
+      '',
+      'IDENTITY -- THIS IS THE PART THAT IS NOT OBVIOUS.',
+      'MCP connectors in Claude are ACCOUNT-level, not chat-level. The same connector serves',
+      'every Cowork chat, so without the key above every chat resolves to the same default',
+      'role and none of them is you. Pass the key as the "agent" argument on EVERY',
+      'tool call and you are ' + role + ': staged_by, journal attribution, agents/' + role + '/',
+      'lake scoping and your chat history all follow from it.',
+      '',
+      'FIRST THING YOU DO: call whoami with agent set to the key. If it does not come back',
+      '' + role + ', STOP and tell the operator. Do not work under the wrong identity.',
+      '',
+      'The role is resolved from the key on the SERVER. Editing this text to name a',
+      'different strain does nothing -- a role name is not a key.',
+      '',
+      'LAWS -- these are how you avoid doing real damage:',
+      '  * ANY strain may stage, and several jobs can wait in the gate at once.',
+      '    Supersede keys on staged_by|command_type. staged_by is your RESOLVED ROLE,',
+      '    so a different role cannot clobber you -- but two chats of the SAME role',
+      '    sharing a command_type WILL silently destroy each other. Newest wins, it',
+      '    fires on ANY load of the pending list rather than on approval, and it writes',
+      '    no journal entry. Stage with stage_privileged_job and a DISTINCT command_type',
+      '    per stream (e.g. run_cmd my-stream). Check list_pending_confirm first anyway.',
+      '  * There is NO delete tool for the data lake. A stray lake write cannot be',
+      '    undone by you or anyone. Write only to files you were asked to produce.',
+      '  * Never print a secret. A document id from oauth_tokens IS a live bearer token.',
+      '    Counts and shapes only.',
+      '  * Use `gcloud storage`, NEVER `gsutil` -- gsutil ignores the injected approver',
+      '    token, falls back to a service account with no access, and dies 403.',
+      '  * THE GATE UI LIES. Always read_job_log. Exit 0 does not prove a fix landed, and a',
+      '    browser fetch timeout renders as REFUSED on a job that actually ran.',
+      '  * A work item records what someone INTENDED when it was written, not what is true',
+      '    now. Check the actual bytes before you believe any status, including "done".',
+      '',
+      'ORIENT: whoami hands you the fleet memory digest and the bootstrap that says how',
+      'this fleet works -- it is delivered, so there is nothing to go and fetch first.',
+      'Then list_work_items with role=' + role + ' and read the PAYLOADS -- they carry the',
+      'detail -- and list_files to see what your own lane already holds.',
+      '',
+      'Verify before you claim. Delegate heavy reading to subagents (forbid them lake writes',
+      'and staging). Say plainly when something is wrong, including when it is your own work.'
+    ].join('\n');
+  }
+})();
+</script>
+
+<!-- ===== [HARNESSUI-DEMOLOOK-V1] the demo chrome, the floating mushroom pill, and the FULL
+     lexicon. Appended before </body> for the same reason [HARNESSUI-V1] and [PCSESSIONPASTE-V1]
+     are: this document changes shape between sessions, a line-anchored edit into its middle has
+     already failed once, and everything here finds its own targets at runtime and no-ops when
+     they are absent.
+
+     WHAT THIS IS ANSWERING. The operator, 2026-08-14: "The top logo look spacing buttons
+     everything looks better on the demo", and "mushroom theme is to toggling full lexion like on
+     the website now on the demo". So the reference is a specific artifact -- the public demo at
+     paracoding.ai/demo.html, its stylesheet af.css and its theme engine af-theme.js -- and the
+     numbers below were read out of those three files rather than invented. Where a rule here has
+     a counterpart there it is the same number: .55rem/.9rem of header padding, .7rem of gap, a
+     30px round logo with box-shadow 0 0 12px 2px rgba(240,194,74,.5), .78rem/9px-radius header
+     buttons, and a 22px-radius pill in the top right carrying the gold gradient.
+
+     WHAT I DID NOT COPY, and why, because a partial copy that pretends to be a full one is worse
+     than an honest one:
+       * The demo's .fakebtn row (Start VM / Remote Desktop / Dashboard rendered dead at
+         opacity .6, cursor not-allowed). Those are LIVE controls here. Copying the treatment
+         would make a working Start VM button look disabled.
+       * The demo's "Demo" badge and its "Get notified" / "Back to site" pills. This is the
+         cockpit, not the marketing preview; there is nowhere for them to go.
+       * The demo's gold Send button colour is copied, but NOT onto #vmBtn. Start VM is
+         green when stopped and red when running (.startb / .stopb) and that colour carries
+         state. Painting it gold would delete the only at-a-glance signal for whether the VM
+         is up.
+       * The demo's "Questions? Ask" pill (af-ask.js). It is wired to a public knowledge base
+         and an avatar broker. There is no such thing behind this console and I am not going to
+         render a button that does nothing.
+       * The 2026-07-25 slimming in #pcslim above is NOT reverted wholesale. The header goes back
+         to demo proportions because that is what was asked for; the chat bar and the stream keep
+         their slim padding, because "give the chat the screen" and "the header looks better on
+         the demo" are not actually in conflict. On phones the composer keeps the slim buttons
+         too -- see the max-width:768px block.                                              -->
+<style id="pcdemolook-css">
+/* ---------- header: the demo's .top, applied to .hdr ----------
+   These carry !important because #pcslim above set the same properties !important. Later wins at
+   equal specificity, which is the same mechanism every other block in this file relies on. */
+.hdr{padding:.55rem .9rem!important;gap:.7rem!important;
+  background:rgba(9,4,20,.5)!important;border-bottom:1px solid rgba(255,255,255,.16)!important;
+  backdrop-filter:blur(8px)!important}
+.hdr img{width:30px!important;height:30px!important;object-fit:cover!important;
+  border-radius:50%!important;mix-blend-mode:normal!important;
+  filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important;
+  box-shadow:0 0 12px 2px rgba(240,194,74,.5)!important}
+/* the demo brand is gold gradient text at 1.02rem/800; #pcslim had dropped it to .82rem/700 */
+.hdr .ttl{font-size:1.02rem!important;font-weight:800!important;letter-spacing:.01em!important;
+  background:linear-gradient(90deg,#ffe9a8,#e0982e);-webkit-background-clip:text;background-clip:text;
+  color:transparent}
+.hdr .rt{gap:.5rem!important;align-items:center}
+/* .fakebtn geometry, .exit colours -- the demo's two header button treatments merged, since
+   every button up here is real and none of them is the primary call to action. */
+.hbtn{font-size:.78rem!important;font-weight:600!important;padding:.32rem .6rem!important;
+  border-radius:9px!important;background:rgba(255,255,255,.05)!important;
+  border:1px solid rgba(255,255,255,.16)!important;color:rgba(233,246,241,.78)!important}
+.hbtn:hover{background:rgba(255,255,255,.12)!important;color:#fff!important}
+/* ...except the VM button, which keeps its state colour. See the note above. */
+.hbtn.startb{border-color:rgba(120,255,190,.55)!important;background:rgba(60,200,140,.22)!important;color:#fff!important}
+.hbtn.stopb{border-color:rgba(255,150,140,.55)!important;background:rgba(200,80,80,.22)!important;color:#fff!important}
+/* the demo's empty-state logo is 84px with a wider glow; this one was 64px */
+.empty img{width:84px!important;height:84px!important;border-radius:50%!important;
+  mix-blend-mode:normal!important;box-shadow:0 0 26px 5px rgba(240,194,74,.4)!important}
+/* professional mode: af-theme.js squares the logo off and dims the glow rather than killing it.
+   The older body.nomush rule in #pctheme removed it entirely, which read as a broken image. */
+body.nomush .hdr img,body.nomush .empty img,body.nomush .brand img{
+  border-radius:10px!important;box-shadow:0 0 10px rgba(240,194,74,.35)!important;filter:none!important}
+
+/* ---------- composer: demo geometry, mic and attachment KEPT ---------- */
+.send{padding:.7rem 1.1rem!important;font-size:.95rem!important;border-radius:12px!important;
+  font-weight:800!important;background:linear-gradient(135deg,#ffe9a8,#e0982e)!important;
+  color:#3a2a06!important;border:0!important}
+.mic{padding:.65rem .75rem!important;font-size:1rem!important;border-radius:12px!important}
+.cin{gap:.5rem!important}
+
+/* ---------- the floating mushroom pill (the demo's #afRail / #afToggle) ----------
+   Fixed top right, riding just under the header, exactly as af.css pins it under the sticky nav.
+   --pchdrh is MEASURED in script below rather than guessed, for the same reason demo.html
+   measures its own bars: this header is restyled by three different blocks and its height is
+   not knowable from any one of them. */
+#pcmushrail{position:fixed;right:14px;top:calc(var(--pchdrh,44px) + 10px);z-index:99990;
+  display:flex;flex-direction:column;align-items:flex-end;gap:.45rem;pointer-events:none}
+#pcmushrail>*{pointer-events:auto}
+#pcmushpill{display:inline-flex;align-items:center;gap:.4rem;padding:.46rem .8rem;border-radius:22px;
+  font:700 .8rem/1 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;cursor:pointer;white-space:nowrap;
+  border:1px solid rgba(240,194,74,.6);color:#3a2a06;
+  background:linear-gradient(135deg,#ffe9a8,#e0982e);box-shadow:0 6px 20px rgba(0,0,0,.35)}
+#pcmushpill:hover{filter:brightness(1.06)}
+#pcmushpill:focus-visible{outline:2px solid #fff;outline-offset:2px}
+body.nomush #pcmushpill{background:rgba(255,255,255,.10);color:#eafaff;
+  border:1px dashed rgba(240,194,74,.6);backdrop-filter:blur(6px)}
+/* Reserve the pill's own width at the right end of the chat bar so the 7D usage strip never
+   slides underneath it. The width is measured, not hard-coded, because "Not a mushroom fan?" is
+   materially wider than "Mushroom mode" and a fixed rem value would be wrong in one of the two
+   modes -- which is exactly the class of bug this whole change is about. */
+.chat .cbar{padding-right:calc(var(--pcpillw,0px) + 1.2rem)!important}
+@media(max-width:640px){ #pcmushpill{font-size:.74rem;padding:.42rem .68rem} }
+@media(max-width:768px){
+  /* phones keep the 2026-07-25 slim composer; the header still gets the demo treatment */
+  body.mobile .send{padding:.45rem .75rem!important;font-size:.85rem!important}
+  body.mobile .mic{padding:.4rem .5rem!important;font-size:.9rem!important}
+  body.mobile .cin{gap:.35rem!important}
+  body.mobile .hdr{padding:.4rem .6rem!important}
+  body.mobile .hdr img{width:26px!important;height:26px!important}
+  body.mobile .hdr .ttl{font-size:.92rem!important}
+}
+</style>
+<script id="pcdemolook-js">
+(function(){
+  if(window.pcLex) return;
+
+  /* ================= THE LEXICON =================================================
+     HOW THE DEMO DOES IT, since that is what was asked for. af-theme.js authors every page in
+     the MUSHROOM lexicon and holds one ordered dictionary that translates mushroom -> pro. It
+     snapshots the original text of every text node at load, and flipping back is not a reverse
+     translation at all -- it writes the snapshot back. That is why the demo's toggle is exactly
+     reversible and why this one is built the same way.
+
+     WHERE THIS FILE DIFFERS, and it matters. The harness is authored in a MIXED lexicon: the
+     markup says "Provider", "Paracoding Fleet" and "Provision a new agent" (professional) in the
+     same document as "Pick a strain", "Autoclave" and "switches substrate" (mushroom). There is
+     no single authored lexicon to snapshot, so one dictionary cannot serve both directions.
+
+     So there are TWO dictionaries and ONE snapshot:
+        snapshot  = the authored text, never written to, captured before anything is rewritten
+        mushroom  = PRO2MUSH(snapshot)
+        pro       = MUSH2PRO(snapshot)
+     Both modes are a fresh derivation from the same immutable source. Neither is an attempt to
+     undo the other, so flipping back and forth cannot drift -- which is precisely what the old
+     in-place labels() could not promise, because it overwrote the only copy of the word it was
+     replacing.
+
+     A dictionary only ever fires on words of the OPPOSITE lexicon, so running the wrong one over
+     a string is a no-op rather than damage: PRO2MUSH has no rule whose left side is "strain", and
+     MUSH2PRO has none whose left side is "Provider".
+
+     WORD BOUNDARIES. Every single-word rule is wrapped in (?<![\w-]) ... (?![\w-]) rather than
+     \b. \b alone would match inside an identifier -- \bfleet\b happily fires in the middle of
+     "fleet-advisor" and would turn a role id into "collection-advisor". The hyphen in the
+     lookaround is the difference between a lexicon and a corrupted id. It also makes the
+     single-word rules order-independent, since "Build" can no longer fire inside "Building".
+     (Lookbehind is Chrome 62+/Firefox 78+/Safari 16.4+. This console already ships optional
+     chaining and top-level async, so that floor was already set.)                          */
+
+  function W(s){ return new RegExp('(?<![\\w-])'+s+'(?![\\w-])','g'); }
+  function D(list){ return list.map(function(e){
+    return [ (e[0] instanceof RegExp) ? e[0] : W(e[0]), e[1] ]; }); }
+
+  /* professional -> mushroom. Ordered: longest / most specific first, as af-theme.js is. */
+  var PRO2MUSH = D([
+    ['Paracoding Agentic Harness','Agentic Fungi'],
+    ['Agentic Harness','Agentic Fungi'],
+    ['Paracoding Fleet','Strain Collection'],
+    ['Paracoding Workstation','Fruiting Chamber'],
+    ['Provision a new agent','Create a new strain'],
+    ['No agents provisioned yet','No strains in the collection yet'],
+    ['Message the selected agent','Message the selected strain'],
+    ['Select an agent','Select a strain'],
+    ['Fleet Flow','the Flow'],
+    /* The roster returns "Fleet Advisor"; the mushroom reading, and the form the public demo's
+       own strain list uses, is "Advisor strain". This was an in-place rewrite inside decorate()
+       and is a rule now so professional mode can show the name the server actually sent. It has
+       to accept BOTH cases -- the live roster capitalises ("Fleet Advisor", "Fleet Infra",
+       "Fleet Publisher"; see DEMO_AGENTS in this file) and the older markup did not. The two
+       "Fleet <Capitalised>" strings that are NOT names, "Fleet Flow" and "Paracoding Fleet",
+       are both consumed by rules above this one, which is why the broad form is safe here and
+       would not have been if this rule came first. */
+    [/(?<![\w-])Fleet\s+([A-Za-z][\w]*)(?![\w-])/g,'$1 strain'],
+    /* the trailing dot in the lookahead protects the "Paracoding.ai" eyebrow from becoming
+       a domain that does not exist. */
+    [/(?<![\w-])Paracoding(?![\w.\-])/g,'Agentic Fungi'],
+    ['Provider','Substrate'], ['provider','substrate'],
+    ['Providers','Substrates'], ['providers','substrates'],
+    ['Runtime','Substrate'], ['runtime','substrate'],
+    ['Harness','Flow Hood'], ['harness','flow hood'],
+    ['Fleet','Collection'], ['fleet','collection'],
+    ['Agents','Strains'], ['Agent','Strain'],
+    ['agents','strains'], ['agent','strain'],
+    ['Memory','Mycelium'], ['memory','mycelium'],
+    ['Clone','Subculture'], ['clone','subculture'],
+    ['Cloned','Subcultured'], ['cloned','subcultured'], ['cloning','subculturing'],
+    ['Approve','Sterilize'], ['approve','sterilize'],
+    ['Approved','Sterilized'], ['approved','sterilized'], ['approves','sterilizes'],
+    /* the NOUN only. af-theme.js carries inoculation<->deployment and nothing else, and the
+       verb is the reason: "deploy" turns up inside strings that are half command line --
+       "gcp/dns/deploy" on the demo roster is one, and `gcloud run deploy --source` is the
+       documented way this service ships. Rewriting either would be a lexicon rewriting an
+       instruction. Verified against the roster strings in this file before dropping it. */
+    ['Deployment','Inoculation'], ['deployment','inoculation'],
+    ['Workstation','Fruiting Chamber'], ['workstation','fruiting chamber'],
+    ['Build','Grow'], ['build','grow'], ['Building','Growing'], ['building','growing'],
+    ['built','grown'], ['builds','grows'],
+    ['Shipped','Harvested'], ['shipped','harvested'],
+    ['Result','Harvest'], ['result','harvest'], ['Results','Harvests'], ['results','harvests'],
+    ['Queued','Seeded'], ['queued','seeded'],
+    ['Execution','Colonisation'], ['execution','colonisation'],
+    ['Compromise','Contamination'], ['compromise','contamination'], ['compromised','contaminated'],
+    [/🔌/g,'🍄']   /* plug -> mushroom, the inverse of af-theme.js */
+  ]);
+
+  /* mushroom -> professional. This is af-theme.js's own DICT, cut down to the words that
+     actually occur in this console. Two of its pairs are deliberately NOT mirrored back into
+     PRO2MUSH above:
+       * culture -> setup. Inverting it gives "Setup" -> "Culture", which produces sentences
+         like "Culture the VM". A lexicon that makes the UI unreadable is not a lexicon.
+       * pure culture -> verified identity. Same direction only, for the same reason.
+     AND ONE WORD IS NOT MAPPED AT ALL: Autoclave. Its professional counterpart was the gate
+     console, and /gate is deleted (commits cac7ce92, 11e060d8) -- there is no professional word
+     left for it to become. So the two strings that still say "Autoclave" say it in both modes.
+     They are stale for a reason that has nothing to do with the lexicon and fixing them is a
+     copy change in the dead #rdpPanel dashboard and in the Session pastes block, neither of
+     which this change owns. */
+  var MUSH2PRO = D([
+    /* [BRAND-FULLNAME-V75] FIRST, because this list is longest-match-first and the bare
+       'Agentic Fungi' -> 'Paracoding Agentic Harness' entry below would otherwise fire inside
+       this string and produce 'Paracoding.AI - Paracoding Agentic Harness'. The authored title
+       is now 'Paracoding.AI - Agentic Harness'; the PRO2MUSH 'Agentic Harness' rule already
+       turns that into 'Paracoding.AI - Agentic Fungi' with no new forward entry needed, so only
+       the reverse direction had to learn the longer form. The .sub line above the title has been
+       display:none since the slim-chrome change, which is why the product name was missing from
+       the header at all -- it is carried in the title now rather than un-hidden, so the slim
+       header keeps its single line. */
+    ['Paracoding.AI - Agentic Fungi','Paracoding.AI - Agentic Harness'],
+    ['Strain Collection','Paracoding Fleet'],
+    ['Fruiting Chamber','Workstation'], ['fruiting chamber','cloud workstation'],
+    ['Agentic Fungi','Paracoding Agentic Harness'],
+    ['Flow Hood','Harness'], ['flow hood','harness'],
+    ['Pure culture','Verified identity'], ['pure culture','verified identity'],
+    ['Strains','Agents'], ['Strain','Agent'], ['strains','agents'], ['strain','agent'],
+    ['Substrate','Runtime'], ['substrate','runtime'],
+    ['Collection','Fleet'], ['collection','fleet'],
+    ['Mycelium','Memory'], ['mycelium','memory'], ['mycelial','networked'],
+    ['Subculture','Clone'], ['subculture','clone'],
+    ['Subcultured','Cloned'], ['subcultured','cloned'], ['subculturing','cloning'],
+    ['Sterilize','Approve'], ['sterilize','approve'],
+    ['Sterilized','Approved'], ['sterilized','approved'], ['unsterilized','unapproved'],
+    ['Inoculation','Deployment'], ['inoculation','deployment'],
+    ['Grow','Build'], ['grow','build'], ['Growing','Building'], ['growing','building'],
+    ['grown','built'], ['grows','runs'], ['growth','progress'],
+    ['Harvested','Shipped'], ['harvested','shipped'],
+    ['Harvest','Result'], ['harvest','result'],
+    ['Seeded','Queued'], ['seeded','queued'],
+    ['Cultivation','Operation'], ['cultivation','operation'],
+    ['Culture','Setup'], ['culture','setup'],
+    ['Contamination','Compromise'], ['contamination','compromise'], ['contaminated','compromised'],
+    ['Colonisation','Execution'], ['colonisation','execution'],
+    ['Colonization','Execution'], ['colonization','execution'],
+    [/🍄/g,'🔌']   /* mushroom -> plug, exactly as af-theme.js does it */
+  ]);
+
+  /* ---- article repair, lifted from af-theme.js ------------------------------------------
+     Swapping the noun leaves the article agreeing with the word that is gone: "a strain" has to
+     become "an agent", and "an agent" has to become "a strain". Repairing the article FROM THE
+     WORD THAT ENDED UP THERE makes the whole class of error impossible in both directions
+     instead of enumerating the pairs somebody happened to notice. Acronyms are left alone: the
+     dictionaries never emit one, and guessing whether "RAG" is read "rag" or "R-A-G" could only
+     add mistakes. */
+  var AN_SOUND = /^(hour|honest|honou?r|heir)/i;
+  var A_SOUND  = /^(uni(?!n)|use|usu|usa|util|ubiq|euro|one|once)/i;
+  var LETTER_AN = /^[fhlmnrsx]-/i;
+  function wantsAn(w){
+    if(/^[A-Z0-9]{2,}$/.test(w)) return null;
+    if(LETTER_AN.test(w)) return true;
+    if(AN_SOUND.test(w)) return true;
+    if(A_SOUND.test(w)) return false;
+    return /^[aeiou]/i.test(w);
+  }
+  function artSwap(m,art,gap,w){
+    var an=wantsAn(w);
+    if(an===null || an===(art.length===2)) return m;
+    var up=art.charAt(0)==='A';
+    return (an?(up?'An':'an'):(up?'A':'a'))+gap+w;
+  }
+  function fixArticles(t){
+    t=t.replace(/(?<![\w-])(an?)(\s+)([A-Za-z][A-Za-z0-9'’-]*)/g,artSwap);
+    t=t.replace(/(^|[.!?:;—–("“'‘]\s*)(An?)(\s+)([A-Za-z][A-Za-z0-9'’-]*)/g,
+      function(m,pre,art,gap,w){ return pre+artSwap(art+gap+w,art,gap,w); });
+    return t;
+  }
+
+  function tr(s,mush){
+    var d = mush ? PRO2MUSH : MUSH2PRO;
+    for(var i=0;i<d.length;i++) s=s.replace(d[i][0],d[i][1]);
+    return fixArticles(s);
+  }
+
+  /* ================= WHAT THE LEXICON IS NOT ALLOWED TO TOUCH ====================
+     .msg is the whole point of this list. Those bubbles carry the operator's own typing and the
+     model's own answer, and rewriting either one would be forgery -- the transcript has to be
+     what was actually said. #pcps-text and #pcps-roles carry a live session key and raw role
+     ids. code/pre and .mono are verbatim by definition. #pcmushrail is the toggle itself, which
+     af-theme.js excludes for the same reason: a control that renames itself is unusable. */
+  var SKIP_TAG={SCRIPT:1,STYLE:1,NOSCRIPT:1,TEXTAREA:1,INPUT:1,CODE:1,PRE:1,OPTION:1};
+  var SKIP_SEL='#pcmushrail,.msg,.mono,#pcps-text,#pcps-roles,#termout,.termout,.termin';
+  /* `self` is false for the attribute pass, and that distinction is load-bearing. A TEXTAREA's
+     TEXT is its live value -- what the operator has typed -- and must never be rewritten, which
+     is why TEXTAREA is in SKIP_TAG. Its PLACEHOLDER is chrome ("Message the selected agent…")
+     and is one of the most visible strings in the lexicon. Blocking on the element's own tag
+     name got both, and the placeholder stayed in professional English while the label above it
+     said Strain Collection. Measured in a jsdom render before this fix, which is how it was
+     found. So: the attribute pass skips the element's ANCESTORS by tag, not itself, and both
+     passes still honour SKIP_SEL -- so #pcps-text's placeholder and the terminal input inside
+     .termin are still untouched. */
+  function blocked(el,self){
+    if(!el || el===document.body) return false;
+    try{ if(el.closest && el.closest(SKIP_SEL)) return true; }catch(e){}
+    var p=(self===false)?el.parentNode:el;
+    while(p && p!==document.body){
+      if(SKIP_TAG[String(p.nodeName).toUpperCase()]) return true;
+      p=p.parentNode;
+    }
+    return false;
+  }
+
+  /* SNAP holds {src,out} per node: src is the authored text, out is what we last wrote. If a
+     node's current value is not what we last wrote, the APPLICATION changed it, so its new value
+     becomes the authored text. Without that check, an element whose title the app repaints --
+     #cVia's tooltip is repainted by updateVia() on every provider flip -- would get its live
+     value clobbered by a stale translation. */
+  var SNAP=new WeakMap(), ASNAP=new WeakMap();
+  var ATTRS=['title','placeholder','aria-label'];
+  var TITLE0=document.title;
+
+  function put(node,cur,mush){
+    var rec=SNAP.get(node);
+    if(!rec || cur!==rec.out){ rec={src:cur,out:cur}; SNAP.set(node,rec); }
+    var out=tr(rec.src,mush);
+    if(node.nodeValue!==out) node.nodeValue=out;
+    rec.out=out;
+  }
+
+  function putAttr(el,a,mush){
+    var cur=el.getAttribute(a); if(cur==null) return;
+    var box=ASNAP.get(el); if(!box){ box={}; ASNAP.set(el,box); }
+    var rec=box[a];
+    if(!rec || cur!==rec.out){ rec=box[a]={src:cur,out:cur}; }
+    var out=tr(rec.src,mush);
+    if(cur!==out) el.setAttribute(a,out);
+    rec.out=out;
+  }
+
+  var OBS=null, pending=false;
+  function apply(){
+    var mush=isOn();
+    if(OBS) OBS.disconnect();
+    try{
+      var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,{
+        acceptNode:function(n){
+          if(!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+          return blocked(n.parentNode) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        }});
+      var n; while((n=w.nextNode())) put(n,n.nodeValue,mush);
+      /* attributes are NOT text nodes, so the TreeWalker never sees them. af-theme.js does not
+         translate attributes at all; here the composer placeholder and most of the tooltips are
+         where the vocabulary actually lives, so leaving them out would have left half the
+         lexicon in professional English with the labels in mushroom. */
+      var els=document.querySelectorAll('[title],[placeholder],[aria-label]');
+      for(var i=0;i<els.length;i++){
+        if(blocked(els[i],false)) continue;
+        for(var k=0;k<ATTRS.length;k++) putAttr(els[i],ATTRS[k],mush);
+      }
+      var t=tr(TITLE0,mush); if(document.title!==t) document.title=t;
+    }catch(e){}
+    if(OBS) OBS.observe(document.body,{childList:true,subtree:true});
+  }
+
+  /* ================= the floating toggle (the demo's #afRail pill) ================= */
+  function lg(k,d){ try{ var v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }
+  function st(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+  function isOn(){ return lg('pc_mush','1')==='1'; }
+
+  var rail=null, pill=null;
+  /* [UI-NO-PILL-V55] The floating pill is NOT built (operator ruling 2026-08-15: annoying;
+     the Settings toggle is the one control). Everything else in this block stays -- set(),
+     sync(), the palette swap and the lexicon translation are what the toggle CALLS, and
+     deleting them would take mushroom mode with it. sync() and measure() already guard on
+     `pill`/`rail` being absent, so leaving them null is the whole change. */
+  function build(){ return; }
+
+  /* the demo's two labels, verbatim: the pill always names what a click would DO. */
+  function label(on){
+    return on ? '<span>🍄</span> Not a mushroom fan?'
+              : '<span>🍄</span> Mushroom mode';
+  }
+
+  function measure(){
+    var h=document.querySelector('.hdr');
+    if(h) document.documentElement.style.setProperty('--pchdrh',
+      Math.round(h.getBoundingClientRect().bottom)+'px');
+    if(rail) document.documentElement.style.setProperty('--pcpillw',
+      Math.ceil(rail.getBoundingClientRect().width)+'px');
+  }
+
+  /* set() owns the palette swap too, because the three older switches already coupled them and
+     an operator who flips the pill and then opens LAYERS must not find two controls disagreeing.
+     purple is the mushroom palette, green the professional one -- unchanged from what those
+     switches have always done. */
+  function set(v){
+    st('pc_mush', v?'1':'0');
+    var t=lg('pc_theme','purple');
+    if(v && t==='green') t='purple'; else if(!v && t==='purple') t='green';
+    st('pc_theme',t);
+    sync();
+  }
+
+  function sync(){
+    var v=isOn();
+    document.documentElement.setAttribute('data-theme',lg('pc_theme','purple'));
+    document.body.classList.toggle('nomush',!v);
+    if(pill && pill.innerHTML!==label(v)) pill.innerHTML=label(v);
+    /* repaint the other three controls for this one setting. Each of these selectors is used by
+       exactly one row -- the Mushroom row -- in #pcThemePanel, the dashboard panel and
+       LAYERS > Settings respectively. */
+    ['.pcsw','.dpsw','#pcl .ssw'].forEach(function(s){
+      document.querySelectorAll(s).forEach(function(b){ b.classList.toggle('on',v); }); });
+    apply();
+    measure();
+  }
+
+  window.pcLex={ apply:apply, translate:tr, dicts:{ toMushroom:PRO2MUSH, toProfessional:MUSH2PRO } };
+  window.pcMush={ get:isOn, set:set, sync:sync };
+
+  function boot(){
+    build();
+    OBS=new MutationObserver(function(){
+      if(pending) return; pending=true;
+      setTimeout(function(){ pending=false; apply(); },80);
+    });
+    sync();
+    addEventListener('resize',measure);
+    addEventListener('load',measure);
+    if(window.ResizeObserver){
+      var h=document.querySelector('.hdr');
+      if(h) new ResizeObserver(measure).observe(h);
+    }
+    /* pc_mush is per-origin, so a second tab is a second view of the same setting. */
+    addEventListener('storage',function(e){ if(e && e.key==='pc_mush') sync(); });
+  }
+  if(document.readyState!=='loading') boot(); else document.addEventListener('DOMContentLoaded',boot);
+})();
+</script>
+<!-- ===== end [HARNESSUI-DEMOLOOK-V1] ===== -->
+
 </body>
 </html>
 
-<!-- SEC-HTML-DEPERS-V1 no operator identity, no advertising, no external hosts -->
+<!-- SEC-HTML-DEPERS-V1 + SEC-BRANDMARK-V1: no operator identity, no advertising.
+     ONE external host remains and it is DELIBERATE: the operator's own brand mark.
+     It is his logo, on his host, and it is what this console is supposed to show.
+     The SHIPPED tree still has no external host: gen.py rewrites the URL to
+     /assets/logo.png at emit time under the "operator brand mark" entry, which is
+     declared "fires" and so refuses the cut if the literal ever leaves this file.
+     An earlier agent read this marker, found the logo dangling, and AUTHORED a
+     replacement SVG that was off brand. Do not do that. If the mark is missing,
+     the host or the file is the problem, not this tag. -->

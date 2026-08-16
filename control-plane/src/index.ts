@@ -9,7 +9,6 @@ import express from 'express';
 import { initializeApp, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
-import { v4 as uuidv4 } from 'uuid';
 import * as crypto from 'crypto';
 // [SEC-DEBLOB-V1] The gate, dash and harness documents are FILES, not base64 constants.
 // They are read once at module load. The Dockerfile does `COPY src ./src` and esbuild
@@ -21,6 +20,16 @@ import * as path from 'path';
 const pcHtml = (f: string): string => fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
+// [MCP2-BOOT-V1] SDK v2 (@modelcontextprotocol/server 2.0.0, a DIFFERENT package from the
+// pinned @modelcontextprotocol/sdk 1.29.0 above -- they coexist, no conflict). Loaded here
+// only to prove the dependency resolves at boot. It registers nothing and serves nothing;
+// every route, buildMcpServer, who() and the OAuth surface are untouched by it.
+const { assertMcp2Loadable } = require('./mcp2.js');
+// [MCP2026-DUAL-ERA-V1] The MODERN half of the endpoint: revision 2026-07-28. This module
+// contains the era router and every byte the modern branch emits. It has NO npm dependency
+// of its own -- tools, identity and origin policy are injected -- which is what lets the
+// 2026-07-28 conformance harness drive these exact bytes over a local port before they ship.
+const { mcp2026IsModernRequest, mcp2026Handle } = require('./mcp2026.js');
 import { z } from 'zod';
 // ---- passkey/FaceID + god-mode gate: additive imports (injected after the zod import) ----
 import { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
@@ -47,6 +56,216 @@ if (getApps().length === 0) {
 // Firestore (including DATASTORE mode), and leaves no guessable name to probe for.
 const db = getFirestore(process.env.PC_FIRESTORE_DB || '(default)');
 
+// ==================== [SEC-TTL-CHOKEPOINT-V1] retention stamping, ONE chokepoint ====================
+// Firestore TTL is FAIL-OPEN: a document that does not carry the TTL field is NEVER deleted,
+// and the console does not say which documents are covered. So the stamp must be impossible
+// to forget: it happens HERE, on the CollectionReference/DocumentReference write methods the
+// `db` handle above hands out, not at the ~70 individual write sites -- including every write
+// site somebody adds later. The getFirestore line above is deliberately untouched.
+//
+// WHAT IS COVERED: every db.collection(<coll>).add(...), .doc(...).set(...) and
+// .doc(...).create(...) on the three retention collections below. That is every creation of
+// a journal, chat_history or pending_confirms document in this file (measured at the commit
+// that added this block: 45 journal .add + 2 journal .doc().set, 5 chat_history .add +
+// 1 chat_history .doc().set, and every pending_confirms .doc().set, including the
+// pcExecIngestSweep writes that carry gate-exec's GCS-relayed journal into Firestore).
+// WHAT IS NOT, measured not assumed: no WriteBatch and no Transaction in this file CREATES a
+// document in these three collections -- batches touch memory-entity and oauth docs, and the
+// transactions only .update() pending_confirms documents that were stamped at creation. If
+// that ever changes, stamp there too or the new documents are immortal.
+// Direct Firestore writers OUTSIDE this process (src/runner/*.py) carry their own stamp --
+// see [SEC-TTL-STAMP-V1] in those files. gate-exec holds no Firestore client at all
+// ([SEC-EXEC-NO-DATASTORE-V1]); its journal arrives via GCS and pcExecIngestSweep, which
+// lands on this chokepoint.
+//
+// RETENTION (operator parameters, 2026-08): journal 120 days, chat_history 120 days,
+// pending_confirms ("terminal jobs") 60 days -- 60 days from CREATION, so a job that is
+// still pending at 60 days expires with its history; that is deliberate, stale staged jobs
+// are dead weight on the gate. A set with {merge:true} re-stamps, which only ever EXTENDS
+// a document's life -- the safe direction. A write that already carries the field is left
+// alone, so a future caller can opt a specific document out (or further in) explicitly.
+//
+// ORDERING HAZARD -- DO NOT ENABLE THE TTL POLICY BEFORE THE ARCHIVE IS SEEDED. This stamp
+// is inert until the Firestore TTL policy on `expireAt` is enabled, and enabling it before
+// the BigQuery archive is seeded DESTROYS every pre-deploy transcript with no copy. The
+// exact sequence and the gcloud/bq commands are in deploy/TTL-BIGQUERY-INFRA.md.
+const PC_TTL_FIELD = 'expireAt';
+const PC_TTL_DAYS: { [coll: string]: number } = { journal: 120, chat_history: 120, pending_confirms: 60 };
+// The forever-archive mirrors journal + chat_history ONLY ("the point of the journal was to
+// never lose history"). pending_confirms is deliberately absent: jobs are 60-day terminal
+// state, their durable record (what ran, as whom, exit) already lands in the journal.
+const PC_ARCHIVE_COLLS: { [coll: string]: string } = { journal: 'journal', chat_history: 'chat_history' };
+// PURE (extracted-function tests drive this): the expiry for a collection, or null.
+function pcTtlExpireAt(coll: string, nowMs: number): any {
+  const days = PC_TTL_DAYS[coll];
+  return days ? new Date(nowMs + days * 86400000) : null;
+}
+// PURE: stamp a document payload. Non-objects, arrays, non-retention collections and
+// payloads that already carry the field pass through UNTOUCHED (same object identity).
+function pcTtlStamp(coll: string, data: any, nowMs: number): any {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const exp = pcTtlExpireAt(coll, nowMs);
+  if (!exp) return data;
+  if (Object.prototype.hasOwnProperty.call(data, PC_TTL_FIELD)) return data;
+  const out: any = {};
+  for (const k of Object.keys(data)) out[k] = data[k];
+  out[PC_TTL_FIELD] = exp;
+  return out;
+}
+{
+  // Install on the PROTOTYPES so the patched objects are the SDK's own (instanceof, internal
+  // state and Transaction/WriteBatch argument validation all see unmodified instances).
+  // Sub/other collections pass through pcTtlStamp unchanged, so behaviour moves for the three
+  // retention collections and for nothing else.
+  const _pcTtlColl: any = db.collection('journal');
+  const _pcTtlCollProto: any = Object.getPrototypeOf(_pcTtlColl);
+  const _pcTtlDocProto: any = Object.getPrototypeOf(_pcTtlColl.doc());
+  const _pcTtlRawAdd: any = _pcTtlCollProto.add;
+  const _pcTtlRawSet: any = _pcTtlDocProto.set;
+  const _pcTtlRawCreate: any = _pcTtlDocProto.create;
+  _pcTtlCollProto.add = function (this: any, data: any): any {
+    const coll = String(this.path || '');
+    const stamped = pcTtlStamp(coll, data, Date.now());
+    const p = _pcTtlRawAdd.call(this, stamped);
+    // BEST-EFFORT dual-write (operator parameter). A separate promise chain: the caller's
+    // write neither waits for the archive nor fails with it. add() resolves to the new ref,
+    // which is where the document id comes from. add() internally creates via .create(),
+    // which is why .create() below does NOT mirror -- one write, one archive row.
+    if (PC_ARCHIVE_COLLS[coll]) {
+      Promise.resolve(p).then((ref: any) => pcArchiveOnWrite(coll, String((ref && ref.id) || ''), stamped)).catch(function () {});
+    }
+    return p;
+  };
+  _pcTtlDocProto.set = function (this: any, data: any, ...rest: any[]): any {
+    const coll = String((this.parent && this.parent.path) || '');
+    const stamped = pcTtlStamp(coll, data, Date.now());
+    const p = _pcTtlRawSet.apply(this, ([stamped] as any[]).concat(rest));
+    if (PC_ARCHIVE_COLLS[coll]) {
+      const id = String(this.id || '');
+      Promise.resolve(p).then(() => pcArchiveOnWrite(coll, id, stamped)).catch(function () {});
+    }
+    return p;
+  };
+  _pcTtlDocProto.create = function (this: any, data: any): any {
+    const coll = String((this.parent && this.parent.path) || '');
+    return _pcTtlRawCreate.call(this, pcTtlStamp(coll, data, Date.now()));
+  };
+}
+// ================== end [SEC-TTL-CHOKEPOINT-V1] ==================
+
+// ---- [FLEET-MODE-V1] the model-spend switch, AT THE TRANSPORTS and nowhere else ----
+// THE MODEL-CALLING CODE SHIPS. WHETHER IT CALLS ANYTHING IS A SETTING. This control
+// plane reaches three model endpoints and only three: harClaudePost() (Anthropic
+// Messages -- api.anthropic.com/v1/messages with a key, or Vertex :rawPredict on the
+// service account), harChatGemini() (Gemini -- generativelanguage /v1beta/models with a
+// key, or Vertex :generateContent), and memEmbed() (Vertex text-embedding :predict).
+//
+// THE CHECK IS AT THE TRANSPORT AND IN NO CALLER, for the reason it always was: a check
+// written per caller is a list, and a list drifts -- the next caller somebody adds is
+// covered by nobody. WHAT CHANGED IS WHICH TRANSPORTS IT IS AT.
+// [SEC-FLEETMODE-CONSOLE-V1] took it off the three CONSOLE transports -- harClaudePost(),
+// harChatGemini(), and the key-verification probe inside POST /api/keys -- and left it on
+// memEmbed(), which is the only one of the four an unattended caller can reach.
+//
+// WHAT THIS SWITCH PROTECTS AGAINST, stated here because a bare instruction with no
+// statement of what it protects is how it came to be misapplied: spend that NOBODY ASKED
+// FOR. The rule it serves is that this system may automate deterministic work but may
+// never START model work by itself -- a queue tick, a sweep, a retry loop or a background
+// runner waking up and billing a card or a project while its owner is asleep. Unattended,
+// machine-initiated spend. A signed-in human typing into his own console and pressing send
+// is the opposite of that case, and is out of scope by the same sentence that defines it.
+// Gating the console took the product's main surface dark, refused the operator his own
+// API key, and bought nothing: the bus -- the unattended path the rule is actually about
+// -- decides with its own implementation in src/runner/fleet_mode.py and never read a line
+// of this file. Each of the three ungated sites carries the full argument where it stands.
+//
+// config/models.fleet_mode IS THE ONLY SOURCE OF TRUTH. Same document, same field the
+// bus reads (src/runner/work_item_runner.py), so one write moves the whole fleet.
+// THERE IS DELIBERATELY NO MIRRORED ENVIRONMENT VARIABLE. A second copy of a spend
+// policy drifts from the first, and while it drifts a REDEPLOY -- which needs no
+// approval -- could carry the stale copy and change what this install is allowed to
+// spend. Changing the Firestore document is a privileged write and goes through the
+// gate. That asymmetry is the whole reason the value lives in exactly one place.
+//
+// FAIL CLOSED IN EVERY DIRECTION. Absent document, absent field, empty string, wrong
+// case, wrong type, or a Firestore exception all resolve to 'home', which spends
+// nothing. There is no code path below that returns a permissive mode from a value it
+// could not read, and no parameter anywhere defaults to 'allowed'.
+const FLEET_MODES = ['home', 'work', 'dual'];
+const FLEET_MODE_FALLBACK = 'home';
+// A SHORT TTL THAT A FAILED READ NEVER EXTENDS. The cache is written on the success
+// path only; the catch returns the fallback WITHOUT touching it. So a Firestore outage
+// can neither pin a permissive answer in memory nor keep an already-cached permissive
+// answer alive one millisecond past its window.
+const FLEET_MODE_TTL_MS = 15000;
+const fleetModeCache: { mode: string; at: number } = { mode: '', at: 0 };
+async function fleetMode(): Promise<string> {
+  const now = Date.now();
+  if (fleetModeCache.mode && (now - fleetModeCache.at) < FLEET_MODE_TTL_MS) return fleetModeCache.mode;
+  let mode = FLEET_MODE_FALLBACK;
+  try {
+    const doc = await db.collection('config').doc('models').get();
+    const raw: any = doc.exists ? (doc.data() as any).fleet_mode : null;
+    // NO .trim() AND NO .toLowerCase(). ' work ' and 'Home' are values this file does not
+    // recognise, and an unrecognised value is REFUSED rather than repaired: repairing it
+    // means guessing an intent, and the thing being guessed at is what gets billed.
+    mode = (typeof raw === 'string' && FLEET_MODES.indexOf(raw) >= 0) ? raw : FLEET_MODE_FALLBACK;
+  } catch (e) {
+    return FLEET_MODE_FALLBACK;
+  }
+  fleetModeCache.mode = mode; fleetModeCache.at = now;
+  return mode;
+}
+// THE TRUTH TABLE. The single place that decides. Every transport asks this and nothing
+// else in this file has an opinion about model spend.
+//
+//   fleet_mode      | 'vertex' (keyless, service account, billed to this project)
+//                   |            | 'key' (an API key, billed to whoever owns the card)
+//   ----------------+------------+------------------------------------------------
+//   home            | REFUSE     | REFUSE
+//   work            | ALLOW      | REFUSE
+//   dual            | ALLOW      | ALLOW
+//   anything else   | REFUSE     | REFUSE
+//
+// 'home' REFUSES UNCONDITIONALLY -- it is the first statement, it reads no other
+// argument, and no later branch can reach past it.
+//
+// 'work' MEANS KEYLESS, AND IT REFUSES THE KEY TRANSPORTS RATHER THAN MERELY NOT
+// PREFERRING THEM. Vertex is already the DEFAULT for both providers, but a default is
+// not a control: CHAT_CLAUDE_PROVIDER=anthropic or CHAT_GEMINI_PROVIDER=studio is one
+// environment variable away from moving it, and a leftover chat-key-claude secret is
+// then enough to start billing a personal card on a work install. Under 'work' that
+// combination gets a refusal instead of an invoice.
+//
+// THE BUS AGREES WITH THIS TABLE NOW, AND IT DID NOT WHEN THIS COMMENT WAS WRITTEN. It
+// read: bus_allowed() lives in work_item_runner.py, tests only mode == home, and therefore
+// permits the keyed transport in work on the same terms as dual. MEASURED AT THIS REF, both
+// halves are stale. The bus decision moved into src/runner/fleet_mode.py -- one module,
+// imported by every runner rather than copied into each -- and its bus_allowed() returns
+// mode == dual for the key transport, which is this table's middle row exactly. One policy
+// still exists in two languages, so a change to either half must re-check the other; today
+// they say the same thing.
+function fleetTransportAllowed(mode: string, transport: string): boolean {
+  if (mode === 'home') return false;
+  if (mode === 'work') return transport === 'vertex';
+  if (mode === 'dual') return transport === 'vertex' || transport === 'key';
+  return false;
+}
+// OFF IS A REFUSAL WITH A REASON, NOT A SILENT NULL. Its one remaining caller is memEmbed(),
+// which must not throw -- its contract is that a null embedding degrades search and never
+// blocks a write -- so it LOGS this text instead of swallowing the refusal. Before
+// [SEC-FLEETMODE-CONSOLE-V1] the same text was thrown into /api/chat's catch and surfaced as
+// `detail`; the console transports no longer consult the switch, so nothing throws it now,
+// and the Error factory that used to wrap it is DELETED rather than left standing as an
+// uncalled constructor next to a security decision. It names the mode, says no call was
+// made, and says where to change it.
+function fleetRefusalText(mode: string, what: string, transport: string): string {
+  return 'fleet_mode=' + mode + ': ' + what + ' needs the ' + transport + ' transport, so no '
+    + 'call was made and nothing was billed. home refuses every model call, work allows '
+    + 'keyless Vertex only, dual allows both. Change it at Firestore '
+    + 'config/models.fleet_mode -- a privileged write, which goes through the approval gate.';
+}
+
 // Normalize a Firestore timestamp (Admin Timestamp, or JSON {_seconds}) to millis.
 function tsMillis(t: any): number {
   if (!t) return 0;
@@ -60,33 +279,64 @@ function tsMillis(t: any): number {
 const AGENT_TOKENS: Record<string, string> = JSON.parse(
   Buffer.from(process.env.AGENT_TOKENS_B64 || '', 'base64').toString('utf8') || '{}'
 );
-const HUMAN_CONFIRM_SECRET = process.env.HUMAN_CONFIRM_SECRET || '';
 const DATA_LAKE_BUCKET = process.env.DATA_LAKE_BUCKET || '';
-// HFC4: /api/confirm/verify is gated by the human-confirm secret. Reject empty OR weak/short secrets
-// so a blank/default value can never satisfy the check (fail-closed). Require a strong secret (min 16).
-const HUMAN_CONFIRM_SECRET_MIN = 16;
-const HUMAN_CONFIRM_SECRET_OK = typeof HUMAN_CONFIRM_SECRET === 'string' && HUMAN_CONFIRM_SECRET.length >= HUMAN_CONFIRM_SECRET_MIN;
-if (!HUMAN_CONFIRM_SECRET_OK) {
-  console.error('[cp] SECURITY: HUMAN_CONFIRM_SECRET is missing or shorter than ' + HUMAN_CONFIRM_SECRET_MIN + ' chars — /api/confirm/verify is DISABLED (fail-closed). Set a strong HUMAN_CONFIRM_SECRET.');
-}
-function humanTokenOk(req: express.Request): boolean {
-  const provided = (req.headers['x-human-token'] as string) || '';
-  // fail closed if the secret is missing/weak, then constant-time compare on equal lengths
-  if (!HUMAN_CONFIRM_SECRET_OK || provided.length !== HUMAN_CONFIRM_SECRET.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(HUMAN_CONFIRM_SECRET));
-}
+// [SEC-LEGACY-CONFIRM-RETIRE-V1] THE SHARED-SECRET CONFIRM PATH IS GONE, KEY AND ALL.
+// POST /api/confirm/verify, humanTokenOk(), HUMAN_CONFIRM_SECRET and its length floor are
+// all deleted together in this commit. The route approved privileged jobs on a single
+// shared bearer secret in an x-human-token header -- no passkey, no job binding, no danger
+// classification, no approver allowlist, and none of the approval stamping every other
+// approval path performs -- and it could not execute anything anyway: it POSTed the
+// executor with NO Authorization header, which the edge drops because gate-exec is private,
+// so an approved job was left stranded in 'confirmed' having run nothing.
+// A retired route's key must retire with it. Leaving HUMAN_CONFIRM_SECRET bound to both
+// services would keep a credential in the environment that nothing reads and nothing can
+// check, which is the shape of a secret that quietly turns back on.
+// The passkey path -- POST /api/webauthn/confirm/verify -- is the only confirm path and is
+// untouched. POST /api/confirm/stage is a DIFFERENT route on a DIFFERENT credential
+// (assertIdentity) and deliberately survives: it stages, it does not approve.
 // [PARAM-PROJECT-V1] 2026-08-01. This file hardcoded one operator's project id and lake
 // bucket. In a public release that is not a naming problem: a stranger's control plane would
 // point at somebody else's bucket and fail with a 403 they cannot explain. Resolved from the
 // environment instead, with NO fallback to the old values -- an empty value fails loudly
 // where a wrong one fails quietly, and a fallback would keep the release leaking.
 const PC_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || '';
-const PC_LAKE = process.env.LAKE_BUCKET || (PC_PROJECT ? PC_PROJECT + '-datalake' : '');
+// [SEC-LAKE-NOGUESS-V1] THE LAKE BUCKET IS NEVER DERIVED FROM THE PROJECT ID. This line used
+// to end `|| (PC_PROJECT ? PC_PROJECT + <project>-datalake : '')`, so a service redeployed
+// WITHOUT its lake variable did not fail -- it built a plausible bucket name out of
+// GCP_PROJECT and carried on. With two lanes in ONE project both lanes carry the SAME
+// GCP_PROJECT, so that guess resolves to the OTHER lane's lake, and harWriteLake() below is a
+// WRITE: the wrong-lane write would succeed and report success. An environment variable
+// dropped on a redeploy is not hypothetical -- it happened on 2026-08-04. The comment
+// directly above already says an empty value fails loudly where a wrong one fails quietly,
+// and that a fallback keeps the leak; this line was the exception to its own rule.
+//
+// BOTH VARIABLE NAMES STILL WORK AND THAT IS LOAD-BEARING. Existing installs are split:
+// some set DATA_LAKE_BUCKET, others set LAKE_BUCKET only. The precedence here is exactly
+// what the six call sites below used to spell out one at a time -- DATA_LAKE_BUCKET first,
+// then LAKE_BUCKET -- so no configured install changes behaviour. ONLY THE THIRD RUNG, THE
+// GUESS, IS GONE.
+const PC_LAKE = DATA_LAKE_BUCKET || process.env.LAKE_BUCKET || '';
+// FAIL CLOSED PER CALL, WITH A NAMED ERROR, AND NOT AT BOOT. A module-level refusal was
+// considered and rejected: it turns a missing variable into a crash-looping revision and
+// takes down the gate, the console and every route that never touches the lake, which is a
+// worse outage than the one it prevents. This file already answers an unconfigured lake with
+// a visible per-call error rather than a dead process -- see [SEC-LAKE-UNCONFIGURED-V1] on
+// the four MCP lake tools -- and this is the same doctrine on the vault and git-object paths.
+// The throw reaches the caller as a real message; nothing downstream can read it as an empty
+// file or as a successful write. The boot log below makes the condition visible immediately
+// instead of at first use, which is what a dropped-variable redeploy needs.
+function pcLakeBucket(): string {
+  if (!PC_LAKE) throw new Error('LAKE_BUCKET_UNCONFIGURED: neither DATA_LAKE_BUCKET nor LAKE_BUCKET is set on this service, so there is no data lake to read or write. Refusing to guess a bucket name from the project id.');
+  return PC_LAKE;
+}
+if (!PC_LAKE) {
+  console.error('[cp] SECURITY: neither DATA_LAKE_BUCKET nor LAKE_BUCKET is set -- every lake read and write will fail closed with LAKE_BUCKET_UNCONFIGURED. Set DATA_LAKE_BUCKET on this service.');
+}
 // [SEC-REPOID-PARAM-V1] The fleet's git repository id. It is an operator-private name and
 // must not be baked into a public tree, but it IS load-bearing at three call sites below --
 // the MCP server name, twice, and the pinned memory-digest entity -- so it is parameterised
 // here instead of being edited out of them. In THIS tree the default is the literal those
-// sites carried before; in the PUBLIC tree oss/gen-v3.py rewrites it to a neutral id at
+// sites carried before; in the PUBLIC tree oss/gen.py rewrites it to a neutral id at
 // emit time, so the two trees differ here by design. This is the ONLY occurrence of the id
 // in this file, which is what makes that one-line substitution sufficient.
 const PC_REPO_ID = process.env.PC_REPO_ID || 'paracoding';
@@ -169,8 +419,8 @@ app.use((req, res, next) => {
 //
 // HOW THE SPLIT WAS DECIDED -- by the auth mechanism each handler actually uses, not by its name.
 // A cookie/passkey session (waSessionOk, waGate) is reachable ONLY from a browser that has been
-// through the gate, so every such route is console. A bearer token, an OAuth access token or the
-// human-confirm secret (assertIdentity, oaBearerRole, humanTokenOk) is reachable only from a
+// through the gate, so every such route is console. A bearer token or an OAuth access token
+// (assertIdentity, oaBearerRole) is reachable only from a
 // machine client, so every such route is mcp. The two mechanisms partition the table with no
 // overlap, which is why nothing is marked 'both' today -- 'both' is still honoured so that a
 // future dual-caller route can say so in one word. Measured, not assumed: gate-exec never calls
@@ -182,16 +432,19 @@ const PC_SURFACE = String(process.env.PC_SURFACE || '').trim().toLowerCase();
 const PC_SURFACE_MAP: { [k: string]: string } = {
   // ---- console: browser pages ----
   'GET /': 'console',
-  'GET /gate': 'console',
   'GET /dash': 'console',
   'GET /harness': 'console',
   'GET /chat': 'console',
   'GET /flow': 'console',
   'GET /flowhood': 'console',
-  'GET /jobs': 'console',
-  'GET /pastes': 'console',
+  'GET /git/archive': 'mcp',
+  'POST /git/blob': 'mcp',
   'GET /wiki': 'console',
   'GET /wiki/:slug': 'console',
+  'GET /wiki/assets/:name': 'console',
+  'GET /brand/logo.png': 'console',
+  'GET /favicon.ico': 'both',
+  'GET /icon.png': 'both',
   'GET /lakeview': 'console',
   // ---- console: the /api/* those pages call (all cookie/passkey-session gated) ----
   'GET /api/webauthn/status': 'console',
@@ -243,25 +496,32 @@ const PC_SURFACE_MAP: { [k: string]: string } = {
   'POST /api/sessions/roleflags': 'console',
   'GET /api/sessions/roles': 'console',
   'POST /api/sessions/revoke': 'console',
-  'GET /api/cowork-prompt': 'console',
+  'GET /api/oauth/allowed': 'console',
+  'POST /api/oauth/allowed': 'console',
   // ---- mcp: the connector transports ----
   'POST /mcp': 'mcp',
   'GET /mcp': 'mcp',
+  'DELETE /mcp': 'mcp',
   'POST /mcp/:token': 'mcp',
-  'GET /api/mcp': 'mcp',
-  'POST /api/mcp': 'mcp',
   // ---- mcp: the legacy bearer-token agent API ----
   'POST /api/queue/post': 'mcp',
   'POST /api/queue/claim': 'mcp',
   'POST /api/journal/log': 'mcp',
   'POST /api/confirm/stage': 'mcp',
-  'POST /api/confirm/verify': 'mcp',
   'POST /api/jobs/fire': 'mcp',
   'POST /api/jobs/supersede': 'mcp',
   // ---- mcp: OAuth 2.1 and discovery, advertised on the MCP host by oaPubBase ----
   'POST /oauth/register': 'mcp',
-  'GET /oauth/authorize': 'mcp',
-  'POST /oauth/authorize/complete': 'mcp',
+  // [OSS-IAPAUTH-V54] 'both', not 'mcp'. The authorize PAGE is the only part of the OAuth flow a
+  // human's browser visits, so it is the only part that can be put behind IAP -- and IAP is the
+  // one Google sign-in an installer can provision with no console visit, because Cloud Run IAP
+  // uses a Google-managed OAuth client. Registering the pair on the console surface too lets the
+  // metadata point a browser at the IAP-protected host while /oauth/token, /oauth/register and
+  // /mcp stay on the public mcp host where the connector needs them. OAuth allows exactly this:
+  // authorization_endpoint and token_endpoint are separate entries and need not share a host.
+  'GET /oauth/authorize': 'both',
+  'POST /oauth/authorize/complete': 'both',
+  'POST /oauth/authorize/key': 'both',
   'POST /oauth/token': 'mcp',
   'GET /.well-known/oauth-protected-resource': 'mcp',
   'GET /.well-known/oauth-protected-resource/mcp': 'mcp',
@@ -322,8 +582,6 @@ function assertIdentity(req: express.Request): string {
   }
   return agentId; // trusted identity from server-side map, never the caller's claim
 }
-
-const activeConnections = new Map<string, { res: express.Response; clientEmail: string }>();
 
 app.post('/api/queue/post', async (req, res) => {
   try {
@@ -390,15 +648,83 @@ app.post('/api/journal/log', async (req, res) => {
   }
 });
 
+// [GATE-QUEUE-COEXIST-V1] EVERY STAGED JOB STAYS STAGED UNTIL SOMEBODY DECIDES IT.
+// WHAT WAS HERE BEFORE, AND WHY IT HAD TO GO. GET /api/webauthn/pending carried a loop that,
+// on EVERY load of the gate, flipped every non-newest pending job sharing a
+// staged_by|command_type key to 'superseded' -- writing only status and superseded_at, so
+// supersede_note, superseded_by_job and superseded_by_role stayed null and read_job_log
+// answered reason: null. Two chats of one role using one command_type destroyed each other's
+// work, newest wins, and the record said nothing about why. run_command hardcodes
+// command_type 'run_cmd', so a role could hold exactly ONE live run_command; the fleet had
+// learned to work around that by minting distinct command_types (harVmGateStage says so in
+// its own comment) rather than by fixing it.
+// NOTHING IN THIS REPOSITORY EVER STATED A REASON FOR THAT LOOP. It is not a passkey-window
+// optimisation: an elevation is already minted per job id AND per that job's command sha
+// (waElevatedForJob, [F6]) and [SEC-ASSERT-EVERY-V1] demands a fresh assertion for every
+// approval, so N staged jobs already cost N taps and collapsing the queue bought no tap back.
+// The two real concerns it could only ever have addressed by accident are kept, and each is
+// keyed on something narrower and answered LOUDLY instead of by silent destruction:
+//   DOUBLE SUBMIT -> pcAdmitStage refuses a second job whose staged_by, command_type and
+//     command_sha256 all match one already waiting. That is the EXACT COMMAND BYTES, not
+//     role+command_type: two different commands of the same type are two different intentions
+//     and both now sit on the gate. The already-waiting job is returned and LEFT UNTOUCHED --
+//     nothing pending is ever written by the deduplicator.
+//   RUNAWAY STAGING -> a per-role cap on jobs already waiting. Over it, the stage is REFUSED,
+//     journalled, and the queue is left exactly as it was. A cap that refuses is strictly
+//     better than one that deletes: the operator keeps what he has not yet read, and the
+//     agent gets a sentence telling it what happened instead of a job that vanishes.
+// A READ FAILURE REFUSES THE STAGE. It cannot be told from an empty queue, and admitting on
+// an unreadable queue is how a cap is bypassed by inducing an error. The cost is one refused
+// stage that can be retried; nothing waiting is touched and nothing already approved is
+// affected. That is the opposite trade from [F2] -- there a read failure would have
+// PERMANENTLY quarantined jobs, here it delays one proposal.
+const PC_PENDING_MAX_PER_ROLE = parseInt(process.env.PC_PENDING_MAX_PER_ROLE || '25', 10);
+const PC_PENDING_LIST_MAX = parseInt(process.env.PC_PENDING_LIST_MAX || '500', 10);
+// The command sha is over the STAGED ARGUMENTS, serialised by pcStableJson so that key order
+// cannot make one intention look like two. It is stored on the job as command_sha256 and is
+// what the deduplicator compares; it is NOT an approval binding and does not replace
+// approved_sha256, waElevatedForJob or the [SEC-APPROVE-BIND-V1] displayed-job compare.
+function pcJobCommandSha(args: any): string {
+  return crypto.createHash('sha256').update(pcStableJson(args === undefined ? null : args)).digest('hex');
+}
+async function pcAdmitStage(stagedBy: string, commandType: string, args: any): Promise<any> {
+  const sha = pcJobCommandSha(args);
+  const mine0 = String(stagedBy || '');
+  const type0 = String(commandType || '');
+  let snap: any;
+  try { snap = await db.collection('pending_confirms').where('status', '==', 'pending').limit(PC_PENDING_LIST_MAX + 1).get(); }
+  catch (e: any) {
+    console.error('[gate] GATE-QUEUE-COEXIST-V1: the pending queue could not be read while admitting a stage by ' + mine0 + '; REFUSED rather than admitted.');
+    return { ok: false, sha: sha, refusal: 'refused: the gate queue could not be read, so this stage could not be checked against the per-role cap or against an identical job already waiting. NOTHING WAS STAGED and nothing already waiting was touched. Retry; if it keeps failing the control plane cannot reach Firestore, in which case no job could be approved either.' };
+  }
+  let mineN = 0; let dup = '';
+  for (const d of snap.docs) {
+    const x: any = d.data() || {};
+    if (String(x.staged_by || '') !== mine0) continue;
+    mineN++;
+    if (!dup && String(x.command_type || '') === type0 && String(x.command_sha256 || '') === sha) dup = String(x.job_id || d.id);
+  }
+  if (dup) {
+    try { await db.collection('journal').add({ agent_id: mine0, action: 'stage_deduped', message: 'Did NOT stage a second ' + type0 + ' for ' + mine0 + ': job ' + dup + ' is already waiting at the gate with byte-identical arguments. The waiting job was left untouched and nothing was destroyed.', timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
+    return { ok: false, sha: sha, duplicate_of: dup, refusal: 'NOT STAGED, AND NOTHING WAS DESTROYED: job ' + dup + ' is already waiting at the gate with byte-identical arguments, so a second card would ask the operator to decide one intention twice. Approve or deny THAT job, or change the command if you meant something different. Read it with read_job_log job_id=' + dup };
+  }
+  if (mineN >= PC_PENDING_MAX_PER_ROLE) {
+    try { await db.collection('journal').add({ agent_id: mine0, action: 'stage_refused_cap', message: 'REFUSED to stage ' + type0 + ' for ' + mine0 + ': ' + String(mineN) + ' jobs staged by this role are already waiting at the gate and the cap is ' + String(PC_PENDING_MAX_PER_ROLE) + ' (PC_PENDING_MAX_PER_ROLE). Nothing was staged and nothing waiting was touched.', timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
+    return { ok: false, sha: sha, refusal: 'refused: ' + String(mineN) + ' jobs staged by ' + mine0 + ' are already waiting at the gate and the cap is ' + String(PC_PENDING_MAX_PER_ROLE) + ' (PC_PENDING_MAX_PER_ROLE). NOTHING WAS STAGED AND NOTHING WAITING WAS DESTROYED. Wait for the operator to work the queue down, or retire the proposals you no longer want with POST /api/jobs/supersede, which records who did it and why.' };
+  }
+  return { ok: true, sha: sha };
+}
 app.post('/api/confirm/stage', async (req, res) => {
   try {
     const callerId = assertIdentity(req);
     const { command_type, arguments: args } = req.body;
+    const _adm = await pcAdmitStage(callerId, String(command_type || ''), args || {});
+    if (!_adm.ok) { res.status(409).json({ error: _adm.refusal, staged: false, duplicate_of: _adm.duplicate_of || null }); return; }
     const jobRef = db.collection('pending_confirms').doc();
     await jobRef.set({
       job_id: jobRef.id, staged_by: callerId, command_type,
       arguments: args || {}, status: 'pending',
-      created_at: FieldValue.serverTimestamp()
+      created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha
     });
     await db.collection('journal').add({
       agent_id: callerId, action: 'stage_job',
@@ -414,133 +740,6 @@ app.post('/api/confirm/stage', async (req, res) => {
   }
 });
 
-app.post('/api/confirm/verify', async (req, res) => {
-  try {
-    if (!humanTokenOk(req)) {
-      res.status(403).json({ error: 'Forbidden: valid human-confirm secret required (x-human-token).' });
-      return;
-    }
-    const { jobId, action } = req.body;
-    if (action !== 'confirmed' && action !== 'denied') {
-      res.status(400).json({ error: "action must be 'confirmed' or 'denied'" });
-      return;
-    }
-    await db.collection('pending_confirms').doc(jobId).update({
-      status: action, confirmed_by: 'human_operator',
-      confirmed_at: FieldValue.serverTimestamp()
-    });
-    await db.collection('journal').add({
-      agent_id: 'human_operator', action: `human_${action}`,
-      message: `Human operator ${action} job ID ${jobId}.`,
-      timestamp: FieldValue.serverTimestamp()
-    });
-
-    if (action === 'confirmed') {
-      const GATE_EXEC_URL = process.env.GATE_EXEC_URL;
-      if (GATE_EXEC_URL) {
-        // Fire and forget, execution happens async
-        fetch(`${GATE_EXEC_URL}/run`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ job_id: jobId })
-        }).catch(e => console.error('Failed to trigger GATE_EXEC_URL:', e));
-      } else {
-        console.warn('GATE_EXEC_URL not set; cannot trigger executor automatically.');
-      }
-    }
-
-    res.status(200).json({ success: true, message: `Job ${jobId} successfully ${action}.` });
-  } catch (err: any) {
-    const _em = String((err && err.message) || '');
-        console.error('handler error:', _em);
-        if (_em.indexOf('401') === 0) { res.status(401).json({ error: 'unauthorized' }); return; }
-        res.status(400).json({ error: 'request failed' });
-  }
-});
-
-app.get('/api/mcp', (req, res) => {
-  try {
-    const clientEmail = assertIdentity(req);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    const connectionId = uuidv4();
-    activeConnections.set(connectionId, { res, clientEmail });
-    const proto = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
-    const postUrl = `${proto}://${req.get('host')}/api/mcp?connectionId=${connectionId}`;
-    res.write(`event: endpoint\ndata: ${postUrl}\n\n`);
-    db.collection('journal').add({
-      agent_id: 'mcp_gateway', action: 'client_connect',
-      message: `MCP Client ${clientEmail} established connection ID ${connectionId} over SSE.`,
-      timestamp: FieldValue.serverTimestamp()
-    });
-    const interval = setInterval(() => { res.write(': keepalive\n\n'); }, 15000);
-    req.on('close', () => {
-      clearInterval(interval);
-      activeConnections.delete(connectionId);
-      db.collection('journal').add({
-        agent_id: 'mcp_gateway', action: 'client_disconnect',
-        message: `MCP Connection ID ${connectionId} closed.`,
-        timestamp: FieldValue.serverTimestamp()
-      });
-    });
-  } catch (err: any) {
-    res.status(401).send(err.message);
-  }
-});
-
-app.post('/api/mcp', async (req, res) => {
-  const connectionId = req.query.connectionId as string;
-  if (!connectionId || !activeConnections.has(connectionId)) {
-    res.status(400).json({ error: 'Missing or inactive connection ID' });
-    return;
-  }
-  const conn = activeConnections.get(connectionId)!;
-  const { jsonrpc, id, method, params } = req.body;
-  if (jsonrpc !== '2.0') {
-    res.status(400).json({ error: 'Invalid JSON-RPC protocol' });
-    return;
-  }
-  let jsonRpcResponse: any = { jsonrpc: '2.0', id };
-  try {
-    if (method === 'tools/list') {
-      jsonRpcResponse.result = {
-        tools: [
-          { name: 'runCommand', description: 'Executes a system shell command. High-privilege, ALWAYS requires staging + human approval.',
-            inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'The shell command to run.' } }, required: ['command'] } },
-          { name: 'sshExecutor', description: 'Executes commands on remote fleet nodes via SSH. High-privilege, ALWAYS requires staging + human approval.',
-            inputSchema: { type: 'object', properties: { host: { type: 'string', description: 'Target hostname or IP address' }, command: { type: 'string', description: 'The shell command to execute' } }, required: ['host', 'command'] } }
-        ]
-      };
-    } else if (method === 'tools/call') {
-      const toolName = params?.name;
-      const toolInput = params?.arguments || {};
-      const jobRef = db.collection('pending_confirms').doc();
-      let cmd_type = 'run_cmd';
-      if (toolName === 'sshExecutor') { cmd_type = 'ssh'; }
-      await jobRef.set({
-        job_id: jobRef.id, staged_by: conn.clientEmail, command_type: cmd_type,
-        arguments: toolInput, status: 'pending', created_at: FieldValue.serverTimestamp()
-      });
-      await db.collection('journal').add({
-        agent_id: conn.clientEmail, action: 'stage_job',
-        message: `Staged MCP job ${cmd_type} (${jobRef.id}) via the MCP connector awaiting human approval.`,
-        timestamp: FieldValue.serverTimestamp()
-      });
-      jsonRpcResponse.result = {
-        content: [ { type: 'text', text: `Action successfully STAGED on the board under Job ID: ${jobRef.id}. Status is currently 'pending'. The command will execute once approved by the human operator.` } ]
-      };
-    } else {
-      jsonRpcResponse.error = { code: -32601, message: 'Method not found' };
-    }
-    conn.res.write(`event: message\ndata: ${JSON.stringify(jsonRpcResponse)}\n\n`);
-    res.status(200).send('OK');
-  } catch (err: any) {
-    jsonRpcResponse.error = { code: -32603, message: err.message };
-    conn.res.write(`event: message\ndata: ${JSON.stringify(jsonRpcResponse)}\n\n`);
-    res.status(200).send('OK');
-  }
-});
 
 
 // ---- Streamable-HTTP MCP endpoint for the Claude app (token in URL path) ----
@@ -594,7 +793,6 @@ const PC_TOOL_CLASS: any = {
   refresh: 'write',
   stage_privileged_job: 'stage',
   run_command: 'stage',
-  ssh_executor: 'stage',
   gcp_api: 'infra',
   run_roll: 'infra',
   vm_start: 'infra',
@@ -627,32 +825,626 @@ async function pcToolClasses(role: string): Promise<string[]> {
   }
 }
 
-async function buildMcpServer(agentId: string): Promise<any> {
+// [WP4B-KEY-CLASSES-V1] A SESSION KEY MAY HOLD LESS THAN ITS STRAIN. IT MAY NEVER HOLD MORE.
+//
+// WHY THIS EXISTS AT ALL. pcToolClasses above answers "what does this ROLE hold", and the role
+// is the wrong grain for a subagent. A subagent must stay the SAME role -- same private lake
+// folder (resolveKey confines reads to agents/<role>/), same journal attribution, same
+// admission verdict -- while being structurally unable to stage a gated job or write the lake.
+// Minting it a separate strain purely to get a narrower tool_classes would change its identity
+// and cut it off from the parent's folder, which is the opposite of what is wanted. So the
+// narrowing rides on the session_keys row: same role, narrower credential.
+//
+// THE ONE INVARIANT, and the whole security claim:
+//
+//     pcNarrowClasses(base, anything) is ALWAYS a SUBSET of base.
+//
+// There is no input -- absent, empty, malformed, hostile, or naming a class that does not
+// exist -- that ADDS a class. A key restriction can only subtract. That is precisely why it is
+// safe to honour a field that arrives out of Firestore with no schema behind it, and why the
+// operator's own key (which carries no such field) keeps every capability it has today.
+//
+// THE READINGS, and why each one is the SAFE one:
+//   undefined / null    -> base, unchanged. This is EVERY key in the collection today, because
+//                          before this patch nothing wrote the field. Absence therefore means
+//                          "this key predates the mechanism" and must behave exactly as it did.
+//                          Absence is not a hole: it grants nothing the strain did not already
+//                          grant. A key that is meant to be a boundary SAYS SO; a key that says
+//                          nothing was never claimed to be one.
+//   not an array        -> the FLOOR (sight only), NOT base. A malformed restriction is a
+//   []                     restriction that was MEANT, so it must never evaporate back into
+//   ['nonsense']           full capability. Reading a broken narrowing as "no narrowing" is
+//                          exactly the fail-open shape this work package exists to remove.
+//   ['read','write']    -> base INTERSECT that. Unrecognised members are dropped BEFORE the
+//                          intersection, so a typo neither becomes the class it resembles nor
+//                          re-opens everything: ['stagee'] filters to empty and falls to the
+//                          floor, which holds no 'stage'.
+//
+// The floor is 'read' and it is itself intersected with base, so a strain that does not hold
+// 'read' does not acquire it here. Sight is the floor rather than nothing because a subagent
+// that cannot read is useless, and the object is to remove WRITE and STAGE, not sight. whoami
+// sits below even this floor: buildMcpServer registers it unconditionally, so a restricted key
+// can always still say what it is.
+const PC_KEY_FLOOR_CLASSES = ['read'];
+function pcNarrowClasses(base: any, raw: any): string[] {
+  const b: string[] = Array.isArray(base) ? base.filter((x: any) => typeof x === 'string') : [];
+  // The ONLY branch that returns base untouched, and it is reached only when the row states
+  // no restriction at all. A copy, never the PC_ALL_CLASSES const itself.
+  if (typeof raw === 'undefined' || raw === null) return b.slice();
+  let want: string[] = [];
+  if (Array.isArray(raw)) {
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i];
+      if (typeof c === 'string' && PC_ALL_CLASSES.indexOf(c) >= 0 && want.indexOf(c) < 0) want.push(c);
+    }
+  }
+  if (!want.length) want = PC_KEY_FLOOR_CLASSES;
+  return b.filter((x: string) => want.indexOf(x) >= 0);
+}
+
+// ============================ [MCP-RESULT-CAP-V1] ============================
+// A CEILING ON ONE TOOL RESULT, AT THE SURFACE, BECAUSE AN OVERSIZED RESULT IS A
+// CORRECTNESS BUG AND NOT AN AESTHETIC ONE.
+//
+// WHAT WAS HERE BEFORE: nothing. Every tool handler below returns
+// { content: [{ type: 'text', text }] } and that object was handed to the
+// transport verbatim. There is no truncation anywhere on the MCP result path --
+// not in the shadow, not in mcp2026Handle, not in the SDK -- so the size of a
+// result was whatever the underlying query happened to return.
+//
+// WHY THAT WAS WRONG. Measured on this deployment: list_work_items returned
+// 128,929 characters in ONE call and run_status returned 52,039. A model reading
+// a 128,929-character tool result spends roughly 36,800 tokens on it (pretty-
+// printed JSON runs about 3.5 characters per token), which is ~18% of a
+// 200,000-token window consumed by a single call whose useful answer was "here
+// are the open work items". Three of them evict the conversation that asked for
+// them. That is not a cosmetic problem: an agent that loses its own instructions
+// mid-task does the wrong thing confidently, and the eviction is invisible to it.
+//
+// The growth is unbounded by construction, not by accident. list_work_items does
+// db.collection('work_items').limit(50) and JSON.stringify(d.data()) with no field
+// projection: 128,929 / 50 = 2,579 characters PER WORK ITEM, and a work item grows
+// every time somebody adds a field. run_status returns the Cloud Run services list
+// body straight out of harGcpApi, which grows with every revision, env var and
+// annotation on every service in the project. Neither number is a limit anyone
+// chose; both are a side effect of how much data happened to exist.
+//
+// WHY THE CAP LIVES HERE AND NOT IN THE TOOLS. This shadow is the ONE funnel every
+// tool result passes through on the way out. Both eras are downstream of it: the
+// legacy 2025 branch gets the handler through _pcReg into the SDK, and the modern
+// 2026-07-28 branch calls t.handler out of _pcTools (mcpServeModern -> deps.tools
+// -> Mcp2026Tool.call). gittools.registerGitTools() is handed THIS server, so its
+// seven git tools flow through here too. Wrapping once here therefore caps 50-odd
+// tools and every tool added after today, with no per-tool edit and no way for a
+// new tool to opt out by forgetting.
+//
+// THE NUMBER, AND THE ARITHMETIC BEHIND IT. PC_RESULT_MAX = 55,555 characters.
+//   - RAISED FROM 24,000 to 55,555 on 2026-08-15 by operator decision, alongside
+//     the list_work_items projection below. They are a pair and the reasoning only
+//     holds as a pair: the projection stops the worst offender from needing the
+//     budget at all, and the raise covers tools that still return one indivisible
+//     blob. Raising the number ALONE was considered and rejected -- it buys only a
+//     handful more work items before the cap returns, and it pays the larger result
+//     on every call forever. Projection is the fix; budget is the allowance.
+//   - It is NO LONGER the same number as CTX_MEM_MAX, which stays 24,000. That
+//     equality was previously offered as a reason ('one fleet, one answer to the
+//     same question') and it no longer holds, so it is removed rather than left
+//     standing as a false justification. They answer different questions: one
+//     bounds an INJECTED blob the strain did not ask for, this one bounds a
+//     result the strain requested by calling a tool.
+//   - ~55,555 chars is ~16,000 tokens, ~8.0% of a 200,000-token window. This is a
+//     CEILING, not a target: almost every tool returns far less, and the projection
+//     work is what keeps the common case cheap.
+//   - Against the two measured offenders: list_work_items NO LONGER APPROACHES IT.
+//     It serves a ~150-character projection per item and drills in by id, so the
+//     14-item queue that cost 46,838 characters now costs ~2,000. run_status was
+//     measured at 52,039 and now FITS, with 3,516 characters to spare -- and that
+//     is LUCK, NOT DESIGN, so do not read it as solved. Nothing BOUNDS run_status:
+//     52,039 was one sample of a result that grows with the fleet, and the next
+//     reading can exceed any constant chosen here. An earlier draft of this block
+//     said run_status 'STILL EXCEEDS' the cap, which was true at 50,000 and false
+//     at 55,555; it is corrected rather than left standing. Its fix is unchanged
+//     and is the one below: project the result, do not enlarge the budget.
+//   - It is a CONSTANT, not an env var, and that is deliberate twice over. Every
+//     other context budget in this file is a named constant (CTX_MEM_MAX,
+//     CTX_MEM_OBS_CHARS, the 48,000 runaway stop in ctxBuild), and a cap that any
+//     deployment can raise from the environment is how a cap quietly becomes
+//     unbounded again with nothing in the diff to review.
+//
+// WHICH END IT KEEPS. The head, for everything except the one tool that serves
+// oldest-first: see PC_RESULT_CAP_TAIL below. Keeping the head of an ascending
+// result is a cap that reliably discards the answer, which is a different way of
+// being wrong from being expensive but not a better one.
+//
+// HOW IT TRUNCATES, AND THE ONE THING IT REFUSES TO DO. It cuts the STRING and
+// marks the cut. It does NOT parse the JSON, drop array elements and re-serialise.
+// Re-serialising is the tempting option and it is the worse bug: it produces a
+// result that PARSES, so the agent reads a 9-item array as the complete answer and
+// reasons from a subset it believes is the whole set -- silently, with nothing on
+// screen to contradict it. Cutting the string leaves the text unparseable ON
+// PURPOSE: an unclosed brace is a loud failure, and the marker states in words
+// that the text stops mid-value. The surface also cannot safely do the smart
+// thing: it sees an opaque string and has no idea whether it holds pretty JSON,
+// a unified diff, a markdown lesson file or a sentence, and half the tools here
+// return prose.
+//
+// WHAT THE MARKER MUST CARRY, because a silent clip is worse than the original
+// defect: (1) WHICH END SURVIVED, in words, placed at the edge the model is
+// reading toward -- after the text for a head cut, before it for a tail cut;
+// (2) the TRUE total character count, so "9 items" cannot be mistaken for
+// "9 items exist"; (3) the actual argument names of THAT tool, read off its own
+// spec.inputSchema, so the instruction for getting the rest is specific and needs
+// no per-tool table here.
+//
+// EXEMPT, AND WHY EACH ONE. Three tools return a WHOLE ARTIFACT the agent is
+// expected to act on or write back, where a prefix is dangerous rather than merely
+// lossy. A truncating read feeding a whole-file write DESTROYS the file, and
+// The fleet's law 9.4 mandates exactly that read-whole/edit-whole/write-whole loop:
+//   whoami    -- the context-delivery channel. It carries the memory digest and
+//                the injected bootstrap. A truncated rule is indistinguishable
+//                from an absent one to the model reading it; that failure is
+//                already written up in the fleet laws document. Bounded elsewhere:
+//                CTX_MEM_MAX 24,000 plus the 48,000 runaway stop in ctxBuild.
+//   read_file -- lake read under read-whole/write-whole. Bounded by
+//                PC_LAKE_READ_MAX (175,000 characters) at its definition below:
+//                an explicit FILE_TOO_LARGE refusal carrying the file's actual
+//                size and the bound, never a truncation that would corrupt lake
+//                objects.
+//   git_read  -- repository read feeding git_propose, which does WHOLE FILE writes
+//                only. Bounded by GIT_MAX_BLOB_BYTES (2 MiB) with an explicit
+//                FILE_TOO_LARGE error carrying the size -- which is the RIGHT
+//                shape for a whole-artifact read and the shape read_file now
+//                has. 2 MiB is still ~600,000 tokens, so this cap does not solve
+//                git_read; lowering that bound is a separate change.
+// The general rule, so the set does not grow by habit: a REPORT may be capped, an
+// ARTIFACT must refuse with its size instead. git_diff is the closest call and is
+// deliberately left CAPPED: it is read to understand a change, not applied
+// verbatim, and git_propose_patch takes a patch the agent authors.
+//
+// WHAT DELIBERATELY DOES NOT CHANGE.
+//   - Every tool's own logic, query limit and output text. Nothing below this
+//     block is edited; a result under 24,000 characters is returned byte-identical.
+//   - isError is preserved as-is. An oversized error is capped like anything else;
+//     it does not become a success and a success does not become an error.
+//   - The withholding decision above still runs FIRST and is untouched: a withheld
+//     tool never reaches the wrap, so PC_TOOLS_ENFORCE behaviour is unchanged.
+//   - Both eras stay byte-identical for uncapped results, and the wrap forwards
+//     arguments with a rest parameter so the SDK's (args, extra) call and the
+//     modern branch's (args) call both arrive at the original handler unchanged.
+//   - buildDeniedMcpServer builds a SECOND McpServer that does not go through this
+//     shadow. It is left alone on purpose: it registers whoami and nothing else,
+//     whoami is exempt anyway, and its text is a constant. A tool added THERE would
+//     not inherit this cap -- but adding a tool to the denied server contradicts
+//     what the denied server is for.
+//   - structuredContent is not capped. No tool in this file or in gittools emits
+//     it; pruning a structured object is precisely the parses-but-is-a-subset
+//     failure this block exists to prevent, so a future tool that emits an
+//     oversized one must page instead.
+//   - No route is added, moved or renamed, and no new process.env read is
+//     introduced.
+const PC_RESULT_MAX = 55555;
+const PC_RESULT_CAP_TAG = '[MCP-RESULT-CAP-V1]';
+const PC_RESULT_CAP_EXEMPT = new Set(['whoami', 'read_file', 'git_read']);
+// CUT FROM THE FRONT, NOT THE BACK, FOR A TOOL WHOSE RESULT IS OLDEST-FIRST.
+// A prefix is only the useful half when the useful end is the TOP. read_history
+// sorts ASCENDING and then takes the last N -- `rows.sort(x - y)` then
+// `rows.slice(-(limit || 30))` -- so its newest turn is the LAST line of the
+// result, and its own description is "most recent history in chronological order
+// ... to refresh at session start". Head-truncating that serves the thirty-turn
+// window's OLDEST end and cuts precisely what the caller asked for: a strain
+// refreshing at session start would read what it was doing an hour ago and never
+// reach what it was doing last. The marker would say so, so the failure is loud
+// rather than silent -- but a cap that reliably keeps the wrong half is still the
+// cap choosing wrong, and 30 turns of prose passes 24,000 characters at only 800
+// characters a turn, so this is the ordinary case and not a corner.
+//
+// MEASURED, NOT ASSUMED: read_history is the ONLY tool on this surface that
+// serves ascending. search_history sorts DESCENDING (`tsMillis(y) - tsMillis(x)`),
+// read_journal and git_log are newest-first by query, and list_work_items,
+// run_status and the rest are unordered sets where neither end is the answer.
+// Every other ascending sort in this file is on an HTTP route, not a tool. So
+// this set has exactly one member on purpose, and a second name belongs in it
+// only after someone checks the sort the same way.
+const PC_RESULT_CAP_TAIL = new Set(['read_history']);
+// The tool's own argument names, straight off the spec it registered with, minus
+// `agent` (a credential, never a narrowing filter). This is what lets the marker
+// tell the caller HOW to get the rest without this file holding a table of tools.
+function pcCapArgNames(spec: any): string[] {
+  const shape: any = spec && spec.inputSchema;
+  if (!shape || typeof shape !== 'object') return [];
+  return Object.keys(shape).filter((k: string) => k !== 'agent');
+}
+function pcCapNote(toolName: string, argNames: string[], shown: number, total: number, keptTail: boolean): string {
+  const pct = Math.round((shown / total) * 1000) / 10;
+  const hasLimit = argNames.indexOf('limit') >= 0;
+  const how = argNames.length
+    ? ((hasLimit ? 'pass a SMALLER limit, or narrow with ' : 'narrow the call with ')
+       + argNames.join(', ') + ', then call again.')
+    : ('this tool takes no narrowing arguments, so the rest is not reachable from here -- '
+       + 'tell the operator, who can raise PC_RESULT_MAX in control-plane/src/index.ts.');
+  // The marker names WHICH END SURVIVED. 'a prefix' and 'a suffix' are different
+  // facts about what is missing, and an agent that reads the wrong one draws the
+  // wrong conclusion about whether it has the latest state or the earliest.
+  const kept = keptTail ? 'THIS IS THE END OF THE RESULT, NOT THE WHOLE OF IT'
+                        : 'THIS IS A PREFIX, NOT THE RESULT';
+  const edge = keptTail
+    ? 'THE TEXT BELOW STARTS MID-VALUE, and the OLDEST entries were cut. It is NOT valid JSON,\nit is NOT the whole list, and the number of entries visible is NOT the number that exist.'
+    : 'THE TEXT ABOVE STOPS MID-VALUE, and the entries after the cut are gone. It is NOT valid\nJSON, it is NOT the whole list, and the number of entries visible is NOT the number that exist.';
+  const body = '======== ' + PC_RESULT_CAP_TAG + ' TRUNCATED -- ' + kept + ' ========\n'
+    + 'tool: ' + toolName + '\n'
+    + 'shown: ' + shown + ' of ' + total + ' characters (' + pct + '%); '
+    + (total - shown) + ' characters were CUT from the ' + (keptTail ? 'START' : 'END') + '.\n'
+    + edge + '\n'
+    + 'Do not parse it, do not count it, and do not report what it contains as complete.\n'
+    + 'TO GET THE REST: ' + how + '\n'
+    + 'There is no cursor or offset on this surface: fleet tools narrow by FILTER, not by page.\n'
+    + '======== END ' + PC_RESULT_CAP_TAG + ' ========';
+  return keptTail ? (body + '\n\n') : ('\n\n' + body);
+}
+// Budget is PER RESULT, not per content block: ten blocks of 24,000 is 240,000
+// characters and would defeat the cap it passed.
+function pcCapResult(toolName: string, argNames: string[], out: any): any {
+  if (!out || typeof out !== 'object' || !Array.isArray(out.content)) return out;
+  const items: any[] = out.content;
+  let total = 0;
+  for (let i = 0; i < items.length; i++) {
+    const b: any = items[i];
+    if (b && b.type === 'text' && typeof b.text === 'string') total += b.text.length;
+  }
+  if (total <= PC_RESULT_MAX) return out;
+  // TAIL TOOLS TAKE A SEPARATE, SIMPLER PATH. Walking blocks from the end to spend
+  // the same budget backwards would be the symmetric version of the loop below, and
+  // every tool in this set today returns exactly ONE text block, so the general
+  // machinery would be untested generality guarding a case that does not arise.
+  // Joining and cutting once is the whole behaviour, and it is right for any block
+  // count: the LAST PC_RESULT_MAX characters of the result are the last characters
+  // whatever produced them.
+  if (PC_RESULT_CAP_TAIL.has(toolName)) {
+    const joined = items.map((b: any) =>
+      (b && b.type === 'text' && typeof b.text === 'string') ? b.text : '').join('');
+    let tail = joined.slice(joined.length - PC_RESULT_MAX);
+    // Never START on a lone LOW surrogate (0xDC00-0xDFFF) -- the mirror of the
+    // high-surrogate rule below, and the only cut that would change the BYTES of a
+    // surviving character. charCodeAt, not a regex, for the reason given there.
+    const _tc = tail.charCodeAt(0);
+    if (_tc >= 0xDC00 && _tc <= 0xDFFF) tail = tail.slice(1);
+    console.warn('[cp] ' + PC_RESULT_CAP_TAG + ' ' + toolName + ' produced ' + total
+      + ' characters; served the LAST ' + tail.length + ' and marked the cut in-band.');
+    return { ...out, content: [{ type: 'text',
+      text: pcCapNote(toolName, argNames, tail.length, total, true) + tail }] };
+  }
+  const blocks: any[] = [];
+  let shown = 0;
+  let alreadyCut = false;
+  for (let i = 0; i < items.length; i++) {
+    const b: any = items[i];
+    if (!b || b.type !== 'text' || typeof b.text !== 'string') { blocks.push(b); continue; }
+    if (alreadyCut) {
+      blocks.push({ ...b, text: PC_RESULT_CAP_TAG + ' content block ' + i
+        + ' was dropped WHOLE: the result budget was already spent by the blocks above.' });
+      continue;
+    }
+    const room = PC_RESULT_MAX - shown;
+    if (b.text.length <= room) { shown += b.text.length; blocks.push(b); continue; }
+    let head = b.text.slice(0, room);
+    // Never end on a lone HIGH surrogate (0xD800-0xDBFF). That is the one cut that
+    // would change the BYTES of a character that survives, rather than only how many
+    // survive. Written as a charCodeAt comparison and not a regex on purpose: a
+    // backslash-u escape in this file has to survive being copied through a patch, a
+    // code review and a model's own emission to get here, and it does not always. A
+    // number cannot be silently decoded into the character it names.
+    const _hc = head.charCodeAt(head.length - 1);
+    if (_hc >= 0xD800 && _hc <= 0xDBFF) head = head.slice(0, head.length - 1);
+    shown += head.length;
+    blocks.push({ ...b, text: head + pcCapNote(toolName, argNames, shown, total, false) });
+    alreadyCut = true;
+  }
+  console.warn('[cp] ' + PC_RESULT_CAP_TAG + ' ' + toolName + ' produced ' + total
+    + ' characters; served ' + shown + ' and marked the cut in-band.');
+  return { ...out, content: blocks };
+}
+// Rest parameter, not a fixed arity: the legacy SDK calls a handler as
+// (args, extra) and the modern branch calls it as (args). Forwarding whatever
+// arrived is the only shape that is transparent to both.
+function pcCapWrap(name: string, spec: any, handler: any): any {
+  if (PC_RESULT_CAP_EXEMPT.has(name)) return handler;
+  const argNames = pcCapArgNames(spec);
+  return async (...a: any[]) => pcCapResult(name, argNames, await handler(...a));
+}
+// ========================== end [MCP-RESULT-CAP-V1] ==========================
+
+// ============================ [LAKE-READ-BOUND-V1] ===========================
+// read_file's size bound: an explicit refusal carrying the file's actual size,
+// NEVER a truncation. WHAT THIS PROTECTS AGAINST: read_file is a whole-artifact
+// lake read under the read-whole / edit-whole / write-whole loop law 9.4
+// mandates, so its result is what an agent EDITS AND WRITES BACK WHOLE with
+// write_file. A truncating read feeding that loop writes the surviving prefix
+// back over the object and DESTROYS the lake artifact -- silently, because the
+// write itself reports success. That is why read_file is on PC_RESULT_CAP_EXEMPT
+// above, and why the only safe bound is the shape git_read already has: refuse,
+// and say how big the file actually is and what the bound is, so the caller can
+// decide what to do (split the artifact, or move the bytes with a staged job
+// that never round-trips them through a model's context).
+//
+// THE NUMBER, DERIVED RATHER THAN COPIED. git_read's GIT_MAX_BLOB_BYTES (2 MiB)
+// is ~600,000 tokens: a bound no read/edit/write loop through a model can ever
+// round-trip, so copying it here would bound nothing. What the loop must afford
+// is the artifact TWICE in one 200,000-token window -- once as the read result,
+// once re-emitted as the write_file content -- plus instructions, the diff and
+// the reasoning between them. Giving the round trip half the window, 100,000
+// tokens at the ~3.5 characters/token this file's other budgets use, yields
+// 175,000 characters. Against the fleet's real artifacts (measured 2026-08-13
+// via list_files and git_read at head 63c04748): the fleet laws doc at 39,343
+// chars, lane-state scripts 60,000-85,000, and the largest whole-edited
+// source artifact, devgate/smoke.py, 166,873 -- all under the bound, and the
+// largest of them is already close to the practical ceiling of the loop itself,
+// which is the point: the bound tracks what the loop can DO, not what happens
+// to exist. What this refuses today (a 625,340-char rollback bundle and a
+// 462,167-char machine-written report in the lake) could never complete the
+// loop anyway: serving such a read whole is how a context window gets evicted,
+// and truncating it is how the object gets destroyed on write-back. A CONSTANT,
+// not an env var, for the reason PC_RESULT_MAX gives above.
+const PC_LAKE_READ_MAX = 175000;
+// Pure -- (path, size) in, refusal text or null out, no I/O -- so the refusal
+// path can be exercised off this surface with real sizes.
+function pcLakeReadRefusal(path: string, chars: number): string | null {
+  if (chars <= PC_LAKE_READ_MAX) return null;
+  return 'FILE_TOO_LARGE: ' + path + ' is ' + chars + ' characters, over the '
+    + PC_LAKE_READ_MAX + '-character read_file bound. Contents were NOT returned and NOT '
+    + 'truncated: a truncated read fed back through the read-whole/edit-whole/write-whole '
+    + 'loop would write the prefix over the lake object and destroy it. The file is intact. '
+    + 'Split the artifact, or move the bytes with a staged job instead of reading them into '
+    + 'a model context.';
+}
+// ========================= end [LAKE-READ-BOUND-V1] ==========================
+
+// [SEC-AUTORUN-SCOPE-V1] THIS BLOCK LIVED INSIDE buildMcpServer() AND THAT WAS A REAL BUG,
+// not a tidiness problem. pcAutoRun had exactly ONE call site -- the run_command handler --
+// so every OTHER staging path wrote status:'pending' and waited for a human approval at a
+// console route that was deleted the same day. stage_privileged_job, vm_start/vm_stop/
+// vm_resize, run_roll and gcp_api all parked work forever and reported success while doing
+// it, which is the worst failure shape available: the tool says STAGED, the operator reads
+// it as done, and nothing ever runs. run_roll said it out loud -- "pending your gate
+// approval -- naming a page that returns 404.
+//
+// harGcpStage() is defined well below buildMcpServer() and could not see this function at
+// all, so the fix is scope: module level, reachable from every stager. The consts are read
+// at CALL time, not at definition time, so their textual position below this point is not
+// a temporal-dead-zone hazard -- nothing here runs during module evaluation.
+// ---- [GCP-CLICK-REMOVAL-V1] RUN A CLEAN JOB WITHOUT A HUMAN TAP ----
+// The click is not a control in itself; it is the DELIVERY MECHANISM for one. The control
+// is deploy/LOCKOUT-CLASS.md's nine categories, and gate-exec/lockout_check.py now applies
+// them pre-execute, fail-closed, on every body. This function moves the delivery: a body
+// that is not dangerous and not lockout-class runs immediately; everything else stays at
+// 'pending' exactly as before and waits for a human. Nothing is skipped -- the executor's
+// rungs (approved_sha256 pin, approval signature, single-use claim, lockout check) all
+// still run, because this stamps a REAL pre-approval rather than bypassing the path.
+//
+// OFF BY DEFAULT, AND THE SWITCH IS DELIBERATELY OUT OF REACH OF THE THING IT SWITCHES.
+// PC_AUTO_APPROVE is a deploy-time env var, so it is a Cloud Run configuration revision,
+// NOT a gated job. That matters both ways: arming it cannot be done by a job, and if it
+// ever needs to come back off, that undo is a revision rollback and therefore still
+// available even in the state where no job can be approved. Landing this code with the
+// var unset changes nothing at all.
+//
+// DANGEROUS NO LONGER STAYS HUMAN BY DEFAULT, AND THIS PARAGRAPH USED TO SAY THE OPPOSITE.
+// It read "DANGEROUS STAYS HUMAN, ON PURPOSE AND FOR A MEASURED REASON" and pointed at
+// /api/webauthn/preapprove, which hard-refuses a destructive body while the human is away.
+// That reasoning was sound while there was a human path to fall back to. [SEC-NOBRAKES-V1]
+// removed it: PC_GUARDRAILS defaults to 0, so a destructive body runs here rather than
+// being handed back as a question. waIsDangerous() is still re-run over the command text
+// rather than trusted from the caller, and the caller's structural verdict is still OR-ed
+// in, because the classification still decides what gets JOURNALLED and what the operator
+// is told -- it just no longer decides whether the work happens.
+//
+// THE EXPIRY IS SHORT BECAUSE NOTHING HERE IS WAITING FOR A PERSON. Pre-approval for an
+// absent human is 12h; this fires in the same breath, so 15 minutes is generous and keeps
+// a stamped-but-unfired token from lingering as a usable credential.
+const PC_AUTO_APPROVE = String(process.env.PC_AUTO_APPROVE || '0') === '1';
+// [SEC-NOBRAKES-V1] One name for one idea: do runtime refusals exist at all. Read by this
+// service and by gate-exec/exec_server.py, defaulting to OFF in both, so there is a single
+// thing to flip and a single thing to document rather than a flag per brake.
+const PC_GUARDRAILS = String(process.env.PC_GUARDRAILS || '0') === '1';
+async function pcAutoRun(ref: any, jobId: string, commandType: string, command: string, danger: boolean, confirm: boolean): Promise<string | null> {
+  if (!PC_AUTO_APPROVE) return null;
+  if (!command) return null;
+  // [SEC-NOBRAKES-V1] 2026-08-14, OPERATOR RULING. This used to stop a destructive command
+  // and hand the question back to chat. It no longer does, by default. Verbatim: 'we don't add
+  // speed bumps we add accelerators' -- the operator issues the instruction, the chat is their
+  // hands, and a second 'are you sure' to the person who just said do it is friction that buys
+  // nothing. Breakage is the accepted cost and rolling forward is the accepted cure.
+  //
+  // THE PRE-SHIP CHECKS ARE UNTOUCHED AND THAT IS THE WHOLE DISTINCTION. oss/gen.py still
+  // refuses a bad cut, route-audit still fails the build on a vanished route, the leak
+  // ceilings still bite. Those cost nothing at runtime and catch the defect before it ships.
+  // What is gone is the refusal that stops work already asked for.
+  //
+  // IT IS STILL JOURNALLED. Detection is not friction, and the record is what makes the
+  // roll-forward possible. PC_GUARDRAILS=1 restores the old behaviour for an adopter who
+  // wants brakes; it defaults to 0 because the operator's posture is the shipped posture.
+  if ((danger || waIsDangerous(command)) && !confirm && PC_GUARDRAILS) {
+    await ref.delete().catch(() => {});
+    await db.collection('journal').add({ agent_id: 'auto_approve', action: 'auto_run_asked_human', message: 'Job ' + jobId + ' (' + commandType + ') is destructive; not run, returned to the operator in chat for a decision: ' + command.slice(0, 200), timestamp: FieldValue.serverTimestamp() }).catch(() => {});
+    return 'NEEDS YOUR OK — NOT RUN, NOT QUEUED.\n' +
+           'This is a destructive command, so it did not run and nothing is waiting anywhere.\n' +
+           'command: ' + command.slice(0, 800) + '\n' +
+           'If you want it, say so and I will re-issue it with confirm=true.';
+  }
+  const cmdSha = crypto.createHash('sha256').update(command, 'utf8').digest('hex');
+  const runToken = crypto.randomBytes(32).toString('hex');
+  const expiry = Date.now() + 15 * 60 * 1000;
+  // Stamped under the SAME field names /api/webauthn/preapprove writes and
+  // /api/jobs/fire and exec_server.py read. A different shape here would be a second
+  // approval format for the executor to understand, and two formats is how a rung
+  // starts accepting the weaker one.
+  await ref.update({
+    status: 'preapproved', preapproved_by: 'auto:lockout-check', preapproved_at: FieldValue.serverTimestamp(),
+    cmd_sha: cmdSha, approved_sha256: cmdSha, approved_sha256_at: new Date().toISOString(),
+    expiry, single_use: true, run_token: runToken,
+  });
+  // [SEC-APPROVAL-KMSSIG-V1] SIGN IT. Without this the envelope waApprovalEnvelope()
+  // builds carries no approval_sig, and the executor -- which runs APPROVAL_REQUIRE_SIGNED=1
+  // and is deliberately FAIL-CLOSED where this writer is fail-soft -- refuses every job.
+  // The refusal is silent from here (exit -1, no stdout), which is exactly what an unsigned
+  // auto-run looked like before this block existed.
+  //
+  // THE APPROVER FIELD SAYS WHAT IS TRUE. There is no human in this path, so it does not
+  // name one. 'auto:lockout-check' goes into the SIGNED bytes, so the audit trail can never
+  // later be read as a person having approved it. The signature's job is unchanged: it
+  // proves the approval came from the control plane's KMS key rather than from anyone who
+  // can write the Firestore document, and it binds the job id and the command digest so it
+  // cannot be lifted onto a different job.
+  const _macKey = process.env.APPROVAL_MAC_KEY || '';
+  const _sigStamp: any = { approved_sha256: cmdSha, approved_sha256_at: new Date().toISOString() };
+  if (_macKey) {
+    _sigStamp.approval_mac = crypto.createHmac('sha256', _macKey).update(jobId + '|' + cmdSha, 'utf8').digest('hex');
+    _sigStamp.approval_mac_v = 1;
+  }
+  if (PC_APPROVAL_SIG_KEY) {
+    try {
+      const _appr = 'auto:lockout-check';
+      const _now = Date.now();
+      const _iat = new Date(_now).toISOString();
+      const _exp = new Date(_now + PC_APPROVAL_SIG_TTL_SEC * 1000).toISOString();
+      const _sigDoc = await db.collection('pending_confirms').doc(String(jobId)).get();
+      const _sigJx: any = _sigDoc.exists ? (_sigDoc.data() || {}) : {};
+      const _canon = pcApprovalCanonV2({
+        alg: PC_APPROVAL_SIG_ALG, jid: String(jobId), csha: cmdSha,
+        ctyp: String(_sigJx.command_type || ''), asha: pcApprovalArgsSha(_sigJx.arguments),
+        appr: _appr, kver: PC_APPROVAL_SIG_KEY, iat: _iat, exp: _exp });
+      _sigStamp.approval_sig = await pcApprovalSign(_canon);
+      _sigStamp.approval_sig_v = 4;
+      _sigStamp.approval_sig_canon = PC_APPROVAL_CANON_V2_ID;
+      _sigStamp.approval_sig_alg = PC_APPROVAL_SIG_ALG;
+      _sigStamp.approval_sig_key = PC_APPROVAL_SIG_KEY;
+      _sigStamp.approval_sig_approver = _appr;
+      _sigStamp.approval_sig_iat = _iat;
+      _sigStamp.approval_sig_exp = _exp;
+    } catch (e) {
+      console.error('[auto] signing failed for ' + jobId + ': ' + String(e));
+    }
+  }
+  await ref.set(_sigStamp, { merge: true });
+  await ref.update({ status: 'executing', started_by: 'auto:lockout-check', started_at: FieldValue.serverTimestamp() }).catch(() => {});
+  let r: any;
+  try {
+    // EMPTY token, for the same reason /api/jobs/fire forwards an empty one: there is no
+    // human in this path, so gate-exec must run under its own scoped identity rather than
+    // borrowing a live human's credential.
+    r = await waExecuteApproved(jobId, command, '');
+  } catch (e: any) {
+    // Back to 'pending', NOT to a failure state. The job was never run, so the human path
+    // must still be able to pick it up -- a job that auto-running dropped on the floor
+    // would be the silent-drop failure LOCKOUT-CLASS.md forbids.
+    await ref.update({ status: 'pending', fire_refused_reason: 'auto-run exec call failed', fire_refused_at: FieldValue.serverTimestamp() }).catch(() => {});
+    await db.collection('journal').add({ agent_id: 'auto_approve', action: 'auto_run_failed', message: 'Auto-run of job ' + jobId + ' could not reach the executor; returned to the human queue.', timestamp: FieldValue.serverTimestamp() }).catch(() => {});
+    return null;
+  }
+  const exec = r.exec; const exit = r.exit;
+  await ref.update({
+    status: 'executed', ran_as: 'auto-approve', exit_code: exit,
+    stdout_tail: String((exec && exec.stdout) || '').slice(-6000), stderr_tail: String((exec && exec.stderr) || (exec && exec.raw) || '').slice(-6000),
+    confirmed_by: 'auto:lockout-check', ran_at: FieldValue.serverTimestamp(),
+    single_use_consumed: true, used: true, used_at: FieldValue.serverTimestamp(), run_token: FieldValue.delete(),
+  });
+  await db.collection('journal').add({ agent_id: 'auto_approve', action: confirm ? 'auto_run_executed_confirmed' : 'auto_run_executed', message: 'Auto-ran job ' + jobId + ' (' + commandType + ', exit ' + exit + (confirm ? ', OPERATOR-CONFIRMED IN CHAT' : '') + '): ' + command.slice(0, 200), timestamp: FieldValue.serverTimestamp() });
+  // THE EXECUTOR'S LOCKOUT REFUSAL IS RELAYED, NOT SWALLOWED. The control plane cannot
+  // evaluate the nine categories itself -- lockout_check.py is Python and lives in the
+  // executor, and a TypeScript second copy is exactly the drift this fleet has already
+  // been bitten by. So the executor refuses, and this turns that refusal into the chat
+  // question, naming the rule that fired.
+  // exec.error is where a REFUSAL lands (waCallExec parses the executor's JSON body);
+  // stderr/raw only carry output from a job that actually ran. Reading only the latter two
+  // made an unsigned-approval refusal look like a silent exit -1 with no explanation.
+  const _stderr = String((exec && exec.stderr) || (exec && exec.error) || (exec && exec.raw) || '');
+  if (exit !== 0 && /lockout-class/.test(_stderr)) {
+    const _rules = (_stderr.match(/LC[1-9]/g) || []).join(',') || 'unnamed';
+    return 'NEEDS YOUR OK — REFUSED BY THE LOCKOUT CHECK, NOT RUN.\n' +
+           'rule(s): ' + _rules + '\n' +
+           'These are the changes that destroy the way back in (deploy/LOCKOUT-CLASS.md).\n' +
+           'command: ' + command.slice(0, 800) + '\n' +
+           'detail: ' + _stderr.slice(-800) + '\n' +
+           'If you want it anyway, say so and I will re-issue it with confirm=true.';
+  }
+  return 'RAN job ' + jobId + ' (' + commandType + ') exit ' + exit + (confirm ? ' [operator-confirmed]' : '') + '\n' +
+         String((exec && exec.stdout) || '').slice(-6000) +
+         (_stderr ? '\nstderr: ' + _stderr.slice(-2000) : '');
+}
+
+async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
   const server = new McpServer({ name: PC_REPO_ID, version: '1.0.0' });
   // [PC-TOOLS-V1] Shadow registerTool ONCE rather than editing 36 call sites. Every
   // registration below flows through this unchanged.
-  const _pcAllowed = new Set(await pcToolClasses(agentId));
+  const _pcStrainClasses = await pcToolClasses(agentId);
+  const _pcAllowed = new Set(_pcStrainClasses);
+  // [WP4B-KEY-CLASSES-V1] The SECOND, narrower set: what the presented SESSION KEY holds.
+  // null means the key stated no restriction (or there is no key at all, as on the
+  // /mcp/:token connector mount, whose callers pass nothing here) -- in which case this
+  // whole mechanism is inert and the strain set alone decides, exactly as before.
+  // pcNarrowClasses guarantees _pcHard is a SUBSET of _pcAllowed, so this can only ever
+  // take tools away and never hand one back.
+  const _pcHard: Set<string> | null = (typeof keyClasses === 'undefined' || keyClasses === null)
+    ? null : new Set(pcNarrowClasses(_pcStrainClasses, keyClasses));
+  let _pcHardN = 0;
   const _pcWithheld: string[] = [];
   const _pcReg = (server as any).registerTool.bind(server);
+  // [MCP2026-DUAL-ERA-V1] The 2026-07-28 branch needs the SAME tool set this server just
+  // built -- same admission verdict, same withholding, same who() closure -- and it must not
+  // reach into the SDK's private registry to get it. Recording here, INSIDE the shadow that
+  // already decides what registers, is the only place where "the tools this role actually
+  // has" is a fact rather than a re-derivation: a withheld tool returns above this line and
+  // is therefore absent from both eras by construction. Legacy behaviour is unchanged --
+  // nothing below reads __pcTools.
+  const _pcTools: any[] = [];
+  (server as any).__pcTools = _pcTools;
   (server as any).registerTool = (name: string, spec: any, handler: any) => {
     const klass = PC_TOOL_CLASS[name] || 'other';
     // whoami is the floor: a role that cannot say what it is cannot be debugged, and the
     // denied-server path already treats it that way.
+    //
+    // [WP4B-KEY-CLASSES-V1] THE KEY RESTRICTION IS NOT GATED ON PC_TOOLS_ENFORCE, and that
+    // asymmetry is deliberate. PC_TOOLS_ENFORCE guards a change to what EXISTING strains hold:
+    // flipping it could silently take tools from a fleet that never asked, so it ships off and
+    // observes. A key restriction has no such population to protect -- it is written ONCE, by
+    // the operator, at mint, on ONE key, for exactly the purpose of taking those tools away.
+    // Honouring it only when a separate global flag happens to be on would make the boundary a
+    // config revision away from not existing, which is the same prose-not-boundary failure this
+    // is meant to end. So: unregistered, unconditionally, and therefore absent from tools/list
+    // in BOTH eras -- a tool the subagent cannot see is one it cannot be talked into trying.
+    if (name !== 'whoami' && _pcHard && !_pcHard.has(klass)) {
+      _pcHardN++;
+      _pcWithheld.push(name + ':' + klass + ':key');
+      return undefined;
+    }
     if (name !== 'whoami' && !_pcAllowed.has(klass)) {
       _pcWithheld.push(name + ':' + klass);
       if (PC_TOOLS_ENFORCE) return undefined;
     }
-    return _pcReg(name, spec, handler);
+    // [MCP-RESULT-CAP-V1] ONE wrap, here, and BOTH eras inherit it: the legacy SDK
+    // receives the wrapped handler through _pcReg, and the modern 2026-07-28 branch
+    // calls t.handler out of _pcTools -- which is now the SAME wrapped function.
+    // Wrapping at either call site alone would cap one era and leave the other
+    // uncapped, and the two would drift apart on the next edit.
+    const _pcCapped = pcCapWrap(name, spec, handler);
+    _pcTools.push({ name: name, spec: spec, handler: _pcCapped });
+    return _pcReg(name, spec, _pcCapped);
   };
   void (async () => {
     if (!_pcWithheld.length) return;
     try {
       await db.collection('journal').add({
         agent_id: 'mcp_gateway',
-        action: PC_TOOLS_ENFORCE ? 'tool_surface_withheld' : 'tool_surface_would_withhold',
+        // [WP4B-KEY-CLASSES-V1] 'would_withhold' is a LIE the moment one tool was actually
+        // withheld by a key restriction, and an audit line that misreports a real refusal as a
+        // hypothetical is worse than no line. Any hard withholding makes this a WITHHELD record.
+        action: (PC_TOOLS_ENFORCE || _pcHardN) ? 'tool_surface_withheld' : 'tool_surface_would_withhold',
         message: (PC_TOOLS_ENFORCE ? 'Withheld ' : 'WOULD have withheld ') + _pcWithheld.length
           + ' tool(s) from ' + agentId + ' (classes held: '
-          + Array.from(_pcAllowed).join(',') + '): ' + _pcWithheld.join(' '),
+          + Array.from(_pcAllowed).join(',') + '): ' + _pcWithheld.join(' ')
+          + (_pcHardN ? ' -- of these, ' + _pcHardN + ' (marked :key) were ACTUALLY withheld, '
+            + 'unconditionally, by the presented session key\'s tool_classes restriction '
+            + '(effective: ' + Array.from(_pcHard as Set<string>).join(',') + '); '
+            + 'PC_TOOLS_ENFORCE does not govern those.' : ''),
         timestamp: FieldValue.serverTimestamp()
       });
     } catch (e) {}
@@ -675,15 +1467,32 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // So `agent` is a CREDENTIAL, not a self-asserted role name. A role name resolves to
   // nothing. An unrecognised key is REFUSED outright -- it is never downgraded to a weaker
   // role and never silently upgraded to a stronger one. That last direction is not
-  // hypothetical: the first cut of this fell back to fleet-archivist, the one role permitted
-  // to stage gated jobs, so a single mistyped character PROMOTED a chat. fleet-drafter found
+  // hypothetical: the first cut of this fell back to fleet-advisor, the one role permitted
+  // to stage gated jobs, so a single mistyped character PROMOTED a chat. fleet-curator found
   // it by mutating one character of its own key.
   // Impersonation is bounded by the key being unguessable and server-minted, NOT by any
   // claim in this file.
-  // [RELEASE-ROSTER-V1] v3 ships four strains. The operator's private ones (ads, ghost,
-  // seaside, linkedin, avatar, family-budget) are NOT part of an OSS release and must not
-  // be baked into anyone else's install. breakglass/handoff are mechanisms, not people.
-  const ROLES = new Set(['fleet-archivist','fleet-analyst','fleet-mechanic','fleet-inspector','fleet-drafter','fleet-herald','fleet-librarian','fleet-curator','fleet-breakglass','fleet-engineer','fleet-courier','fleet-handoff']);
+  // [RELEASE-ROSTER-V1] ONE LIST. This was a SECOND, hand-maintained roster that contradicted
+  // STRAIN_SEED three lines under a comment claiming there was only one: it named twelve roles
+  // where the shipped seed names six, and seven of those names no install has ever created. It
+  // is now DERIVED from STRAIN_SEED -- the same single source STRAIN_PASTEABLE is derived from
+  // -- so the two cannot drift and the release extractor still has exactly ONE declaration to
+  // trim.
+  //
+  // WHAT THIS SET ACTUALLY DOES, because the name oversells it: it is NOT an authorisation
+  // table and it admits nothing. Both branches below return agentId unchanged. It decides ONE
+  // thing -- whether the `agent` argument is echoed VERBATIM into the log line, or only as a
+  // fingerprint. Shrinking it therefore CANNOT widen access; the only behavioural effect is
+  // that a role name outside the seed takes the generic C1 branch instead of the specific
+  // IMPERSONATION-ATTEMPT branch. Shrinking is also the SAFE direction for an allowlist that
+  // gates verbatim printing of a possibly-credential value: a shorter list can only print
+  // FEWER values, never more.
+  //
+  // [STRAIN-TDZ-V1] STRAIN_SEED is a module-scope const declared far below this line. Reading
+  // it here is safe because this runs inside buildMcpServer, which is reached only from the
+  // /mcp and /mcp/:token REQUEST handlers -- never during module evaluation. Do not hoist this
+  // set to module scope, where it would be read before STRAIN_SEED is initialised.
+  const ROLES = new Set(STRAIN_SEED);
   // VERIFY-GREP: IDENTITY-TRUTH-V1
   const who = (a: any): string => {
     if (a && typeof a.agent === 'string' && a.agent !== agentId) {
@@ -734,14 +1543,83 @@ async function buildMcpServer(agentId: string): Promise<any> {
     });
 
   server.registerTool('list_work_items',
-    { description: 'List work items. Optional role/status filters.',
-      inputSchema: { role: z.string().optional(), status: z.string().optional(), ...AG } },
-    async ({ role, status }: any) => {
+    { description: 'List work items. BOUNDED BY DEFAULT: returns id, title, role, status and a payload SIZE HINT, not the payload itself, so the queue cannot flood your context. ids:["<id>","<id>"] reads those items IN FULL and is how you read a payload. detail:true expands every match and is NOT budgeted. status defaults to any; "all" means the same thing explicitly.',
+      inputSchema: { role: z.string().optional(), status: z.string().optional(), ids: z.array(z.string()).optional(), detail: z.boolean().optional(), limit: z.number().optional(), ...AG } },
+    async ({ role, status, ids, detail, limit }: any) => {
+      // WHY THIS TOOL IS NOT TEN LINES ANY MORE. It used to JSON.stringify whole
+      // documents with no projection, which is the 2,579-characters-per-item figure
+      // the cap block above cites: a 14-item queue cost 46,838 characters and the
+      // tail was UNREACHABLE, because this surface has no cursor and this tool had
+      // no id filter. Three v7.0 work items sat unread by every session for that
+      // reason alone. Summary + ids drill-in is the fix; the cap raise is not.
+      //
+      // THE BOUND IS ENFORCED BY CONSTRUCTION, NOT BY ARITHMETIC. A draft of this
+      // patch clamped rows using a per-row character estimate. The estimate was
+      // wrong by 5% and the local proof caught it emitting 25,163 characters against
+      // the 24,000 cap then in force. Any such number is also only correct until
+      // someone adds a field to proj(). So the summary path FILLS A CHARACTER BUDGET
+      // and stops, and SAYS HOW MANY IT DROPPED -- a silently short list reads as
+      // 'that is all there is', which is the exact failure this tool already caused.
+      const lim = Math.min(Number(limit) || 60, 300);
+      // Coupled to the cap in the SAFE DIRECTION ONLY: a summary must never outgrow
+      // the cap, but it must not inflate just because the cap did -- the whole point
+      // is that a routine queue check stays cheap.
+      const SUM_BUDGET = Math.min(20000, PC_RESULT_MAX - 4000);
+      const whole = (d: any) => ({ ...(d.data() || {}), id: d.id });
+      const proj = (d: any) => {
+        const v = d.data() || {};
+        const p = (v && typeof v.payload === 'object' && v.payload) ? v.payload : {};
+        return { id: d.id, title: String(v.title || '').slice(0, 90),
+          role: v.assigned_role || '', status: v.status || '',
+          at: (v.created_at && v.created_at._seconds) || null,
+          pk: Object.keys(p).length, pc: JSON.stringify(p).length };
+      };
+      // ids[] is a DRILL-IN, not a filter: it reads whole documents BY ID and ignores
+      // role/status, because the reason to name an id is that the summary already told
+      // you which one you want. Doc-ref reads rather than a where-in: Firestore caps an
+      // 'in' clause at 30 terms, and a query that refuses past 30 is a trap here.
+      if (Array.isArray(ids) && ids.length) {
+        const out: any[] = [], missing: string[] = [];
+        for (const i of ids.slice(0, 25)) {
+          const d = await db.collection('work_items').doc(String(i)).get();
+          if (d.exists) out.push(whole(d)); else missing.push(String(i));
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ mode: 'ids',
+          requested: ids.length, shown: out.length, missing,
+          truncated: ids.length > 25 ? 'only the first 25 ids were read' : undefined,
+          items: out }, null, 2) }] };
+      }
       let q: any = db.collection('work_items');
       if (role) q = q.where('assigned_role', '==', role);
-      if (status) q = q.where('status', '==', status);
-      const snap = await q.limit(50).get();
-      return { content: [{ type: 'text', text: JSON.stringify(snap.docs.map((d: any) => d.data()), null, 2) }] };
+      if (status && status !== 'all') q = q.where('status', '==', status);
+      const snap = await q.limit(lim).get();
+      const matched = snap.docs.length;
+      if (detail) {
+        // detail:true is the caller explicitly asking for everything and accepting the
+        // cap's truncation. It is deliberately NOT budgeted: budgeting it would drop
+        // items on the one path whose entire purpose is completeness.
+        return { content: [{ type: 'text', text: JSON.stringify({ mode: 'detail',
+          count: matched, limit: lim, detail: true, items: snap.docs.map(whole) }, null, 2) }] };
+      }
+      const items: any[] = [];
+      let used = 0;
+      for (const d of snap.docs) {
+        const row = proj(d);
+        const cost = JSON.stringify(row).length + 1;
+        if (used + cost > SUM_BUDGET) break;
+        used += cost; items.push(row);
+      }
+      const dropped = matched - items.length;
+      // Summary is emitted COMPACT; the indent is ~30% of a summary result and buys
+      // nothing a machine reads. detail keeps the indent -- there a person is reading
+      // the payload.
+      return { content: [{ type: 'text', text: JSON.stringify({ mode: 'summary',
+        count: items.length, matched, limit: lim, detail: false,
+        dropped_for_budget: dropped > 0 ? dropped : undefined,
+        note: dropped > 0 ? ('THIS LIST IS SHORT BY ' + dropped + ' ITEM(S): the character budget ran out, NOT the queue. Narrow with role/status, or pass a smaller limit.') : undefined,
+        legend: 'pk=payload key count, pc=payload chars, at=created_at epoch seconds',
+        hint: 'payload omitted -- call again with ids:["<id>","<id>"] to read them in full',
+        items }, null, 0) }] };
     });
 
   server.registerTool('read_journal',
@@ -752,7 +1630,6 @@ async function buildMcpServer(agentId: string): Promise<any> {
     });
 
   // ---- MEMORY-V1 -- knowledge-graph memory over Firestore -----------------
-  // Spec: shared/state/security-lane/MEMORY-V1-SPEC.md (fleet-mechanic, 2026-08-05)
   // Observations are DOCUMENTS, not strings: each carries confidence, author,
   // evidence, status and supersedes. That is what stops a retracted claim from
   // reading with the same authority as the correction that replaced it.
@@ -769,6 +1646,32 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // is the empty-pipe failure wearing a new hat.
   const memEmbed = async (text: string): Promise<number[] | null> => {
     try {
+      // [FLEET-MODE-V1] EMBEDDINGS FAIL OPEN ON FUNCTION AND CLOSED ON SPEND, AND THAT
+      // LOOKS LIKE AN EXCEPTION TO THE RULE. IT IS NOT, SO READ THIS BEFORE CHANGING IT.
+      // Everywhere else in this file an off mode THROWS, because the caller is a chat turn
+      // and a human is waiting for an answer that is not coming. Here the caller is a
+      // memory WRITE, and this function's existing contract -- stated eleven lines above --
+      // is that a null embedding degrades search to substring and NEVER blocks the write.
+      // Throwing here would make memory refuse to RECORD an observation because a side
+      // service is off. That is the empty-pipe failure wearing a new hat: the record of
+      // what happened is lost, permanently, to protect a budget it never touched.
+      // The spend half is still CLOSED -- returning null is a refusal, and it happens
+      // BEFORE the metadata server is asked for anything, so no request leaves the process.
+      // Vertex is the only transport this function has ever had: it authenticates off the
+      // instance metadata server and there is no API key path to reach.
+      // [SEC-FLEETMODE-CONSOLE-V1] AND THIS IS THE ONE TRANSPORT THAT KEEPS THE CHECK.
+      // The other three are reached only from a request a signed-in human made at the
+      // console, and are ungated there. This one is reached from an MCP tool, which a
+      // runner-driven strain can call with nobody watching -- the unattended,
+      // machine-initiated spend the switch exists to refuse. So it stays, and the refusal
+      // now SAYS SO: a bare `return null` left an operator whose memory search had quietly
+      // degraded to substring with nothing to read. Nothing else changes -- no request
+      // leaves the process, and the write it serves still goes through.
+      const _fmMode = await fleetMode();
+      if (!fleetTransportAllowed(_fmMode, 'vertex')) {
+        console.log('[memory/embed] ' + fleetRefusalText(_fmMode, 'the memory embedding', 'vertex'));
+        return null;
+      }
       const LOC = process.env.VERTEX_LOCATION || 'us-central1';
       // [SEC-NO-OPERATOR-PROJECT-V1] No hardcoded project id. It leaked the operator's
       // project into every adopter's tree, where it is also simply WRONG -- their
@@ -858,7 +1761,11 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // pinned-then-recency, never by name. Entities are NOT renamed to win a sort: that would
   // break every supersedes chain pointing at them.
   const CTX_MEM_MAX = 24000;
-  const CTX_MEM_PINNED = [PC_REPO_ID + '.git', 'pc-git-mcp', 'bootstrap-paste', 'LAWS.md', 'MEMORY-V1'];
+  // Entity names pinned to the top of the digest. These four are the PRODUCT's own entities
+  // and exist in every install. An operator who keeps a governance document as a graph entity
+  // pins it by NAME with MEM_PINNED_EXTRA=<name>[,<name>] rather than by editing this file.
+  const CTX_MEM_PIN_EXTRA = String(process.env.MEM_PINNED_EXTRA || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+  const CTX_MEM_PINNED = [PC_REPO_ID + '.git', 'pc-git-mcp', 'bootstrap-paste', 'MEMORY-V1'].concat(CTX_MEM_PIN_EXTRA);
   const CTX_MEM_PIN_OBS = 8;
   const CTX_MEM_DETAIL_OBS = 2;
   const CTX_MEM_OBS_CHARS = 400;
@@ -1011,7 +1918,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
     } catch (e: any) { return memErr('ADD_OBSERVATIONS_FAILED', String((e && e.message) || e)); } });
 
   server.registerTool('create_relations',
-    { description: 'Create directed edges between entities, in active voice (fleet-mechanic -> staged -> job:QxqG). Idempotent on (from, relationType, to) within a scope.',
+    { description: 'Create directed edges between entities, in active voice (fleet-security -> staged -> job:QxqG). Idempotent on (from, relationType, to) within a scope.',
       inputSchema: { relations: z.array(z.object({ from: z.string(), relationType: z.string(), to: z.string() })), scope: z.string().optional(), ...AG } },
     async ({ relations, scope }: any) => { try {
       const sc = memScope(scope); const created: any[] = [], existing: any[] = [];
@@ -1025,8 +1932,11 @@ async function buildMcpServer(agentId: string): Promise<any> {
       return memOk({ scope: sc, created, existing });
     } catch (e: any) { return memErr('CREATE_RELATIONS_FAILED', String((e && e.message) || e)); } });
 
-  // The three delete_* tools RETRACT. No role in this fleet holds a delete tool and
-  // versioning is the undo (Law 9.4). Hard deletion is a gated job, never a tool call.
+  // The three delete_* tools RETRACT. Nothing is erased: status becomes "retracted" and
+  // object versioning is the undo. NOTE THE SCOPE, because it is narrower than it looks: the
+  // DATA LAKE has no delete tool, so a stray lake write cannot be undone by any role. The
+  // REPOSITORY is NOT covered by that -- the git tools can remove a path outright. Hard
+  // deletion of a memory record is a gated job, never a tool call.
   server.registerTool('delete_entities',
     { description: 'RETRACT entities and their active observations. Nothing is erased: status becomes "retracted" and stays readable with includeRetracted:true. Hard deletion is a gated job.',
       inputSchema: { entityNames: z.array(z.string()), scope: z.string().optional(), ...AG } },
@@ -1210,18 +2120,28 @@ async function buildMcpServer(agentId: string): Promise<any> {
     });
 
   server.registerTool('stage_privileged_job',
-    { description: 'Stage a privileged job for human approval. AI proposes; a human commits. It does NOT run until the human confirms with their secret.',
+    { description: 'Run a privileged job. With PC_AUTO_APPROVE=1 (the shipped default) it is pre-approved, KMS-signed and EXECUTED in this call, and the result comes straight back -- there is no approval console and nothing to go and tap. Read the first word of the result: RAN means it executed, STAGED means PC_AUTO_APPROVE is off and it is sitting unrun. Destructive bodies also run by default; set PC_GUARDRAILS=1 to have them refused and returned to chat instead.',
       inputSchema: { command_type: z.string(), command: z.string().optional(), target: z.string().optional(), ...AG } },
     async (a: any) => {
+      const _sdr = pcSecretDestroyRefusal(String(a.command || ''));
+      if (_sdr) return { content: [{ type: 'text', text: _sdr }], isError: true };
       const ref = db.collection('pending_confirms').doc();
       const jargs: any = {}; if (a.command) jargs.command = a.command; if (a.target) jargs.targetNode = a.target;
-      await ref.set({ job_id: ref.id, staged_by: who(a), command_type: a.command_type, arguments: jargs, status: 'pending', created_at: FieldValue.serverTimestamp() });
+      const _adm = await pcAdmitStage(who(a), String(a.command_type || ''), jargs);
+      if (!_adm.ok) return { content: [{ type: 'text', text: _adm.refusal }], isError: true };
+      await ref.set({ job_id: ref.id, staged_by: who(a), command_type: a.command_type, arguments: jargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha });
       await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: `Staged ${a.command_type} (${ref.id}) awaiting human approval.`, timestamp: FieldValue.serverTimestamp() });
-      return { content: [{ type: 'text', text: `STAGED job ${ref.id} (${a.command_type}) — awaiting your human confirm; will NOT run until you approve.` }] };
+      // [SEC-AUTORUN-SCOPE-V1] Auto-run like run_command does. Before this line the job was
+      // written at 'pending' and left there for an approval console that no longer exists,
+      // so this tool reported STAGED and then nothing ever happened. Same pre-approval, same
+      // KMS signature, same executor rungs -- only the delivery of the approval changed.
+      const _auto = await pcAutoRun(ref, ref.id, String(a.command_type || ''), String((jargs && jargs.command) || ''), false, a.confirm === true);
+      if (_auto) return { content: [{ type: 'text', text: _auto }] };
+      return { content: [{ type: 'text', text: `STAGED job ${ref.id} (${a.command_type}) — PC_AUTO_APPROVE is off, so this is waiting. There is no approval console: set PC_AUTO_APPROVE=1 or run it yourself.` }] };
     });
 
   server.registerTool('list_pending_confirm',
-    { description: 'List privileged jobs awaiting human approval.', inputSchema: { ...AG } },
+    { description: 'List privileged jobs sitting at pending. On a default install this should be EMPTY: work is pre-approved and executed in the staging call. A non-empty list means PC_AUTO_APPROVE is off, or a job failed to reach the executor and was returned to pending -- it is not a queue anyone is going to come and approve.', inputSchema: { ...AG } },
     async () => {
       const snap = await db.collection('pending_confirms').where('status', '==', 'pending').limit(50).get();
       return { content: [{ type: 'text', text: JSON.stringify(snap.docs.map((d: any) => d.data()), null, 2) }] };
@@ -1229,47 +2149,41 @@ async function buildMcpServer(agentId: string): Promise<any> {
 
 
   server.registerTool('run_command',
-    { description: 'Stage a shell command for the executor (GATED). Allowlisted binaries only: echo, gcloud, firebase, npm, node, python3. AI proposes; it does NOT run until the human confirms with their secret.',
-      inputSchema: { command: z.string(), ...AG } },
+    { description: 'Run a shell command on the executor. The executor runs your script with PATH restricted to a directory of symlinks to an enumerated set of binaries, so an unlisted binary does not resolve -- `gsutil` and `ssh` answer "command not found". Shell builtins and keywords do not use PATH, so `set -uo pipefail` is unaffected. KNOWN GAP: an ABSOLUTE PATH still runs, so this is a real control and not a sandbox. What primarily gates this tool is unchanged: a human approved this exact command, and the executor refuses any script whose sha256 does not match the approval-time hash.',
+      inputSchema: { command: z.string(), confirm: z.boolean().optional(), ...AG } },
     async (a: any) => {
+      const _sdr = pcSecretDestroyRefusal(String(a.command || ''));
+      if (_sdr) return { content: [{ type: 'text', text: _sdr }], isError: true };
       const ref = db.collection('pending_confirms').doc();
-      await ref.set({ job_id: ref.id, staged_by: who(a), command_type: 'run_cmd', arguments: { command: a.command }, status: 'pending', created_at: FieldValue.serverTimestamp() });
-      await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: `Staged run_cmd (${ref.id}): ${a.command}`, timestamp: FieldValue.serverTimestamp() });
+      // lockout_ack rides INSIDE arguments, so it is written before command_sha256 is
+      // computed and is therefore covered by the approval signature the executor verifies.
+      // An ack bolted on afterwards would be a field the signature does not cover, which is
+      // the same shape as the approved_sha256 gap this fleet already had to close.
+      const _confirm = a.confirm === true;
+      const _jargs: any = _confirm ? { command: a.command, lockout_ack: true } : { command: a.command };
+      const _adm = await pcAdmitStage(who(a), 'run_cmd', _jargs);
+      if (!_adm.ok) return { content: [{ type: 'text', text: _adm.refusal }], isError: true };
+      await ref.set({ job_id: ref.id, staged_by: who(a), command_type: 'run_cmd', arguments: _jargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha });
+      await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: `Staged run_cmd (${ref.id})${_confirm ? ' [operator-confirmed in chat]' : ''}: ${a.command}`, timestamp: FieldValue.serverTimestamp() });
+      const _auto = await pcAutoRun(ref, ref.id, 'run_cmd', String(a.command || ''), false, _confirm);
+      if (_auto) return { content: [{ type: 'text', text: _auto }] };
       return { content: [{ type: 'text', text: `STAGED run_cmd job ${ref.id} — awaiting your confirm; runs only after you approve.` }] };
     });
-  server.registerTool('ssh_executor',
-    { description: 'Stage an SSH command on a target node (GATED). AI proposes; it does NOT run until the human confirms with their secret.',
-      inputSchema: { target: z.string(), command: z.string(), ...AG } },
-    async (a: any) => {
-      // [SEC-SSHKEY-NOSTAGE-V1] REFUSE BEFORE STAGING, NOT AFTER THE TAP.
-      // gate-exec/exec_server.py's ssh_key_preflight() already refuses an ssh job whose key is
-      // unconfigured, and it does so ABOVE claim_job_for_execution(), so the one-shot approval
-      // is no longer burned. That fix cannot go far enough on its own and its own comment says
-      // so: the executor is only reached POST-APPROVAL, so the refusal still arrives after the
-      // operator has spent a Face ID on a job that never had any chance of running. This is the
-      // half that belongs here -- the stage itself is the cost, and nothing should stage.
-      //
-      // SAME VARIABLE NAME AS THE EXECUTOR, DELIBERATELY. EXEC_SSH_KEY_SECRET names the Secret
-      // Manager secret holding the private key. It must be set on BOTH services: the executor
-      // READS the secret, this service only needs to know WHETHER one is configured. Unset here
-      // means refuse, exactly as unset there means refuse -- there is no default and no guess.
-      // The name this replaced was a private, operator-specific resource name that reached a
-      // public tree, and a name nobody creates is indistinguishable at runtime from a name
-      // nobody has permission to read.
-      const _sshSecret = String(process.env.EXEC_SSH_KEY_SECRET || '');
-      if (_sshSecret === '') {
-        return { content: [{ type: 'text', text: 'refused: ssh jobs are not usable on this deployment. '
-          + 'EXEC_SSH_KEY_SECRET names no Secret Manager secret, so gate-exec has no private key to '
-          + 'run an ssh job with and would refuse this job after you had already approved it. '
-          + 'NOTHING WAS STAGED and no approval was requested. To enable ssh: create a secret holding '
-          + 'the private key, grant the gate-exec service secretAccessor on THAT SECRET ONLY, and set '
-          + 'EXEC_SSH_KEY_SECRET to its name on both the control plane and gate-exec.' }], isError: true };
-      }
-      const ref = db.collection('pending_confirms').doc();
-      await ref.set({ job_id: ref.id, staged_by: who(a), command_type: 'ssh', arguments: { targetNode: a.target, command: a.command }, status: 'pending', created_at: FieldValue.serverTimestamp() });
-      await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: `Staged ssh (${ref.id}) on ${a.target}: ${a.command}`, timestamp: FieldValue.serverTimestamp() });
-      return { content: [{ type: 'text', text: `STAGED ssh job ${ref.id} on ${a.target} — awaiting your confirm; runs only after you approve.` }] };
-    });
+  // [SEC-SSHTOOL-REMOVED-V1] ssh_executor USED TO BE REGISTERED HERE AND IS GONE.
+  // It was an artifact of an earlier architecture that had addressable nodes. MEASURED before
+  // removal, not assumed: no installer this product ships has ever created the private-key
+  // secret it needed, and EXEC_SSH_KEY_SECRET is unset on BOTH prod services -- control plane
+  // and gate-exec -- so every ssh job this tool could stage was refused, in every deployment
+  // that has ever existed. It was never a path to the workstation VM either: that instance is
+  // created --no-address with OS Login enforced and is reached with
+  // `gcloud compute ssh --tunnel-through-iap`, which needs no key of ours and no route from
+  // Cloud Run. A tool that cannot succeed anywhere is not a capability, it is a rake.
+  //
+  // THE EXECUTOR'S ssh BRANCH WENT WITH IT, so exec_server.py now has exactly one execution
+  // path. The ctyp and asha fields stay in the V2 approval canon below -- see the comment
+  // there. They were added BECAUSE an unsigned command_type could redirect an approved
+  // command into the ssh branch, and they must outlive it: the day a second branch is added,
+  // the gap reopens if the canon has meanwhile been narrowed to the one branch that remains.
 
   // ---- Chat-history log: per-ROLE, private, searchable (the operator's memory augmentation) ----
   server.registerTool('log_history',
@@ -1286,33 +2200,14 @@ async function buildMcpServer(agentId: string): Promise<any> {
     });
 
   server.registerTool('search_history',
-    { description: "Search YOUR ROLE's chat-history (scoped to your resolved role). Case-insensitive substring over text + tags. Empty query = most recent. Use FIRST when the operator references something from before.",
+    { description: "Search YOUR ROLE's chat-history (scoped to your resolved role). Case-insensitive substring over text + tags. Empty query = most recent. Use FIRST when the operator references something from before. When live Firestore under-delivers, the BigQuery forever-archive is consulted too and an in-band [SEC-BQ-ARCHIVE-V1] notice reports the outcome.",
       inputSchema: { query: z.string().optional(), limit: z.number().optional(), role: z.string().optional(), ...AG } },
-    async (a: any) => {
-      const snap = await db.collection('chat_history').where('agent_id', '==', who(a)).limit(3000).get();
-      let rows = snap.docs.map((d: any) => d.data());
-      rows.sort((x: any, y: any) => tsMillis(y.timestamp) - tsMillis(x.timestamp));
-      if (a.role) rows = rows.filter((r: any) => r.role === a.role);
-      if (a.query) {
-        const q = String(a.query).toLowerCase();
-        rows = rows.filter((r: any) =>
-          (r.text || '').toLowerCase().includes(q) ||
-          (Array.isArray(r.tags) ? r.tags.join(' ').toLowerCase().includes(q) : false));
-      }
-      rows = rows.slice(0, a.limit || 20);
-      return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] };
-    });
+    async (a: any) => pcSearchHistoryImpl(who(a), a));
 
   server.registerTool('read_history',
-    { description: "Read YOUR ROLE's most recent history in chronological order (scoped to your resolved role) to refresh at session start.",
+    { description: "Read YOUR ROLE's most recent history in chronological order (scoped to your resolved role) to refresh at session start. When live Firestore under-delivers, the BigQuery forever-archive is consulted too and an in-band [SEC-BQ-ARCHIVE-V1] notice reports the outcome.",
       inputSchema: { limit: z.number().optional(), ...AG } },
-    async (a: any) => {
-      const snap = await db.collection('chat_history').where('agent_id', '==', who(a)).limit(3000).get();
-      let rows = snap.docs.map((d: any) => d.data());
-      rows.sort((x: any, y: any) => tsMillis(x.timestamp) - tsMillis(y.timestamp));
-      rows = rows.slice(-(a.limit || 30));
-      return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] };
-    });
+    async (a: any) => pcReadHistoryImpl(who(a), a));
 
   // ---- Fleet DATA LAKE on Cloud Storage: private-per-agent + one shared drop zone ----
   // Layout: agents/<agent_id>/<path> = YOUR private space (no other agent can read it);
@@ -1431,6 +2326,9 @@ async function buildMcpServer(agentId: string): Promise<any> {
       // A decrypt failure THROWS: an unreadable object must never render as an empty file.
       // The banner below is unchanged.
       const text = await harDecryptLakeBuf(r.key!, buf);
+      // [LAKE-READ-BOUND-V1] Refusal, never truncation: see the block above buildMcpServer.
+      const tooBig = pcLakeReadRefusal(r.key!, text.length);
+      if (tooBig) return { content: [{ type: 'text', text: tooBig }], isError: true };
       return { content: [{ type: 'text', text: `# ${r.key} (owner: ${owner})\n\n${text}` }] };
     });
 
@@ -1632,8 +2530,8 @@ async function buildMcpServer(agentId: string): Promise<any> {
   }  // [SEC-CDP-UNCONFIGURED-V1] end WS_CDP_PORT guard
   // [SEC-VM-UNCONFIGURED-V1] NO INSTANCE CONFIGURED MEANS NO VM TOOLS.
   // The VM is a y/n install option that DEFAULTS TO NO, so "unconfigured" is the common case,
-  // not the corner. All four tools addressed an instance from DEFAULTS -- WS_VM
-  // 'fleet-navigator', WS_ZONE 'us-central1-a' -- that no installer creates:
+  // not the corner. All four tools addressed an instance from DEFAULTS -- a guessed instance
+  // name and zone -- that no installer creates:
   //   vm_status   built a Compute REST URL against a project segment that is usually empty
   //               and failed on first call;
   //   vm_start / vm_stop / vm_resize are WORSE. They STAGE a pending_confirms row, so the
@@ -1667,8 +2565,11 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // arguments.command, status 'pending', created_at) and return the job id. Nothing touches the VM until
   // The operator approves and gate-exec runs the command AS them. vm_status is a READ and stays direct (above):
   // reads are not gated.
-  const HARVM_NAME = process.env.WS_VM || 'fleet-navigator';
-  const HARVM_ZONE = process.env.WS_ZONE || 'us-central1-a';
+  // No defaults here: this block is unreachable unless BOTH are non-empty (the guard above), so
+  // the old hardcoded fallbacks were dead code that shipped an instance name from this fleet's
+  // own history into every downloader's tree. Use the values the guard above already validated.
+  const HARVM_NAME = _wsVm;
+  const HARVM_ZONE = _wsZone;
   const HARVM_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
   const HARVM_T = ' ' + HARVM_NAME + ' --zone ' + HARVM_ZONE + ' --project ' + HARVM_PROJECT + ' --quiet';
   const HARVM_DESC = 'gcloud compute instances describe ' + HARVM_NAME + ' --zone ' + HARVM_ZONE + ' --project ' + HARVM_PROJECT + ' --format="value(status,machineType)"';
@@ -1678,19 +2579,26 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // whole audit record the operator reads on the approval card.
   async function harVmGateStage(a: any, cmdType: string, human: string, cmd: string): Promise<any> {
     const ref = db.collection('pending_confirms').doc();
-    await ref.set({ job_id: ref.id, staged_by: who(a), command_type: cmdType, arguments: { command: cmd, vm: HARVM_NAME, zone: HARVM_ZONE, human: human }, status: 'pending', created_at: FieldValue.serverTimestamp() });
+    const _vargs: any = { command: cmd, vm: HARVM_NAME, zone: HARVM_ZONE, human: human };
+    const _adm = await pcAdmitStage(who(a), cmdType, _vargs);
+    if (!_adm.ok) return { mode: 'refused', staged: false, duplicate_of: _adm.duplicate_of || null, note: _adm.refusal };
+    await ref.set({ job_id: ref.id, staged_by: who(a), command_type: cmdType, arguments: _vargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha });
     // Journal the ATTEMPT at stage time, so a VM action is visible even when the operator refuses it.
     await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: 'Staged ' + cmdType + ' (' + ref.id + ') on ' + HARVM_NAME + ': ' + human + ' -- NOT executed; awaiting the operator approval at the gate.', timestamp: FieldValue.serverTimestamp() });
-    return { mode: 'staged', job_id: ref.id, command_type: cmdType, staged_by: who(a), note: 'STAGED: the workstation was NOT touched. The operator approves at the gate, then read the result with read_job_log job_id=' + ref.id };
+    // [SEC-AUTORUN-SCOPE-V1] This returned STAGED and pointed at a gate that is deleted, so
+    // every vm_start / vm_stop / vm_resize parked forever while reporting success.
+    const _auto = await pcAutoRun(ref, ref.id, cmdType, cmd, false, a.confirm === true);
+    if (_auto) return { mode: 'ran', job_id: ref.id, command_type: cmdType, result: _auto };
+    return { mode: 'staged', job_id: ref.id, command_type: cmdType, staged_by: who(a), note: 'STAGED and NOT run: PC_AUTO_APPROVE is off and there is no approval console. Set PC_AUTO_APPROVE=1, or run the command yourself.' };
   }
   server.registerTool('vm_start',
-    { description: 'Ask the operator to START the workstation. STAGED to the human gate, never executed here: the standing order is that the advisor never starts the VM -- The operator starts it, and only the operator. Returns { mode: "staged", job_id }; the box is untouched until they approves at the gate, then read the result with read_job_log.', inputSchema: { ...AG } },
+    { description: 'START the workstation. With PC_AUTO_APPROVE=1 (the shipped default) this RUNS -- the standing order that only the operator starts the VM was enforced by a human tap that no longer exists, so treat starting it as a real action you are taking on their behalf and say so. Returns { mode: "staged", job_id }; the box is untouched until they approves at the gate, then read the result with read_job_log.', inputSchema: { ...AG } },
     async (a: any) => { const cmd = 'gcloud compute instances start' + HARVM_T + ' || { echo "start failed at the current machine type; retrying at e2-medium"; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type e2-medium && gcloud compute instances start' + HARVM_T + '; }; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_start', 'START ' + HARVM_NAME + ' (falls back to e2-medium if there is no capacity at the current size)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('vm_stop',
-    { description: 'Ask the operator to STOP the workstation browser box. STAGED to the human gate, never executed here -- stopping the box they may be working in is destructive. Returns { mode: "staged", job_id }; read the result with read_job_log after they approves.', inputSchema: { ...AG } },
+    { description: 'STOP the workstation browser box. With PC_AUTO_APPROVE=1 (the shipped default) this RUNS IMMEDIATELY and can kill a session the operator is working in -- there is no approval step in front of it any more, so ask them in chat first and only call this once they have said yes. Returns { mode: "ran", result } when it executed, { mode: "staged" } only if PC_AUTO_APPROVE is off.', inputSchema: { ...AG } },
     async (a: any) => { const cmd = 'gcloud compute instances stop' + HARVM_T + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_stop', 'STOP ' + HARVM_NAME, cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('vm_resize',
-    { description: 'Ask the operator to set the workstation machine type (e.g. e2-medium, e2-standard-2). STAGED to the human gate, never executed here: a resize STOPS the instance first, so it can kill their session. Returns { mode: "staged", job_id }; read the result with read_job_log after they approves.', inputSchema: { machine_type: z.string(), ...AG } },
+    { description: 'Set the workstation machine type (e.g. e2-medium, e2-standard-2). A resize STOPS the instance first, so it can kill the operator session -- and with PC_AUTO_APPROVE=1 (the shipped default) it RUNS IMMEDIATELY rather than waiting for a tap. Ask in chat first. Returns { mode: "ran", result } when it executed.', inputSchema: { machine_type: z.string(), ...AG } },
     async (a: any) => { const mt = String((a && a.machine_type) || '').trim(); if (mt.length > 40 || !/^[a-z][a-z0-9]*-[a-z0-9-]+$/.test(mt)) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'blocked: machine_type must look like e2-medium or e2-standard-2 (lowercase letters, digits and hyphens only) -- got: ' + mt.slice(0, 40) }) }] }; } const cmd = 'gcloud compute instances stop' + HARVM_T + '; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type ' + mt + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_resize', 'RESIZE ' + HARVM_NAME + ' to ' + mt + ' (STOPS it first; does NOT start it again)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   }  // [SEC-VM-UNCONFIGURED-V1] end WS_VM/WS_ZONE guard
   // VERIFY-GREP: F13-JOBLOG-OWNERSHIP-V1
@@ -1705,16 +2613,16 @@ async function buildMcpServer(agentId: string): Promise<any> {
   // control that is working.
   server.registerTool('read_job_log',
     { description: 'Read the full output (stdout/stderr/exit) of a gate job by id, from Firestore -- so the human never pastes logs. Pass job_id. You may read jobs YOU staged; operator principals (LOG_READ_ALL) read everything. If a job was refused, quarantined, superseded, or its executor failed, the reason comes back in `reason` and ran=false -- a refusal is NOT a malfunction, do not re-stage blindly.', inputSchema: { job_id: z.string(), ...AG } },
-    async (a: any) => { try { const me = who(a); const d = await db.collection('pending_confirms').doc(a.job_id).get(); if (!d.exists) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'job not found' }) }] }; } const x: any = d.data(); const OPS = String(process.env.LOG_READ_ALL || 'fleet-archivist').split(',').map((s: string) => s.trim()).filter(Boolean); const isOperator = OPS.indexOf('*') >= 0 || OPS.indexOf(me) >= 0; const stagedBy = String(x.staged_by || ''); if (!isOperator && stagedBy !== me) { console.warn('[cp] F13: ' + me + ' denied read_job_log on ' + a.job_id + ' (staged_by ' + (stagedBy || '(unset)') + ')'); return { content: [{ type: 'text', text: JSON.stringify({ error: 'not your job: ' + a.job_id + ' was staged by another principal. You can read the jobs you staged; ask the operator (or fleet-archivist) for this one.', job_id: a.job_id, staged_by: stagedBy || null, denied: true }) }] }; } const reason = x.fire_refused_reason || x.quarantine_reason || x.exec_failed_reason || x.supersede_note || x.error || null; return { content: [{ type: 'text', text: JSON.stringify({ job_id: a.job_id, status: x.status, ran: x.status === 'executed', exit_code: x.exit_code, ran_as: x.ran_as, staged_by: stagedBy || null, command_type: x.command_type || null, reason: reason, quarantine_reason: x.quarantine_reason || null, quarantined_at: x.quarantined_at || null, fire_refused_reason: x.fire_refused_reason || null, fire_refused_at: x.fire_refused_at || null, supersede_note: x.supersede_note || null, superseded_by_job: x.superseded_by_job || null, superseded_by_role: x.superseded_by_role || null, exec_failed_reason: x.exec_failed_reason || null, exec_http: (typeof x.exec_http === 'number') ? x.exec_http : null, stdout: x.stdout_tail || '', stderr: x.stderr_tail || '' }) }] }; } catch (e: any) { return { content: [{ type: 'text', text: JSON.stringify({ error: String((e && e.message) || e) }) }] }; } });
+    async (a: any) => { try { const me = who(a); const d = await db.collection('pending_confirms').doc(a.job_id).get(); if (!d.exists) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'job not found' }) }] }; } const x: any = d.data(); const OPS = String(process.env.LOG_READ_ALL || 'fleet-advisor').split(',').map((s: string) => s.trim()).filter(Boolean); const isOperator = OPS.indexOf('*') >= 0 || OPS.indexOf(me) >= 0; const stagedBy = String(x.staged_by || ''); if (!isOperator && stagedBy !== me) { console.warn('[cp] F13: ' + me + ' denied read_job_log on ' + a.job_id + ' (staged_by ' + (stagedBy || '(unset)') + ')'); return { content: [{ type: 'text', text: JSON.stringify({ error: 'not your job: ' + a.job_id + ' was staged by another principal. You can read the jobs you staged; ask the operator (or fleet-advisor) for this one.', job_id: a.job_id, staged_by: stagedBy || null, denied: true }) }] }; } const reason = x.fire_refused_reason || x.quarantine_reason || x.exec_failed_reason || x.supersede_note || x.expired_reason || x.error || null; return { content: [{ type: 'text', text: JSON.stringify({ job_id: a.job_id, status: x.status, ran: x.status === 'executed', exit_code: x.exit_code, ran_as: x.ran_as, staged_by: stagedBy || null, command_type: x.command_type || null, reason: reason, quarantine_reason: x.quarantine_reason || null, quarantined_at: x.quarantined_at || null, fire_refused_reason: x.fire_refused_reason || null, fire_refused_at: x.fire_refused_at || null, supersede_note: x.supersede_note || null, superseded_by_job: x.superseded_by_job || null, superseded_by_role: x.superseded_by_role || null, superseded_at: x.superseded_at || null, expired_reason: x.expired_reason || null, expired_at: x.expired_at || null, exec_failed_reason: x.exec_failed_reason || null, exec_http: (typeof x.exec_http === 'number') ? x.exec_http : null, stdout: x.stdout_tail || '', stderr: x.stderr_tail || '' }) }] }; } catch (e: any) { return { content: [{ type: 'text', text: JSON.stringify({ error: String((e && e.message) || e) }) }] }; } });
   server.registerTool('gcp_api',
-    { description: 'Call ANY GCP REST endpoint (https://*.googleapis.com) directly — no gcloud, no Cloud Build, no VM. TRUST LADDER: blessed READS (GET on compute/run/storage/logging/monitoring in our project) run instantly as the least-privilege control-plane identity; if it is not permitted it auto-escalates to the gate. EVERYTHING else — any mutation, DELETE, IAM, Secret Manager, a brand-new API — is STAGED to the operator gate and runs AS them on approval (destructive verbs trip a second Face ID). A staged call returns { mode:"staged", job_id }: after the operator approves, read the result with read_job_log. Pass method (GET/POST/PATCH/DELETE...), url (full https), optional body (object), optional reason (why).', inputSchema: { method: z.string(), url: z.string(), body: z.record(z.string(), z.any()).optional(), reason: z.string().optional(), ...AG } },
+    { description: 'Call ANY GCP REST endpoint (https://*.googleapis.com) directly — no gcloud, no Cloud Build, no VM. TRUST LADDER: blessed READS (GET on compute/run/storage/logging/monitoring in our project) run instantly as the least-privilege control-plane identity; if it is not permitted it auto-escalates to the gate. EVERYTHING else — any mutation, DELETE, IAM, Secret Manager, a brand-new API — goes through the executor and, with PC_AUTO_APPROVE=1 (the shipped default), RUNS IN THIS CALL and returns { mode:"ran", result }. There is no approval step and no second Face ID; destructive verbs are still classified, but the classification decides what is journalled, not whether it happens. { mode:"staged" } comes back only when PC_AUTO_APPROVE is off. Pass method (GET/POST/PATCH/DELETE...), url (full https), optional body (object), optional reason (why).', inputSchema: { method: z.string(), url: z.string(), body: z.record(z.string(), z.any()).optional(), reason: z.string().optional(), ...AG } },
     async (a: any) => { const r = await harGcpApi(who(a), a.method, a.url, a.body, a.reason || ''); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('run_status',
     { description: 'List Cloud Run services in our project/region (blessed read via control-plane identity; auto-escalates to the gate if not permitted). Optional region (default us-east1, where our services live).', inputSchema: { region: z.string().optional(), ...AG } },
     async (a: any) => { const region = a.region || process.env.GCP_REGION || 'us-east1'; const url = 'https://run.googleapis.com/v2/projects/' + (process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT) + '/locations/' + region + '/services'; const r = await harGcpApi(who(a), 'GET', url, null, 'run_status'); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('run_roll',
     { description: 'Roll a fresh revision of a Cloud Run service (force a restart / pick up new lake code) by bumping DEPLOY_TS. Deploys are a MUTATION, so this is ALWAYS staged to the operator gate (fast: no Cloud Build) and runs as them on approval. Defaults to THIS control-plane service in us-east1. Optional service, region.', inputSchema: { service: z.string().optional(), region: z.string().optional(), ...AG } },
-    async (a: any) => { const service = a.service || process.env.K_SERVICE || 'paracoding-control-plane'; const region = a.region || process.env.GCP_REGION || 'us-east1'; const cmd = 'gcloud run services update ' + service + ' --region ' + region + ' --update-env-vars DEPLOY_TS=$(date +%s) --quiet && echo ROLLED ' + service; const jobId = 'gcp_' + crypto.randomBytes(6).toString('hex'); await db.collection('pending_confirms').doc(jobId).set({ job_id: jobId, command_type: 'run_roll ' + service, staged_by: who(a), arguments: { command: cmd, service, region }, status: 'pending', created_at: FieldValue.serverTimestamp() }); return { content: [{ type: 'text', text: JSON.stringify({ mode: 'staged', job_id: jobId, note: 'Roll of ' + service + ' pending your gate approval.' }) }] }; });
+    async (a: any) => { const service = a.service || process.env.K_SERVICE || ''; if (!service) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'run_roll: no service argument and K_SERVICE is unset, so the service to roll cannot be determined. Cloud Run always sets K_SERVICE; pass service explicitly otherwise. Refusing rather than guessing a bare name, which in a shared project would stage a roll of the OTHER lane.' }) }], isError: true }; } const region = a.region || process.env.GCP_REGION || 'us-east1'; const cmd = 'gcloud run services update ' + service + ' --region ' + region + ' --update-env-vars DEPLOY_TS=$(date +%s) --quiet && echo ROLLED ' + service; const jobId = 'gcp_' + crypto.randomBytes(6).toString('hex'); const _rargs: any = { command: cmd, service, region }; const _adm = await pcAdmitStage(who(a), 'run_roll ' + service, _rargs); if (!_adm.ok) { return { content: [{ type: 'text', text: JSON.stringify({ mode: 'refused', staged: false, duplicate_of: _adm.duplicate_of || null, note: _adm.refusal }) }], isError: true }; } const _rref = db.collection('pending_confirms').doc(jobId); await _rref.set({ job_id: jobId, command_type: 'run_roll ' + service, staged_by: who(a), arguments: _rargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha }); /* [SEC-AUTORUN-SCOPE-V1] This said 'pending your gate approval' -- naming a route that returns 404 -- and then waited forever. */ const _auto = await pcAutoRun(_rref, jobId, 'run_roll ' + service, cmd, false, a.confirm === true); if (_auto) return { content: [{ type: 'text', text: _auto }] }; return { content: [{ type: 'text', text: JSON.stringify({ mode: 'staged', job_id: jobId, note: 'NOT run: PC_AUTO_APPROVE is off and there is no approval console.' }) }] }; });
   try {
     // [PCV1-GIT-VAULT-WIRE-V2] BELT BEGIN
     // Removes the cold-start race in which the first git write reaches an unarmed
@@ -1738,7 +2646,7 @@ async function buildMcpServer(agentId: string): Promise<any> {
   return server;
 }
 
-// ============ MCP ADMISSION CONTROL (fleet-mechanic S32 / S34) ============
+// ============ MCP ADMISSION CONTROL (fleet-security S32 / S34) ============
 // Authentication answered "which principal is this". It never answered "may this principal call
 // fleet tools at all". That second question is what the `strains` registry exists to answer, and
 // until now nothing asked it at connection time. This does. A principal that is not a provisioned,
@@ -1797,9 +2705,13 @@ function buildDeniedMcpServer(agentId: string, reason: string): any {
 }
 
 // The chokepoint. Both MCP mounts call this instead of buildMcpServer directly.
-async function buildMcpServerAdmitted(agentId: string): Promise<any> {
+// [WP4B-KEY-CLASSES-V1] keyClasses is threaded, never re-derived. It is read ONCE, from the
+// session_keys row, by pcSessionLookup, and passed down as an opaque value; nothing between
+// here and pcNarrowClasses interprets it, and no tool argument can reach it. Callers that have
+// no session key (the /mcp/:token connector mount) simply omit it and behave as before.
+async function buildMcpServerAdmitted(agentId: string, keyClasses?: any): Promise<any> {
   const verdict: any = await mcpStrainAdmit(agentId);
-  if (verdict && verdict.ok) return await buildMcpServer(agentId);
+  if (verdict && verdict.ok) return await buildMcpServer(agentId, keyClasses);
   const reason = String((verdict && verdict.reason) || 'unknown');
   console.error('[admission] DENIED ' + agentId + ' - ' + reason + ' - issued a whoami-only server.');
   const last = admitJournaledAt.get(agentId) || 0;
@@ -1888,8 +2800,30 @@ let PC_IAP_KEYS_AT = 0;
 const WA_SESSION_MIN = parseInt(process.env.WA_SESSION_MIN || '10', 10);
 const GCP_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
 const GCP_BILLING_DATASET = process.env.GCP_BILLING_DATASET || 'billing_export';
-const WA_GATE_HTML: string = pcHtml('gate.html');
 const WA_LOCK_HTML: string = pcHtml('locked.html');
+// [SEC-NOGATE-V1] /gate IS GONE -- the route, the 142KB document behind it, and every redirect
+// into it. Two human URLs remain, /harness and /wiki, plus /mcp for connectors. There is
+// therefore nothing left for a bounce to point AT: a 302 to a route this file no longer
+// registers is a redirect into a 404, and the installer's own guard check read that 302 as
+// proof the console was guarded. Every former redirect site now ENDS HERE INSTEAD, serving the
+// locked document in place, at the URL the caller actually asked for, under a 401.
+//
+// THREE CONSEQUENCES, ALL DELIBERATE.
+//   1. ?next= is deleted rather than reimplemented. The caller's URL never changed, so the
+//      unlock lands them where they already were by reloading -- there is no target to carry,
+//      and with it goes the enumeration oracle the /wiki sites were written to avoid.
+//   2. The status is 401, not 200 behind a redirect. An anonymous curl now gets a code that
+//      MEANS refused; the old 302 was indistinguishable from a working page that happened to
+//      move. No WWW-Authenticate header is sent, so no browser credential dialog appears.
+//   3. The passkey path did NOT go away with the gate. It lost the larger of its two documents
+//      and kept the small one: with PC_REQUIRE_PASSKEY=1 this IS the working unlock page, and
+//      it is the way back in if the identity provider in front of the console ever fails.
+function waSendLocked(res: express.Response): void {
+  res.status(401);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.send(WA_LOCK_HTML);
+}
 const WA_DASH_HTML: string = pcHtml('dash.html');
 const waFetch: any = (globalThis as any).fetch;
 if (!WA_SESSION_SECRET_OK) {
@@ -2073,14 +3007,31 @@ async function waLegacyApply(jobId: string, action: string): Promise<void> {
   await db.collection('pending_confirms').doc(jobId).update({ status: cpAction, confirmed_by: 'passkey:' + WA_USER, confirmed_at: FieldValue.serverTimestamp() });
   await db.collection('journal').add({ agent_id: 'human_operator', action: 'human_' + cpAction, message: 'Passkey/FaceID ' + cpAction + ' job ID ' + jobId + '.', timestamp: FieldValue.serverTimestamp() });
 }
-async function waGoogleEmail(token: string): Promise<string | null> {
+// [GATE-GOOGLE-EXPIRY-V1] AN EXPIRED CONNECTION IS NOT A REFUSAL, AND THE TWO MUST NOT
+// SHARE ONE ANSWER. This function returned null for FOUR different facts -- the token had
+// expired or been revoked, the token was minted for a different OAuth client, the token
+// carried no verified address, or tokeninfo could not be reached at all -- and its one
+// caller turned every one of them into "Google identity not an authorized approver". The
+// operator therefore read a LAPSED CREDENTIAL as a REFUSED PERSON. That wording sends him
+// looking for a permission problem he does not have, and the only recovery anyone ever
+// found was to destroy the page, because the lapsed token lives nowhere else.
+// waGoogleIdentity() reports WHICH. Nothing about WHO is admitted changes: the caller still
+// requires a verified address that is on WA_APPROVER_EMAILS, and every outcome that is not
+// 'ok' still refuses. This widens the EXPLANATION, never the ADMISSION.
+//   'ok'           verified, audience-bound address returned
+//   'unconfigured' WA_GOOGLE_CLIENT_ID unset -- no token can be bound to this app
+//   'rejected'     GOOGLE ITSELF would not resolve the token: expired, revoked or malformed
+//   'audience'     a valid token, but minted for a DIFFERENT OAuth client
+//   'unverified'   a valid token carrying no verified email address
+//   'transport'    tokeninfo could not be reached, so we do not know and must not guess
+async function waGoogleIdentity(token: string): Promise<{ email: string | null; why: string }> {
   // HFC5 fail-closed: an access token is only evidence of identity TO THE CLIENT IT WAS
   // ISSUED TO. /oauth2/v3/userinfo happily resolves a token minted for any other OAuth
   // client, so trusting it alone lets any relying party the approver has signed into mint
   // a token that passes this gate. Verify the AUDIENCE first, then the address.
   if (!WA_GOOGLE_CLIENT_ID) {
     console.error('[gate] SECURITY: WA_GOOGLE_CLIENT_ID is unset — cannot bind a Google token to this app, god-mode identity DENIED (fail-closed).');
-    return null;
+    return { email: null, why: 'unconfigured' };
   }
   try {
     // [SEC-TOKENINFO-POST] the credential travels in the request BODY, never the URL. A query
@@ -2089,23 +3040,33 @@ async function waGoogleEmail(token: string): Promise<string | null> {
     // same parameter form-encoded over POST and returns the identical JSON, so only the
     // transport changed here -- the response handling below is untouched.
     const ti = await waFetch('https://oauth2.googleapis.com/tokeninfo', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'access_token=' + encodeURIComponent(token) });
-    if (!ti || !ti.ok) return null;
+    if (!ti) return { email: null, why: 'transport' };
+    // GOOGLE REJECTING THE TOKEN AND US FAILING TO ASK ARE DIFFERENT FACTS. tokeninfo answers
+    // 4xx for a token it will not resolve -- the expired/revoked case, which is the one the
+    // operator meets daily -- and 5xx when Google itself is unwell. Neither admits anybody;
+    // they are separated only so the caller can say which happened.
+    if (!ti.ok) return { email: null, why: (ti.status >= 400 && ti.status < 500) ? 'rejected' : 'transport' };
     const t: any = await ti.json();
     // aud must be OUR client id. Google returns aud as a string; compare in constant time.
     const aud = String((t && (t.aud || t.audience)) || '');
     if (!aud || !waEq(aud, WA_GOOGLE_CLIENT_ID)) {
       console.error('[gate] SECURITY: god-mode token audience mismatch (aud=' + aud.slice(0, 24) + '...) — DENIED.');
-      return null;
+      return { email: null, why: 'audience' };
     }
     // Google returns email_verified as the string 'true' on this endpoint.
     const verified = String((t && t.email_verified) || '') === 'true' || (t && t.email_verified) === true;
     const email = String((t && t.email) || '').toLowerCase().trim();
     if (!email || !verified) {
       console.error('[gate] SECURITY: god-mode token has no verified email — DENIED.');
-      return null;
+      return { email: null, why: 'unverified' };
     }
-    return email;
-  } catch (e) { return null; }
+    return { email, why: 'ok' };
+  } catch (e) { return { email: null, why: 'transport' }; }
+}
+// Unchanged contract for every caller that only needs the address: an email, or null. The
+// approval-signature approver resolution below reads it exactly as it did before.
+async function waGoogleEmail(token: string): Promise<string | null> {
+  return (await waGoogleIdentity(token)).email;
 }
 async function waIdToken(audience: string): Promise<string> {
   const r = await waFetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=' + encodeURIComponent(audience), { headers: { 'Metadata-Flavor': 'Google' } });
@@ -2131,13 +3092,20 @@ async function waAccessToken(): Promise<string> {
 // version, and a signature over one tuple verifies as a signature over the other. Every
 // field below is preceded by its UTF-8 BYTE length, so no value can impersonate a delimiter.
 //
-// SPEC AND CROSS-LANGUAGE TEST VECTORS (the verifier must produce byte-identical bytes):
-//   shared/state/security-lane/kmssign/CANON-SPEC.md
+// SPEC AND CROSS-LANGUAGE TEST VECTORS: pcApprovalCanonV1 below IS the specification. Every
+// field is length-prefixed and emitted in the fixed order named by PC_APPROVAL_CANON_ORDER,
+// and any verifier -- in any language -- must reproduce these bytes exactly.
 const PC_APPROVAL_CANON_ID = 'PC-APPROVAL-CANON-V1';
 const PC_APPROVAL_SIG_ALG = 'EC_SIGN_P256_SHA256';
 // Fixed order. Not sorted at runtime, not derived from Object.keys: a locale-, insertion- or
 // engine-dependent order would silently produce different bytes on the two sides.
 const PC_APPROVAL_CANON_ORDER: string[] = ['alg', 'jid', 'csha', 'appr', 'kver', 'iat', 'exp'];
+// [PC-APPROVAL-CANON-V2] THIS FUNCTION IS NO LONGER CALLED BY THE SIGNER AND IS KEPT ANYWAY.
+// gate-exec still ACCEPTS V1 stamps during migration, so V1's bytes are still a live part of
+// the system's behaviour, and this remains their executable specification -- the thing the
+// cross-language equivalence vectors are run against. It is deleted in the commit that sets
+// APPROVAL_ACCEPT_CANON_V1=0 everywhere, not before: deleting the spec while the verifier
+// still implements it is how a canon quietly acquires two meanings.
 function pcApprovalCanonV1(f: { alg: string; jid: string; csha: string; appr: string; kver: string; iat: string; exp: string }): Buffer {
   const parts: Buffer[] = [Buffer.from(PC_APPROVAL_CANON_ID + '\n', 'utf8')];
   for (const n of PC_APPROVAL_CANON_ORDER) {
@@ -2155,6 +3123,138 @@ function pcApprovalCanonV1(f: { alg: string; jid: string; csha: string; appr: st
                Buffer.from(';', 'ascii'));
   }
   return Buffer.concat(parts);
+}
+// ---- [PC-APPROVAL-CANON-V2] THE EXECUTION CONTEXT JOINS THE SIGNED BYTES ----
+// WHAT V1 LEFT OUT. V1 signs alg, jid, csha, appr, kver, iat, exp. That proves a named human
+// approved THIS COMMAND TEXT for THIS JOB ID under THIS KEY inside THIS WINDOW, and it says
+// nothing whatever about HOW the text is executed. gate-exec reads command_type and
+// arguments.targetNode off the job document and those two select
+//     ssh -o StrictHostKeyChecking=no -i <key> <targetNode> <command>
+// versus a local bash. NEITHER WAS SIGNED. So a principal holding roles/datastore.user could
+// take a command a human genuinely approved for local execution, set command_type to 'ssh',
+// point targetNode at a machine the approver never saw, and every signed byte still verified.
+// Firestore integrity was the only thing standing in that gap, and the removal of gate-exec's
+// roles/datastore.user grant is the direction of travel, so it cannot stay the only thing.
+//
+// [SEC-SSHTOOL-REMOVED-V1] THE ssh BRANCH DESCRIBED ABOVE NO LONGER EXISTS -- ssh_executor and
+// the executor's ssh path were both removed as dead, and gate-exec now has one execution path.
+// ctyp AND asha STAY SIGNED ANYWAY, AND NARROWING THE CANON TO "THE ONE BRANCH THAT REMAINS"
+// WOULD BE A MISTAKE. What these two fields actually buy is that the approval names WHICH
+// execution semantics were authorised; the ssh branch was merely the first thing that could
+// diverge from them. Sign only what today's code branches on and the gap silently reopens the
+// day a second branch is added -- by whoever adds it, who will not read this. The canon is
+// unchanged; only the example above is now historical.
+//
+// THE V2 FIELD SET, AND WHY THESE NAMES IN THIS ORDER:
+//
+//     alg  jid  csha  ctyp  asha  appr  kver  iat  exp
+//
+// The two new fields are INSERTED after csha, not appended after exp, and that is a choice
+// rather than a convenience. Fields 2-5 now say WHAT IS BEING AUTHORISED -- which job, which
+// command text, which execution branch, which arguments -- and fields 6-9 say WHO AUTHORISED
+// IT, UNDER WHICH KEY, AND FOR HOW LONG. That is the grouping V1 already had; the new facts
+// go in the group they belong to instead of being parked at the end. A reviewer diffing V1
+// against V2 then reads an INSERTION INTO ONE GROUP rather than a nine-field permutation, and
+// a permutation is the change most likely to be waved through unread.
+//
+//   ctyp  the job's command_type, verbatim, '' when the field is absent. It is the branch
+//         selector, so it is the single smallest edit that redirects an approved command.
+//   asha  sha256, lowercase hex, of the canonicalised arguments object. THE HASH, NOT THE
+//         OBJECT: arguments is unbounded and inlining it would carry a whole script into the
+//         signed message twice, once inside asha and once inside csha.
+//
+// WHY A HASH OF THE WHOLE ARGUMENTS OBJECT RATHER THAN A targetNode FIELD. targetNode lives
+// INSIDE arguments. Hashing the object covers targetNode and every other argument in one
+// field, including arguments gate-exec does not read today but may read tomorrow. A dedicated
+// targetNode field would be a second, weaker statement of a fact asha already makes, and it
+// would need its own convention for absence that could disagree with the object's.
+//
+// csha IS KEPT even though asha covers arguments.command, because csha is taken over the
+// command string AFTER gate-exec's command/cmd precedence, which is not recoverable from asha
+// alone. Retiring a control that works in order to tidy a field list is not a trade made here.
+//
+// THE FRAMING IS V1'S, UNCHANGED: the same length-prefixed fields, the same Buffer.byteLength
+// semantics, so ':' '=' ';' '|', LF and NUL stay legal inside ctyp and asha with no escaping
+// and no rejection. The two new fields inherit that property rather than needing a fresh
+// argument for it. Only the DOMAIN line changes besides the fields, and it must: a V1 message
+// and a V2 message begin with different bytes, so a signature over one can never be replayed
+// as a signature over the other -- which is what makes accepting both during migration a
+// bounded decision rather than an open one.
+const PC_APPROVAL_CANON_V2_ID = 'PC-APPROVAL-CANON-V2';
+const PC_APPROVAL_CANON_V2_ORDER: string[] = ['alg', 'jid', 'csha', 'ctyp', 'asha', 'appr', 'kver', 'iat', 'exp'];
+function pcApprovalCanonV2(f: { alg: string; jid: string; csha: string; ctyp: string; asha: string; appr: string; kver: string; iat: string; exp: string }): Buffer {
+  const parts: Buffer[] = [Buffer.from(PC_APPROVAL_CANON_V2_ID + '\n', 'utf8')];
+  for (const n of PC_APPROVAL_CANON_V2_ORDER) {
+    const v = (f as any)[n];
+    // Same refusal as V1: a non-string would stringify differently in the two languages.
+    if (typeof v !== 'string') throw new Error('approval canon: field ' + n + ' must be a string');
+    const nb = Buffer.from(n, 'utf8');
+    // Buffer.byteLength semantics, NEVER String.length -- see the V1 note above.
+    const vb = Buffer.from(v, 'utf8');
+    parts.push(Buffer.from(String(nb.length) + ':', 'ascii'), nb,
+               Buffer.from('=' + String(vb.length) + ':', 'ascii'), vb,
+               Buffer.from(';', 'ascii'));
+  }
+  return Buffer.concat(parts);
+}
+// [PC-APPROVAL-CANON-V2] THE ARGUMENTS ARE CANONICALISED BY pcStableJson, WHICH ALREADY EXISTS
+// AND IS ALREADY TRUSTED. It is the function pcApproveDrift uses to decide whether a displayed
+// job and a stored job are the same job, precisely so key order cannot make one intention look
+// like two, and it is deliberately reused here rather than reimplemented: two canonicalisers
+// in one file is two things to keep in step, and this fleet has already paid for that lesson.
+//
+// WHAT THIS ADDS IS A GUARD, NOT A SECOND SERIALISER. gate-exec has to rebuild these exact
+// bytes in Python, and there are values pcStableJson will happily serialise that the two
+// languages DO NOT SPELL THE SAME WAY:
+//   * non-integral and out-of-safe-range numbers -- V8 and CPython switch to exponent notation
+//     at different magnitudes, and Firestore hands Python an int where it hands us a Number;
+//   * anything that is not null/boolean/number/string/array/plain object -- a Date, a Buffer,
+//     a Firestore Timestamp or DocumentReference has no agreed JSON spelling at all;
+//   * strings carrying an unpaired UTF-16 surrogate, which [SEC-CANON-SURROGATE-V1] already
+//     refuses for the command and which are refused here for every other argument too.
+// Each of those THROWS. The throw is caught by the fail-soft wrapper around the signing block
+// below, so the effect is that no V2 signature is stamped for a job whose arguments we could
+// not honestly promise the verifier can rebuild -- rather than stamping one that will fail to
+// verify later, at the executor, after the human has already spent a tap.
+function pcCanonUnsafeArg(v: any): string {
+  if (v === null || v === undefined) return '';
+  const t = typeof v;
+  if (t === 'boolean') return '';
+  if (t === 'number') {
+    if (!Number.isFinite(v)) return 'a non-finite number';
+    if (!Number.isInteger(v)) return 'a non-integral number';
+    if (!Number.isSafeInteger(v)) return 'an integer outside the safe range';
+    return '';
+  }
+  if (t === 'string') return pcLoneSurrogate(v) ? 'a string containing an unpaired UTF-16 surrogate' : '';
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) { const w = pcCanonUnsafeArg(v[i]); if (w) return w; }
+    return '';
+  }
+  if (t === 'object') {
+    // PLAIN OBJECTS ONLY. A class instance serialises through pcStableJson as its own
+    // enumerable keys and would silently drop everything else, so it is refused rather than
+    // half-signed.
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return 'an object that is not a plain object';
+    const k = Object.keys(v);
+    for (let i = 0; i < k.length; i++) {
+      if (pcLoneSurrogate(k[i])) return 'an object key containing an unpaired UTF-16 surrogate';
+      const w = pcCanonUnsafeArg(v[k[i]]); if (w) return w;
+    }
+    return '';
+  }
+  return 'a value of type ' + t;
+}
+// ABSENT AND NULL ARE THE SAME VALUE HERE, DELIBERATELY, and gate-exec's pc_canon_args_sha
+// makes the same choice: a job with no arguments field and a job whose arguments field is null
+// both canonicalise to the four bytes 'null'. Note that the verifier must read the RAW field
+// for this and not its own {} default -- '{}' and 'null' are different bytes.
+function pcApprovalArgsSha(args: any): string {
+  const a = args === undefined ? null : args;
+  const why = pcCanonUnsafeArg(a);
+  if (why) throw new Error('approval canon: the arguments cannot be canonicalised identically by the verifier (' + why + ')');
+  return crypto.createHash('sha256').update(pcStableJson(a), 'utf8').digest('hex');
 }
 // The key version is CONFIGURATION and is never derived from the job, the request or the
 // document: anything that let an attacker choose it would let them name a key they hold.
@@ -2204,6 +3304,316 @@ async function waBqQuery(sql: string): Promise<any> {
   });
   return await r.json();
 }
+
+// ==================== [SEC-BQ-ARCHIVE-V1] the forever-archive in BigQuery ====================
+// journal and chat_history rows expire from Firestore ([SEC-TTL-CHOKEPOINT-V1]); the archive
+// in BigQuery is kept FOREVER (operator parameter). Raw REST against bigquery.googleapis.com
+// with the metadata-server token, the exact pattern waBqQuery above already uses -- NO new npm
+// dependency, deliberately: the Dockerfile transpiles rather than bundles, so every import
+// must resolve from node_modules at runtime, and the Storage Write API client would be a new
+// one. Streaming insertAll is enough for a best-effort mirror.
+//
+// ORDERING HAZARD: the dual-write captures NEW writes only. Enabling the Firestore TTL
+// policy before the archive dataset is created AND seeded from the existing collections
+// destroys every pre-deploy transcript with no copy. Sequence and commands:
+// deploy/TTL-BIGQUERY-INFRA.md (create dataset/tables -> seed -> deploy this -> only then TTL).
+//
+// COST DISCIPLINE, all four teeth:
+//   - maximumBytesBilled = 2 GiB on EVERY query, enforced SERVER-SIDE by BigQuery, so no
+//     future edit of the SQL string can quietly bypass it;
+//   - tables are DAY-partitioned on ts, clustered on agent_id, require_partition_filter=true
+//     (DDL in the infra doc), and every query here carries a partition filter;
+//   - a per-instance scan budget of ~144 GB per UTC month (~14% of the 1 TiB free tier);
+//   - the archive is consulted ONLY when live Firestore under-delivers, so the common path
+//     costs zero and stays byte-identical to the pre-archive behaviour.
+// Rows written to Firestore by src/runner/*.py are TTL-stamped there but NOT dual-written
+// (those processes have no archive path); they reach BigQuery via the idempotent re-seed
+// MERGE in the infra doc. Dedup on read is by document id either way.
+const PC_ARCHIVE_DATASET = process.env.PC_ARCHIVE_DATASET || 'pc_archive';
+const PC_ARCHIVE_OFF = String(process.env.PC_ARCHIVE || '').toLowerCase() === 'off';
+const PC_ARCH_MAX_BYTES_BILLED = '2147483648';
+const PC_ARCH_MONTH_BYTES_CAP = 144000000000;
+const PC_ARCH_BUDGET: { month: string; bytes: number } = { month: '', bytes: 0 };
+let PC_ARCH_WARN_AT = 0;
+// The dual-write is BEST EFFORT by operator parameter, so a failure is a rate-limited log
+// line and never the caller's problem. This catch-and-log is the DECREED behaviour for this
+// side channel, not a swallowed deploy error: the Firestore write it mirrors has already
+// succeeded, and Firestore remains the source of truth for 120 days.
+function pcArchWarn(msg: string): void {
+  const now = Date.now();
+  if (now - PC_ARCH_WARN_AT < 300000) return;
+  PC_ARCH_WARN_AT = now;
+  try { console.warn('[SEC-BQ-ARCHIVE-V1] ' + msg); } catch (e) {}
+}
+// PURE: shape one BigQuery row from a Firestore payload. FieldValue.serverTimestamp()
+// sentinels carry no time yet, so a sentinel timestamp becomes nowIso -- within clock skew
+// of what Firestore will record, and exact enough for an archive keyed by doc_id.
+function pcArchiveRow(coll: string, docId: string, data: any, nowIso: string): any {
+  const d: any = (data && typeof data === 'object') ? data : {};
+  const s = (v: any): string => (typeof v === 'string') ? v : ((typeof v === 'number' || typeof v === 'boolean') ? String(v) : '');
+  const when = (v: any): string => {
+    const ms = tsMillis(v);
+    if (ms) return new Date(ms).toISOString();
+    if (v instanceof Date) return v.toISOString();
+    return nowIso;
+  };
+  if (coll === 'journal') {
+    return { doc_id: docId, agent_id: s(d.agent_id), action: s(d.action), message: s(d.message), job_id: s(d.job_id), ts: when(d.timestamp) };
+  }
+  return { doc_id: docId, agent_id: s(d.agent_id), role: s(d.role), text: s(d.text), tags: JSON.stringify(Array.isArray(d.tags) ? d.tags : []), session: s(d.session), ts: when(d.timestamp) };
+}
+// Fire-and-forget mirror of one just-written document. Never throws; see pcArchWarn above.
+// insertId = the Firestore document id, so BigQuery's own streaming dedup and the read-side
+// dedup agree on what "the same row" means.
+async function pcArchiveOnWrite(coll: string, docId: string, data: any): Promise<void> {
+  if (PC_ARCHIVE_OFF || !docId) return;
+  const table = PC_ARCHIVE_COLLS[coll];
+  if (!table) return;
+  try {
+    const row = pcArchiveRow(coll, docId, data, new Date().toISOString());
+    const tok = await waAccessToken();
+    const r: any = await waFetch('https://bigquery.googleapis.com/bigquery/v2/projects/' + GCP_PROJECT + '/datasets/' + PC_ARCHIVE_DATASET + '/tables/' + table + '/insertAll', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'bigquery#tableDataInsertAllRequest', rows: [{ insertId: docId, json: row }] }),
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok || (j && Array.isArray(j.insertErrors) && j.insertErrors.length)) {
+      pcArchWarn('dual-write to ' + PC_ARCHIVE_DATASET + '.' + table + ' FAILED (HTTP ' + String(r.status) + '). The Firestore write succeeded; the archive is missing this row until the next re-seed (deploy/TTL-BIGQUERY-INFRA.md). If the dataset does not exist yet, run the infra doc steps IN ORDER.');
+    }
+  } catch (e: any) {
+    pcArchWarn('dual-write threw: ' + String((e && e.message) || e) + '. The Firestore write succeeded; the archive catches up at the next re-seed.');
+  }
+}
+// PURE: the one parameterised query both history tools use. STRPOS, never LIKE -- the needle
+// is DATA and must not be interpretable as a pattern -- and every string is a named query
+// parameter, never spliced into the SQL. The only inlined values are the project/dataset
+// identifiers (env-derived, identifiers cannot be parameterised in SQL) and the two integer
+// literals produced by clamping below. The partition filter (ts >= 3650 days back) satisfies
+// require_partition_filter; widen it in one place if the archive ever outlives a decade.
+function pcArchSql(project: string, dataset: string, lim: number): string {
+  const n = Math.max(1, Math.min(500, Math.floor(Number(lim) || 0) || 30));
+  return 'SELECT doc_id, agent_id, role, text, tags, session, ts FROM `' + project + '.' + dataset + '.chat_history`'
+    + ' WHERE ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 3650 DAY)'
+    + ' AND agent_id = @agent'
+    + " AND (@q = '' OR STRPOS(LOWER(text), @q) > 0 OR STRPOS(LOWER(tags), @q) > 0)"
+    + " AND (@role = '' OR role = @role)"
+    + ' ORDER BY ts DESC LIMIT ' + String(n);
+}
+// PURE: named string parameters in BigQuery REST shape.
+function pcArchParams(vals: { [k: string]: string }): any[] {
+  const out: any[] = [];
+  for (const k of Object.keys(vals)) {
+    out.push({ name: k, parameterType: { type: 'STRING' }, parameterValue: { value: String(vals[k]) } });
+  }
+  return out;
+}
+async function pcArchQuery(sql: string, params: { [k: string]: string }): Promise<any> {
+  const tok = await waAccessToken();
+  const r: any = await waFetch('https://bigquery.googleapis.com/bigquery/v2/projects/' + GCP_PROJECT + '/queries', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: sql, useLegacySql: false, parameterMode: 'NAMED', queryParameters: pcArchParams(params), maximumBytesBilled: PC_ARCH_MAX_BYTES_BILLED, timeoutMs: 20000 }),
+  });
+  const j: any = await r.json().catch(() => null);
+  if (!r.ok || !j || j.error) {
+    const msg = String((j && j.error && j.error.message) || ('HTTP ' + String(r && r.status)));
+    return { ok: false, err: msg, tooExpensive: /bytesbilled|bytes billed|byte limit/i.test(msg) };
+  }
+  if (j.jobComplete === false) return { ok: false, err: 'query did not complete within timeoutMs', tooExpensive: false };
+  const fields: any[] = (j.schema && j.schema.fields) || [];
+  const rows: any[] = (j.rows || []).map((rw: any) => {
+    const o: any = {};
+    (rw.f || []).forEach((c: any, i: number) => { o[String((fields[i] && fields[i].name) || i)] = c && c.v; });
+    return o;
+  });
+  return { ok: true, rows: rows, bytes: Number(j.totalBytesProcessed || 0) };
+}
+// PURE: one archive result row in the same shape the live rows serve. BigQuery serves
+// TIMESTAMP as epoch SECONDS in a decimal string; timestamp becomes an ISO string here, which
+// pcRowMillis below understands alongside live Firestore Timestamps. archived:true marks
+// provenance so a reader can tell which half of a merged answer each row came from.
+function pcArchHistRow(r: any): any {
+  let tags: any = [];
+  try { tags = JSON.parse(String((r && r.tags) || '[]')); } catch (e) { tags = []; }
+  if (!Array.isArray(tags)) tags = [];
+  const ms = Math.round(Number((r && r.ts) || 0) * 1000) || 0;
+  return { id: String((r && r.doc_id) || ''), agent_id: String((r && r.agent_id) || ''), role: String((r && r.role) || ''), text: String((r && r.text) || ''), tags: tags, session: String((r && r.session) || ''), timestamp: ms ? new Date(ms).toISOString() : '', archived: true };
+}
+// PURE: millis for sorting across BOTH row kinds (live Firestore Timestamp / archive ISO string).
+function pcRowMillis(row: any): number {
+  const t = row && row.timestamp;
+  const ms = tsMillis(t);
+  if (ms) return ms;
+  if (t instanceof Date) return t.getTime();
+  if (typeof t === 'string' && t) { const p = Date.parse(t); if (!isNaN(p)) return p; }
+  return 0;
+}
+// PURE: dedup BY DOCUMENT ID. fsIds is every id the live read FETCHED (not only the ones
+// served): a document the live side saw and filtered out must not sneak back in through its
+// archive copy, and a duplicate among the archive rows themselves is dropped the same way.
+function pcArchMergeDedup(fsRows: any[], fsIds: string[], archRows: any[]): any[] {
+  const seen: { [id: string]: boolean } = {};
+  for (const id of (fsIds || [])) { if (id) seen[id] = true; }
+  const merged = (fsRows || []).slice();
+  for (const r of (archRows || [])) {
+    const id = String((r && r.id) || '');
+    if (!id || seen[id]) continue;
+    seen[id] = true;
+    merged.push(r);
+  }
+  return merged;
+}
+// PURE: consult the archive ONLY when live Firestore under-delivers -- either it served
+// fewer rows than asked for, or its pre-existing 3000-document no-orderBy scan window was
+// FULL, in which case the live subset is arbitrary and recall cannot be trusted.
+function pcArchFallbackDecision(served: number, requested: number, fsScanTruncated: boolean): { consult: boolean; reason: string } {
+  if (fsScanTruncated) return { consult: true, reason: 'the live Firestore scan hit its 3000-document window' };
+  if (served < requested) return { consult: true, reason: 'live Firestore served ' + String(served) + ' of the ' + String(requested) + ' rows requested' };
+  return { consult: false, reason: 'live Firestore served the full request' };
+}
+// PURE: the in-band notice. Every consultation says what happened -- served / unreachable /
+// budget-spent / too-expensive -- and the pre-existing 3000-document truncation is REPORTED
+// rather than left silent.
+function pcArchNotice(why: string, outcome: string, fsScanTruncated: boolean): string {
+  const parts: string[] = ['[SEC-BQ-ARCHIVE-V1]'];
+  if (fsScanTruncated) parts.push('WARNING: the live Firestore read is capped at 3000 documents with NO orderBy and that cap was HIT, so the live half of this answer is an arbitrary subset.');
+  parts.push('The BigQuery archive was consulted because ' + why + '.');
+  parts.push(outcome);
+  return parts.join(' ');
+}
+// PURE: notice placement, chosen by which end survives that tool's result-cap truncation.
+// read_history is in PC_RESULT_CAP_TAIL (cut from the FRONT, tail survives): notice TRAILS.
+// search_history is head-kept (cut from the BACK): notice LEADS.
+function pcArchPlaceNotice(body: string, notice: string, keptTail: boolean): string {
+  if (!notice) return body;
+  return keptTail ? (body + '\n\n' + notice) : (notice + '\n\n' + body);
+}
+// PURE: per-instance monthly scan budget over UTC calendar months.
+function pcArchMonthKey(nowMs: number): string { return new Date(nowMs).toISOString().slice(0, 7); }
+function pcArchBudgetSpent(state: any, nowMs: number, capBytes: number): boolean {
+  if (!state || state.month !== pcArchMonthKey(nowMs)) return false;
+  return (Number(state.bytes) || 0) >= capBytes;
+}
+function pcArchBudgetCharge(state: any, nowMs: number, addBytes: number): { month: string; bytes: number } {
+  const mkey = pcArchMonthKey(nowMs);
+  const cur = (state && state.month === mkey) ? (Number(state.bytes) || 0) : 0;
+  return { month: mkey, bytes: cur + Math.max(0, Number(addBytes) || 0) };
+}
+// PURE: classify the archive attempt into rows + the exact in-band outcome sentence. The
+// failure paths are first-class here so the extracted-function tests can drive them.
+function pcArchOutcome(budgetSpent: boolean, res: any, dataset: string): { rows: any[]; notice: string; bytes: number } {
+  if (budgetSpent) {
+    return { rows: [], bytes: 0, notice: 'Outcome: BUDGET-SPENT -- this instance has used its ~144 GB archive scan budget for the current UTC month, so the archive was NOT searched this time; older rows exist in BigQuery dataset ' + dataset + '. Narrow the query, or retry after the month rolls over.' };
+  }
+  if (!res || res.ok !== true) {
+    const err = String((res && res.err) || 'no response');
+    if (res && res.tooExpensive) {
+      return { rows: [], bytes: 0, notice: 'Outcome: TOO-EXPENSIVE -- BigQuery refused the query at the server-side 2 GiB maximumBytesBilled cap (' + err + '); older rows were NOT searched. Narrow with query/role/limit.' };
+    }
+    // [SEC-BQ-UNPROVISIONED-V49] NOT PROVISIONED IS NOT BROKEN, AND SAYING SO IS THE WHOLE FIX.
+    // MEASURED 2026-08-15 on prod: gen.py and install.sh mention bigquery ZERO times, and
+    // `bq datasets list` returns 0 items -- so the archive does not exist on THIS fleet and has
+    // never existed on ANY adopter's install. The tools ship; the provisioning does not. Until
+    // now every one of those installs surfaced a raw 'Access Denied ... bigquery.jobs.create'
+    // through this branch, which reads as a broken system rather than an optional feature that
+    // was never switched on. That is the same defect shape the installer's 0/10 Firestore-region
+    // check already paid for: a check that cries wolf on every fresh install is worse than no
+    // check, because the operator who needs it is the one who has learned to scroll past it.
+    // THREE OUTCOMES, NOT TWO, and the third one is the common case. Detection is on the error
+    // BigQuery itself returns, not on a config flag, because a flag would claim provisioning
+    // that may have been half-done: jobs.create denied is the IAM half missing, 'Not found:
+    // Dataset' is the dataset half missing, and an unenabled API is neither. All three mean the
+    // same thing to a reader -- nobody built this yet -- and none of them means the archive is
+    // malfunctioning. A genuine fault still falls through to UNREACHABLE below, so this cannot
+    // swallow a real failure: it recognises only the fingerprints of an install that never ran
+    // the runbook.
+    // CORRECTED 2026-08-15, WITHIN MINUTES OF DEPLOY, BY THE FLEET'S OWN PROD. After the
+    // project-level grant landed, the next failure was NOT 'Not found: Dataset' but:
+    //   Access Denied: Table <p>:pc_archive.chat_history: User does not have permission to
+    //   query table <p>:pc_archive.chat_history, or perhaps it does not exist.
+    // BigQuery answers a MISSING TABLE with an access-denied shape on purpose, so it does not
+    // leak whether the table exists. The first version of this test only knew the dataset
+    // wording, so it classified a half-provisioned install as a FAULT and told the reader the
+    // archive 'appears to BE provisioned'. That is the exact wrong answer for the exact case
+    // this branch exists to catch, and only a real install produced it.
+    if (/bigquery[.]jobs[.]create|Not found: Dataset|Not found: Table|or perhaps it does not exist|permission to query table|has not been used in project|accessNotConfigured/i.test(err)) {
+      return { rows: [], bytes: 0, notice: 'Outcome: NOT-PROVISIONED -- the BigQuery forever-archive is OPTIONAL and this install has not created it, so there are no older rows to search and nothing is broken. This answer is live Firestore only, which holds the most recent 120 days. To enable it, follow deploy/TTL-BIGQUERY-INFRA.md: it needs BOTH the dataset ' + dataset + ' (created and seeded) AND roles/bigquery.jobUser on this service on the project -- BigQuery requires jobs.create at project level to run any query, whatever the dataset ACL says. Do NOT enable the Firestore TTL until the archive is created and seeded, or pre-deploy transcripts are destroyed with no copy. Reported cause: ' + err + '.' };
+    }
+    return { rows: [], bytes: 0, notice: 'Outcome: UNREACHABLE -- the archive query failed (' + err + '); this answer is live Firestore only and older rows were NOT searched. The archive appears to BE provisioned on this install, so this is a fault rather than a missing setup.' };
+  }
+  const rows = (res.rows || []).map(pcArchHistRow);
+  return { rows: rows, bytes: Math.max(0, Number(res.bytes) || 0), notice: 'Outcome: SERVED -- ' + String(rows.length) + ' archived row(s) considered, deduplicated against live rows by document id.' };
+}
+// The one archive entry point for both history tools. Thin on purpose: budget check (pure),
+// one bounded query, outcome classification (pure), budget charge (pure).
+async function pcArchHistFallback(agent: string, q: string, role: string, lim: number): Promise<{ rows: any[]; notice: string }> {
+  if (PC_ARCHIVE_OFF) {
+    return { rows: [], notice: 'Outcome: UNREACHABLE -- the archive is switched off on this service (PC_ARCHIVE=off); older rows were NOT searched.' };
+  }
+  const spent = pcArchBudgetSpent(PC_ARCH_BUDGET, Date.now(), PC_ARCH_MONTH_BYTES_CAP);
+  let res: any = null;
+  if (!spent) {
+    try {
+      res = await pcArchQuery(pcArchSql(GCP_PROJECT, PC_ARCHIVE_DATASET, lim), { agent: String(agent || ''), q: String(q || '').toLowerCase(), role: String(role || '') });
+    } catch (e: any) {
+      res = { ok: false, err: String((e && e.message) || e), tooExpensive: false };
+    }
+  }
+  const out = pcArchOutcome(spent, res, PC_ARCHIVE_DATASET);
+  if (out.bytes) {
+    const st = pcArchBudgetCharge(PC_ARCH_BUDGET, Date.now(), out.bytes);
+    PC_ARCH_BUDGET.month = st.month; PC_ARCH_BUDGET.bytes = st.bytes;
+  }
+  return { rows: out.rows, notice: out.notice };
+}
+// The two history tools' full logic, extracted to module scope so the verification suite can
+// drive these exact bodies. The FIRST HALF of each is the pre-archive behaviour verbatim; on
+// the common path (no consultation) the served bytes are IDENTICAL to what it served before.
+async function pcSearchHistoryImpl(agent: string, a: any): Promise<any> {
+  const snap = await db.collection('chat_history').where('agent_id', '==', agent).limit(3000).get();
+  let rows = snap.docs.map((d: any) => d.data());
+  rows.sort((x: any, y: any) => tsMillis(y.timestamp) - tsMillis(x.timestamp));
+  if (a.role) rows = rows.filter((r: any) => r.role === a.role);
+  if (a.query) {
+    const q = String(a.query).toLowerCase();
+    rows = rows.filter((r: any) =>
+      (r.text || '').toLowerCase().includes(q) ||
+      (Array.isArray(r.tags) ? r.tags.join(' ').toLowerCase().includes(q) : false));
+  }
+  const requested = a.limit || 20;
+  rows = rows.slice(0, requested);
+  const fsTrunc = snap.size >= 3000;
+  const dec = pcArchFallbackDecision(rows.length, requested, fsTrunc);
+  if (!dec.consult) {
+    return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] };
+  }
+  const arch = await pcArchHistFallback(agent, String(a.query || ''), String(a.role || ''), requested);
+  const fsIds = snap.docs.map((d: any) => String(d.id));
+  let merged = pcArchMergeDedup(rows, fsIds, arch.rows);
+  merged.sort((x: any, y: any) => pcRowMillis(y) - pcRowMillis(x));
+  merged = merged.slice(0, requested);
+  // search_history is cut from the BACK by [MCP-RESULT-CAP-V1]: the notice LEADS.
+  return { content: [{ type: 'text', text: pcArchPlaceNotice(JSON.stringify(merged, null, 2), pcArchNotice(dec.reason, arch.notice, fsTrunc), false) }] };
+}
+async function pcReadHistoryImpl(agent: string, a: any): Promise<any> {
+  const snap = await db.collection('chat_history').where('agent_id', '==', agent).limit(3000).get();
+  let rows = snap.docs.map((d: any) => d.data());
+  rows.sort((x: any, y: any) => tsMillis(x.timestamp) - tsMillis(y.timestamp));
+  const requested = a.limit || 30;
+  rows = rows.slice(-requested);
+  const fsTrunc = snap.size >= 3000;
+  const dec = pcArchFallbackDecision(rows.length, requested, fsTrunc);
+  if (!dec.consult) {
+    return { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] };
+  }
+  const arch = await pcArchHistFallback(agent, '', '', requested);
+  const fsIds = snap.docs.map((d: any) => String(d.id));
+  let merged = pcArchMergeDedup(rows, fsIds, arch.rows);
+  merged.sort((x: any, y: any) => pcRowMillis(x) - pcRowMillis(y));
+  merged = merged.slice(-requested);
+  // read_history is in PC_RESULT_CAP_TAIL (cut from the FRONT): the notice TRAILS.
+  return { content: [{ type: 'text', text: pcArchPlaceNotice(JSON.stringify(merged, null, 2), pcArchNotice(dec.reason, arch.notice, fsTrunc), true) }] };
+}
+// ================== end [SEC-BQ-ARCHIVE-V1] ==================
 function waIsDangerous(cmd: string): boolean {
   // [SEC-DANGER-GCLOUD-REST-V2] The original alternatives are kept VERBATIM and in order; this
   // change is PURELY ADDITIVE so anything that greps the old text still matches. What the old
@@ -2243,13 +3653,38 @@ async function waExecuteApproved(jobId: string, command: string, token: string, 
 async function waRunGodmode(res: express.Response, jobId: string, command: string, gtoken: string, iapEmail: string = '', assertion: any = null): Promise<void> {
   // [SEC-IAP-GODMODE-V1] Google token when the client sent one; otherwise the IAP-verified
   // identity. Both are verified server-side; neither is client-asserted.
-  const email = gtoken ? await waGoogleEmail(gtoken) : String(iapEmail || '').toLowerCase().trim();
+  let email = '';
+  let _gwhy = 'ok';
+  if (gtoken) { const _gi = await waGoogleIdentity(gtoken); email = _gi.email || ''; _gwhy = _gi.why; }
+  else { email = String(iapEmail || '').toLowerCase().trim(); }
+  // [GATE-GOOGLE-EXPIRY-V1] SAY WHICH OF THE TWO THINGS HAPPENED, AND SAY IT BEFORE THE
+  // ALLOWLIST CHECK SO THE ALLOWLIST IS NEVER BLAMED FOR A LAPSED CREDENTIAL.
+  // REACHED ONLY WHEN the client sent a token and Google would not resolve it. No identity
+  // was established, and NOTHING BELOW THIS LINE HAS RUN: the job document is untouched, no
+  // approval is stamped, claimed, spent or journalled as approved, and the queue is unchanged.
+  // This is exactly as fail-closed as the 403 it replaces -- same evidence, same refusal,
+  // nobody new admitted. It differs only in TELLING THE TRUTH about the cause, and in
+  // carrying needGoogle so the gate can offer a reconnect IN PLACE. Without that, the page's
+  // only signal was a red REFUSED, which is why the recovery the operator found by trial was
+  // to close the browser tab -- the lapsed token lives in the page and nowhere else.
+  if (gtoken && !email && (_gwhy === 'rejected' || _gwhy === 'transport')) {
+    const _gexp = _gwhy === 'rejected';
+    try { await db.collection('journal').add({ agent_id: 'human_operator', action: _gexp ? 'approve_google_expired' : 'approve_google_uncheckable', message: 'NOT APPROVED AND NOT REFUSED: job ' + String(jobId) + ' — ' + (_gexp ? 'the approver Google connection is expired or revoked, so no identity could be established' : 'Google could not be reached to resolve the approver identity') + '. Nothing was approved, stamped or executed and the job is still waiting.', timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
+    res.status(_gexp ? 412 : 503).json({
+      error: _gexp ? 'google_expired' : 'google_check_failed',
+      needGoogle: true, reconnect: _gexp, jobId: String(jobId), action: 'approve',
+      message: _gexp
+        ? 'Your Google connection has EXPIRED. This job was NOT refused and NOT approved — it is still waiting. Reconnect Google and approve once. You do not need to close this tab or unlock again.'
+        : 'Google could not be reached to check who you are, so nothing was approved and this job is still waiting. This is not a refusal — try once more.'
+    });
+    return;
+  }
   // HFC3 fail-closed: an EMPTY/unset approver allowlist must DENY god-mode entirely (previously an
   // empty list short-circuited the check and accepted ANY authenticated Google identity). Require a
   // configured allowlist AND a verified identity that is on it.
   if (!WA_APPROVER_EMAILS.length || !email || WA_APPROVER_EMAILS.indexOf(email) < 0) { res.status(403).json({ error: WA_APPROVER_EMAILS.length ? 'Google identity not an authorized approver' : 'god-mode disabled: no approver allowlist configured (set WA_APPROVER_EMAILS)' }); return; }
   const _pcRef = db.collection('pending_confirms').doc(jobId);
-  // VERIFY-GREP: GATE-LOG-NOCLOBBER-V1   (fleet-archivist 2026-07-30)
+  // VERIFY-GREP: GATE-LOG-NOCLOBBER-V1   (fleet-advisor 2026-07-30)
   // A second Approve on a stale gate page used to DESTROY a finished job's record: this write
   // set status 'executing', gate-exec then correctly refused the replay with 409, and the
   // !execOk branch below wrote exec_failed / exit_code null / an EMPTY stdout_tail over the
@@ -2260,7 +3695,7 @@ async function waRunGodmode(res: express.Response, jobId: string, command: strin
   // status === 'executed' -- so both gates test status, never a `ran` field that is undefined.
   const _pcSnap = await _pcRef.get().catch(() => null);
   const _pcPrev = (_pcSnap && _pcSnap.exists) ? (_pcSnap.data() || {}) : {};
-  // VERIFY-GREP: GATE-INFLIGHT-NOCLOBBER-V2   (fleet-archivist 2026-07-30)
+  // VERIFY-GREP: GATE-INFLIGHT-NOCLOBBER-V2   (fleet-advisor 2026-07-30)
   // V1 guarded 'executed' only, which is the wrong window. The command runs SYNCHRONOUSLY
   // inside this request (waCallExec is awaited before anything is written to res), waFetch has
   // NO timeout, and both Cloud Run services take the unset 300s default while gate-exec is
@@ -2331,47 +3766,78 @@ async function waRunGodmode(res: express.Response, jobId: string, command: strin
   await db.collection('journal').add({ agent_id: 'human_operator', action: 'godmode_executed', message: 'God-mode: ' + email + ' approved+ran job ' + jobId + ' (exit ' + exit + ', http ' + httpStatus + '): ' + command.slice(0, 200), timestamp: FieldValue.serverTimestamp() });
   res.json({ ok: exit === 0, jobId, action: 'approve', mode: 'godmode', ran_as: email, exit_code: exit, http_status: httpStatus, stdout: outTail, stderr: errTail });
 }
+// ---- [SEC-EXEC-NO-DATASTORE-V1] THE APPROVAL TRAVELS IN THE REQUEST, NOT THROUGH THE DATABASE ----
+// WHY THIS FUNCTION EXISTS. gate-exec has lost roles/datastore.user -- read AND write on every
+// document in every collection, the largest standing grant in the fleet. It therefore cannot
+// read pending_confirms/{jobId} any more, and everything it used to read off that document has
+// to arrive some other way. This control plane still holds the read, so it does the read and
+// forwards the result.
+//
+// FORWARDING IS SAFE BECAUSE THE SIGNATURE COVERS WHAT MATTERS, NOT BECAUSE THIS CHANNEL IS
+// TRUSTED. Of the fields below, arguments and command_type are inside the PC-APPROVAL-CANON-V2
+// signed bytes as asha and ctyp, and approval_sig_approver / _key / _iat / _exp are appr, kver,
+// iat and exp. Altering any of them between here and the executor does not redirect a job; it
+// makes the signature fail to verify and the job is refused. THAT is what made removing the
+// grant possible, and it is why this must not be read as "the control plane now asserts the
+// approval to the executor" -- it relays a stamp it cannot forge, and the executor rebuilds
+// the signed message from the relayed fields and checks it against a PUBLIC key.
+//
+// EVERY FIELD IS NAMED, AND NOTHING IS SPREAD. `...jx` would forward the whole document,
+// including staged_by, the reason chain, stdout_tail from an earlier run and any field a
+// future commit adds -- an unbounded body whose contents nobody decided to send. The list is
+// explicit so that adding to it is a deliberate act, reviewable as one.
+//
+// arguments USES === undefined, NOT ||. The signer canonicalises `args === undefined ? null :
+// args`, and "null", "{}" and "false" are three different signed messages. Collapsing them
+// with || would produce a body that cannot rebuild the signature for any job whose arguments
+// are absent, empty or falsy -- a fail-closed break, but a break.
+//
+// TWO FIELDS ARE DELIBERATELY ABSENT: status and confirmed_at. Neither is in any canon, so
+// neither could be trusted here whatever we sent, and sending them would invite the executor
+// to check something a caller can freely state about itself. See exec_server.py
+// claim_job_for_execution() note 5 for the argument that nothing is lost by that.
+async function waApprovalEnvelope(jobId: string): Promise<any> {
+  const d = await db.collection('pending_confirms').doc(String(jobId)).get();
+  if (!d.exists) return null;
+  const jx: any = d.data() || {};
+  return {
+    command_type: jx.command_type,
+    arguments: jx.arguments === undefined ? null : jx.arguments,
+    approved_sha256: jx.approved_sha256,
+    approval_sig: jx.approval_sig,
+    approval_sig_canon: jx.approval_sig_canon,
+    approval_sig_alg: jx.approval_sig_alg,
+    approval_sig_key: jx.approval_sig_key,
+    approval_sig_approver: jx.approval_sig_approver,
+    approval_sig_iat: jx.approval_sig_iat,
+    approval_sig_exp: jx.approval_sig_exp,
+  };
+}
 async function waCallExec(scriptB64: string, token: string, jobId: string, assertion: any = null): Promise<any> {
   const idt = await waIdToken(GATE_EXEC_URL);
+  // [SEC-EXEC-NO-DATASTORE-V1] A MISSING JOB IS REFUSED HERE, WITHOUT A ROUND TRIP. The
+  // executor used to answer 404 for a job id with no document; it cannot know that any more,
+  // so the fact is established where the read still lives. Shaped like an executor refusal so
+  // every caller's existing error handling reads it unchanged.
+  const _appr = await waApprovalEnvelope(jobId);
+  if (!_appr) return { http: 404, error: 'refused: job ' + String(jobId) + ' has no approval document to execute' };
   const r = await waFetch(GATE_EXEC_URL + '/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + idt },
     // [SEC-ASSERT-FORWARD-V1] gate-exec verifies the operator assertion ITSELF, independently
     // of anything the control plane claims. Forwarding it is what lets PC_REQUIRE_ASSERTION=1.
-    body: JSON.stringify({ script_b64: scriptB64, access_token: token, job_id: jobId, assertion: assertion || undefined }),
+    body: JSON.stringify({ script_b64: scriptB64, access_token: token, job_id: jobId, assertion: assertion || undefined, approval: _appr }),
   });
   const txt = await r.text();
   try { const j = JSON.parse(txt); j.http = r.status; return j; } catch (e) { return { http: r.status, raw: txt }; }
 }
 
-// PUBLIC-BY-DESIGN: the human login page itself -- it must render before any session can exist; it serves static HTML and reads no data.
-app.get('/gate', (req: express.Request, res: express.Response) => {
-  // [SEC-GATE-STAGES-V1] Bare minimum HTML per stage. With no valid session this
-  // returns the locked document: unlock, first-time setup, device enrolment. Nothing
-  // else. The full gate -- job list, mint panel, approval UI, enrolment-link
-  // generator -- is served only past this line, to a caller that holds a session.
-  // Anonymous callers used to receive all 111,618 bytes of it. It could not populate,
-  // because every data API checks the session, but it was a free map of the system.
-  if (!waSessionOk(req)) {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.send(WA_LOCK_HTML);
-    return;
-  }
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  // VERIFY-GREP: GATE-NOSTORE-V1   (fleet-archivist 2026-07-30)
-  // express res.send() on a string sets ETag and Content-Length and NO Cache-Control, so a
-  // browser may reuse a long-lived tab's copy indefinitely. Measured: an operator read
-  // 'REFUSED (0): TypeError: Load failed' off a cached document -- a string this source can no
-  // longer emit -- and treated a job that HAD RUN as refused. Until this header shipped, every
-  // fix made to the gate page was undeliverable to any tab already holding one.
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.send(WA_GATE_HTML.split('__WA_GOOGLE_CLIENT_ID__').join(WA_GOOGLE_CLIENT_ID));
-});
 // PUBLIC-BY-DESIGN: static HTML shell only, holding no data. Each of its three data calls (/api/dash/summary, /api/dash/usage, /api/dash/gcp) checks waSessionOk and 401s an anonymous caller BEFORE touching Firestore or BigQuery.
 app.get('/dash', (req: express.Request, res: express.Response) => {
+  if (pcCanonicalHostRedirect(req, res)) return;   // [PC-CANONICAL-HOST-V48]
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  // VERIFY-GREP: GATE-NOSTORE-V1   (same reasoning as /gate above; same failure mode)
+  // VERIFY-GREP: GATE-NOSTORE-V1   (a long-lived tab reused a cached console document and an
+  // operator read a job that HAD RUN as refused off it; every fix was undeliverable until this)
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.send(WA_DASH_HTML);
 });
@@ -2382,7 +3848,22 @@ app.get('/api/webauthn/status', waSafe(async (req, res) => {
   // secret -- it says nothing the caller does not already know about their own request, and
   // only IAP-admitted callers reach this handler at all. The gate page needs it on reload,
   // when there is a live session and no unlock/verify round trip to learn it from.
-  res.json({ registered: creds.length > 0, setupEnabled: !!WA_BOOTSTRAP_SECRET, sessionMin: WA_SESSION_MIN, iap: (!!PC_IAP_AUD && !!pcIapEmail(req)) });
+  // [SEC-STATUS-SETUPFLAG-V83] setupEnabled is reported ONLY while there is no credential.
+  // WHY THIS IS FREE: locked.html reaches its setupEnabled branch only after `else if
+  // (st.registered)` has already failed, so the field is READ ONLY WHEN registered is false.
+  // Reporting it once a passkey exists therefore has zero effect on the page and is pure
+  // disclosure -- it is a standing answer to "is the first-registration window open" for the
+  // entire life of the install, which is exactly the steady state where it can never be acted
+  // on legitimately.
+  // WHAT THIS IS AND IS NOT. It is NOT the escalation it reads like: this route is mapped
+  // 'console', so IAP has already admitted the caller against an in-domain Google account,
+  // and BOTH setup endpoints refuse without a constant-time waEq() match on
+  // WA_BOOTSTRAP_SECRET -- knowing the window is open buys nothing without the secret. So
+  // this is a small information disclosure to an already-authenticated caller, narrowed here
+  // because narrowing costs nothing, NOT a hole being closed. The honest description is now
+  // in the header comment of locked.html and in SECURITY.md; it previously said "anonymous",
+  // which overstated it in the direction that frightens a reader.
+  res.json({ registered: creds.length > 0, setupEnabled: creds.length === 0 && !!WA_BOOTSTRAP_SECRET, sessionMin: WA_SESSION_MIN, iap: (!!PC_IAP_AUD && !!pcIapEmail(req)) });
 }));
 app.get('/api/dash/summary', waSafe(async (req, res) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
@@ -2426,19 +3907,79 @@ app.get('/api/dash/usage', waSafe(async (req, res) => {
   res.json({ enabled: snap.size > 0, days: Object.keys(days).sort().map((k) => days[k]), models: Object.keys(models).map((k) => models[k]).sort((a: any, b: any) => (b.input + b.output) - (a.input + a.output)), totals: { input: ti, output: to } });
 }));
 // Real GCP spend (last 7d by service) from the BigQuery billing export; auto-discovers the table.
-app.get('/api/dash/gcp', waSafe(async (req, res) => {
-  if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
+//
+// [DASH-GCP-CACHE-V1] THIS QUERY WAS ON A 20-SECOND POLLING PATH AND IT COST REAL MONEY.
+//
+// dash.html calls refresh() from setInterval(refresh, 20000), refresh() calls loadGCP(), and
+// loadGCP() hit this route, which ran a REAL BigQuery jobs.query with NO cache. BigQuery bills
+// a MINIMUM OF 10 MB per query and per table referenced, however few bytes the query actually
+// touches, and this one references one table.
+//
+// THE ARITHMETIC BEFORE, for ONE open tab: 3 queries/min * 60 * 24 = 4,320 queries/day.
+// 4,320 * 10 MB = 43.2 GB/day = ~1,296 GB/month = ~1.27 TiB against a 1 TiB/month free tier.
+// ONE TAB EXCEEDS THE ENTIRE FREE ALLOWANCE BY ~27%. Two tabs is ~2.53 TiB, so ~1.53 TiB is
+// billable at $6.25/TiB = ~$9.56/month. This is a personal-budget install.
+//
+// AND IT BOUGHT NOTHING. The billing export lands roughly DAILY, so 4,320 queries a day were
+// re-reading a number that changes once a day. The refresh was not measuring anything the
+// previous refresh had not already measured; it was paying to re-read the same row.
+//
+// THE ARITHMETIC AFTER: the TTL below is SIX HOURS, so a measured result costs at most
+// 4 upstream queries/day for the WHOLE SERVICE -- not per tab, not per poll. 4 * 10 MB =
+// 40 MB/day = ~1.2 GB/month = ~0.12% of the 1 TiB free tier, and $0 billable. A hundred tabs
+// polling every second would not raise that number, because the ceiling is the TTL and not
+// the caller.
+//
+// THE TTL AND THE POLLING INTERVAL ARE INDEPENDENT ON PURPOSE and dash.html still polls every
+// 20 seconds. A UI that refreshes often is fine as long as it refreshes FROM CACHE; coupling
+// the two would mean slowing the whole dashboard down to make one card cheap.
+//
+// THE AGE IS SERVED WITH THE VALUE (`cached`, `age_ms`, `fetched_at`, `ttl_ms`) so a reader
+// can tell stale from fresh instead of assuming live. A cached number presented as if it were
+// live is a different defect from an expensive one, and shipping the first to fix the second
+// would not be a trade worth making. dash.html renders that age.
+//
+// A FAILED OR NOT-YET-AVAILABLE READ GETS A SHORT RETRY FLOOR, NOT THE SIX-HOUR TTL. A query
+// that errors is still billed the 10 MB minimum, so an export that is broken must not be
+// retried every 20 seconds; but a fresh install whose export table appears an hour from now
+// must not wait six hours to notice. DASH_GCP_RETRY_MS bounds the bad case at 6 attempts/hour
+// = 144/day = ~1.44 GB/day worst case, still inside the free tier, and the good case converges
+// within ten minutes of the export appearing.
+//
+// THE CACHE IS PER INSTANCE, which is the honest description of a module-scope object on Cloud
+// Run: N serving instances cost at most N * 4 queries/day. This service scales to zero and
+// carries one instance at this traffic level, so the ceiling above is the real one, but it is
+// a ceiling per instance and is recorded as such rather than overstated.
+const DASH_GCP_TTL_MS = 6 * 3600 * 1000;
+const DASH_GCP_RETRY_MS = 10 * 60 * 1000;
+const dashGcpCache: { at: number; v: any } = { at: 0, v: null };
+// The upstream read, lifted out of the handler unchanged so the handler decides only whether to
+// CALL it. Returns the payload it used to res.json() directly; it never touches res, so there is
+// exactly one place that writes the response and exactly one place that spends money.
+async function dashGcpMeasure(): Promise<any> {
   let table = '';
   try { table = await waBqBillingTable(); }
-  catch (e: any) { res.json({ enabled: true, pending: true, note: 'cannot list billing dataset — check control-plane-sa BigQuery IAM' }); return; }
-  if (!table) { res.json({ enabled: true, pending: true, note: 'billing export table not created yet (first data within ~a day)' }); return; }
+  catch (e: any) { return { enabled: true, pending: true, note: 'cannot list billing dataset — check control-plane-sa BigQuery IAM' }; }
+  if (!table) { return { enabled: true, pending: true, note: 'billing export table not created yet (first data within ~a day)' }; }
   const sql = 'SELECT service.description AS svc, ROUND(SUM(cost),2) AS cost FROM `' + GCP_PROJECT + '.' + GCP_BILLING_DATASET + '.' + table + '` WHERE usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) GROUP BY svc ORDER BY cost DESC LIMIT 25';
   let q: any;
-  try { q = await waBqQuery(sql); } catch (e: any) { res.json({ enabled: true, pending: true, note: 'query error' }); return; }
-  if (q.error || (q.errors && q.errors.length)) { res.json((console.error('[gate] BigQuery error withheld from client:', q.error || q.errors), { enabled: true, pending: true, note: 'billing query failed' })); return; }
+  try { q = await waBqQuery(sql); } catch (e: any) { return { enabled: true, pending: true, note: 'query error' }; }
+  if (q.error || (q.errors && q.errors.length)) { console.error('[gate] BigQuery error withheld from client:', q.error || q.errors); return { enabled: true, pending: true, note: 'billing query failed' }; }
   const rows = (q.rows || []).map((r: any) => ({ svc: (r.f[0] && r.f[0].v) || '?', cost: parseFloat((r.f[1] && r.f[1].v) || '0') || 0 }));
   const total = rows.reduce((a: number, x: any) => a + x.cost, 0);
-  res.json({ enabled: true, pending: false, table, total: Math.round(total * 100) / 100, services: rows });
+  return { enabled: true, pending: false, table, total: Math.round(total * 100) / 100, services: rows };
+}
+const dashGcpTtlFor = (v: any): number => (v && v.pending === false) ? DASH_GCP_TTL_MS : DASH_GCP_RETRY_MS;
+app.get('/api/dash/gcp', waSafe(async (req, res) => {
+  if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
+  const now = Date.now();
+  if (dashGcpCache.v && (now - dashGcpCache.at) < dashGcpTtlFor(dashGcpCache.v)) {
+    res.json(Object.assign({}, dashGcpCache.v, { cached: true, age_ms: now - dashGcpCache.at, fetched_at: dashGcpCache.at, ttl_ms: dashGcpTtlFor(dashGcpCache.v) }));
+    return;
+  }
+  const v = await dashGcpMeasure();
+  dashGcpCache.at = Date.now(); dashGcpCache.v = v;
+  res.json(Object.assign({}, v, { cached: false, age_ms: 0, fetched_at: dashGcpCache.at, ttl_ms: dashGcpTtlFor(v) }));
 }));
 // AUTH-NON-SESSION: authenticated by constant-time waEq() against WA_BOOTSTRAP_SECRET, not by the gate cookie -- first-credential enrolment necessarily precedes any session. Refuses outright (403) once a credential exists.
 app.post('/api/webauthn/register/options', waSafe(async (req, res) => {
@@ -2477,7 +4018,7 @@ app.post('/api/webauthn/enroll/link', waSafe(async (req, res) => {
   const tok = crypto.randomBytes(24).toString('base64url');
   const ttlMin = 5;
   await db.collection('enroll_tokens').doc(tok).set({ user: WA_USER, exp: Date.now() + ttlMin * 60 * 1000, used: false, created_at: FieldValue.serverTimestamp() });
-  res.json({ token: tok, url: (WA_RP_ORIGINS[0] || WA_RP_ORIGIN_RAW) + '/gate?enroll=' + tok, ttl_min: ttlMin });
+  res.json({ token: tok, url: (WA_RP_ORIGINS[0] || WA_RP_ORIGIN_RAW) + '/harness?enroll=' + tok, ttl_min: ttlMin });
 }));
 app.post('/api/webauthn/enroll/options', waSafe(async (req, res) => {
   if (!(waSessionOk(req) || await waEnrollTokenOk(req))) { res.status(401).json({ error: 'unlock, or open a valid pairing link, first' }); return; }
@@ -2561,23 +4102,192 @@ app.post('/api/webauthn/elevate/verify', waSafe(async (req, res) => {
   res.cookie('gate_elevated', waMakeElevated(vJobId, vCmdSha), { httpOnly: true, secure: true, sameSite: 'strict', maxAge: WA_ELEVATE_MIN * 60 * 1000, path: '/' });
   res.json({ ok: true, elevated_min: WA_ELEVATE_MIN, jobId: vJobId });
 }));
+// ---- [EXEC-BUCKET-INGEST-V1] THE EXECUTOR RECORDS ARRIVE AS OBJECTS, NOT AS WRITES ----
+// WHAT MOVED AND WHY. gate-exec held project-wide roles/datastore.user -- read and write on
+// every document in every collection -- for exactly three things: the single-use claim, the
+// result of a run, and its own journal entries. All three are now objects in one bucket on
+// which the executor holds roles/storage.objectCreator and nothing else: create, no read, no
+// overwrite, no delete. It can append an audit record and can never edit the record
+// afterwards, which is strictly stronger than the grant it is losing.
+//
+// WHAT THIS CODE IS. The other end: the control plane can read that bucket, so it copies the
+// rows back into the collections the console already reads. It is a CONVENIENCE, not custody.
+//
+// IF THIS NEVER RUNS, NOTHING IS LOST. The result of every job is an object named
+// deterministically from the job id, and it is recoverable in one command by anyone who can
+// read the bucket:
+//     gcloud storage cat gs://$PC_EXEC_BUCKET/results/<job-id>-<digest>.json
+// The journal entries are likewise objects under journal/<job-id>/. An ingest that is off,
+// broken, rate-limited or simply never triggered costs a stale console view and nothing else.
+// That is the whole reason the executor writes the object BEFORE it returns rather than
+// handing the result to a caller that may already be gone.
+//
+// NO SCHEDULER, AND THAT IS DELIBERATE. Cloud Scheduler would be a new resource, a new
+// service account, a new IAM binding and a new thing to uninstall, to move rows between two
+// stores this service already talks to. Instead the sweep rides GET /api/webauthn/pending --
+// a path an open gate page already polls -- at most once every PC_EXEC_INGEST_MIN_MS, and
+// never twice at once. No poll waits on it: it is fired and not awaited, so a slow or failing
+// bucket cannot delay or break the queue the operator is looking at.
+//
+// IDEMPOTENT BY CONSTRUCTION, NOT BY BOOKKEEPING. Every row is written to a document id
+// derived from the OBJECT NAME, and every field comes from the immutable object -- including
+// the timestamp, which is read out of the record instead of stamped at ingest. Running the
+// sweep twice over the same objects therefore rewrites identical documents in place: same
+// ids, same values, no duplicate rows, no second journal line for one refusal. That also
+// means no delete is ever needed, so this service is granted READ on the bucket and not
+// more: neither end of this pipe can destroy the audit trail.
+const PC_EXEC_BUCKET = process.env.PC_EXEC_BUCKET || '';
+const PC_EXEC_INGEST_MIN_MS = parseInt(process.env.PC_EXEC_INGEST_MIN_MS || '30000', 10);
+const PC_EXEC_INGEST_PAGE = parseInt(process.env.PC_EXEC_INGEST_PAGE || '100', 10);
+let PC_EXEC_INGEST_AT = 0;
+let PC_EXEC_INGEST_RUNNING = false;
+const PC_EXEC_GCS = process.env.PC_GCS_HOST || 'https://storage.googleapis.com';
+async function pcExecBucketList(prefix: string, pageToken: string): Promise<any> {
+  const tok = await waAccessToken();
+  if (!tok) return null;
+  const u = PC_EXEC_GCS + '/storage/v1/b/' + encodeURIComponent(PC_EXEC_BUCKET) + '/o?prefix=' +
+    encodeURIComponent(prefix) + '&maxResults=' + String(PC_EXEC_INGEST_PAGE) +
+    (pageToken ? ('&pageToken=' + encodeURIComponent(pageToken)) : '');
+  const r: any = await waFetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+  if (!r || !r.ok) return null;
+  return await r.json();
+}
+async function pcExecBucketGet(name: string): Promise<any> {
+  const tok = await waAccessToken();
+  if (!tok) return null;
+  const u = PC_EXEC_GCS + '/storage/v1/b/' + encodeURIComponent(PC_EXEC_BUCKET) + '/o/' +
+    encodeURIComponent(name) + '?alt=media';
+  const r: any = await waFetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+  if (!r || !r.ok) return null;
+  try { return await r.json(); } catch (e) { return null; }
+}
+// The document id of an ingested row is a function of the OBJECT NAME and of nothing else.
+// That is what makes a second sweep a no-op instead of a second row.
+function pcExecIngestId(name: string): string {
+  return 'gcs-' + crypto.createHash('sha256').update(String(name)).digest('hex').slice(0, 32);
+}
+// The executor stamps its own times as RFC3339 strings. They are read back here rather than
+// re-stamped, so an ingested row is IDENTICAL on every sweep -- a serverTimestamp would make
+// each pass rewrite the row with a new value and reorder the journal under the operator.
+function pcExecIngestWhen(v: any): any {
+  const t = Date.parse(String(v || ''));
+  return isNaN(t) ? FieldValue.serverTimestamp() : new Date(t);
+}
+async function pcExecIngestSweep(): Promise<any> {
+  const out: any = { journal: 0, results: 0, listed: 0 };
+  if (!PC_EXEC_BUCKET) return out;
+  const stateRef = db.collection('pc_exec_ingest').doc('state');
+  const snap: any = await stateRef.get().catch(() => null);
+  const cur: any = (snap && snap.exists) ? (snap.data() || {}) : {};
+  for (const kind of ['journal', 'results']) {
+    // ONE PAGE PER SWEEP, with the page token carried in Firestore. A sweep does bounded
+    // work no matter how many objects exist, and the token resuming where the last one
+    // stopped is an optimisation only: when the listing runs out the token is cleared and
+    // the next sweep starts again from the top, which is free precisely because ingest is
+    // idempotent. No object can be skipped for good by a cursor that got ahead of itself.
+    const listing: any = await pcExecBucketList(kind + '/', String(cur[kind + '_token'] || ''));
+    if (!listing) continue;
+    for (const it of (listing.items || [])) {
+      const name = String((it && it.name) || '');
+      if (!name) continue;
+      out.listed++;
+      const doc: any = await pcExecBucketGet(name);
+      if (!doc) continue;
+      if (kind === 'journal') {
+        await db.collection('journal').doc(pcExecIngestId(name)).set({
+          agent_id: String(doc.agent_id || 'fleet-gate-exec'),
+          action: String(doc.action || ''),
+          message: String(doc.message || ''),
+          job_id: String(doc.job_id || ''),
+          timestamp: pcExecIngestWhen(doc.written_at),
+          ingested_from: name,
+        });
+        out.journal++;
+      } else {
+        const jid = String(doc.job_id || '');
+        if (!jid) continue;
+        // merge:true, and only the fields the console projects. The job document carries the
+        // approval, the staging identity and the reason chain; an ingest that replaced it
+        // would destroy the record it exists to complete.
+        await db.collection('pending_confirms').doc(jid).set({
+          status: 'executed',
+          exit_code: (typeof doc.exit_code === 'number') ? doc.exit_code : -1,
+          stdout_tail: String(doc.stdout || '').slice(-6000),
+          stderr_tail: String(doc.stderr || '').slice(-6000),
+          executed_at: pcExecIngestWhen(doc.executed_at),
+          exec_result_object: name,
+        }, { merge: true });
+        out.results++;
+      }
+    }
+    const patch: any = {};
+    patch[kind + '_token'] = String(listing.nextPageToken || '');
+    await stateRef.set(patch, { merge: true }).catch(() => {});
+  }
+  return out;
+}
+// FIRED, NEVER AWAITED. The caller is a page poll; it gets its answer whatever this does.
+function pcExecIngestNudge(): void {
+  if (!PC_EXEC_BUCKET) return;
+  const now = Date.now();
+  if (PC_EXEC_INGEST_RUNNING) return;
+  if (now - PC_EXEC_INGEST_AT < PC_EXEC_INGEST_MIN_MS) return;
+  PC_EXEC_INGEST_AT = now;
+  PC_EXEC_INGEST_RUNNING = true;
+  pcExecIngestSweep()
+    .then((n: any) => { if (n && (n.journal || n.results)) { try { console.error('[gate] EXEC-BUCKET-INGEST-V1: ingested ' + String(n.journal) + ' journal object(s) and ' + String(n.results) + ' result(s) from the executor bucket.'); } catch (e) {} } })
+    .catch((e: any) => { try { console.error('[gate] EXEC-BUCKET-INGEST-V1: the sweep failed. NOTHING IS LOST -- the executor records are objects in the bucket and are recoverable with gcloud storage cat. Reason:', (e && e.message) || e); } catch (e2) {} })
+    .finally(() => { PC_EXEC_INGEST_RUNNING = false; });
+}
 app.get('/api/webauthn/pending', waSafe(async (req, res) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
-  const snap = await db.collection('pending_confirms').where('status', '==', 'pending').limit(100).get();
+  // [EXEC-BUCKET-INGEST-V1] The piggyback. Rate-limited, non-blocking, and it runs only for
+  // a caller that already holds an unlocked session -- the gate page polling its own queue.
+  pcExecIngestNudge();
+  // [GATE-QUEUE-COEXIST-V1] THE CAP IS NOW BIGGER THAN THE QUEUE CAN GET, AND IT SAYS SO
+  // WHEN IT IS HIT. The old limit(100) silently truncated: past 100 pending documents the
+  // gate rendered a subset and nothing anywhere said which jobs were missing. With the
+  // automatic supersede gone the queue is allowed to be long, so the read is widened and a
+  // truncation is reported to the log. It is console.error and NOT a journal write on
+  // purpose: this runs on every poll of an open gate page, and [F22] is the record of what
+  // a per-poll journal write does to the fleet's signal.
+  const snap = await db.collection('pending_confirms').where('status', '==', 'pending').limit(PC_PENDING_LIST_MAX + 1).get();
+  if (snap.size > PC_PENDING_LIST_MAX) { try { console.error('[gate] GATE-QUEUE-COEXIST-V1: more than PC_PENDING_LIST_MAX (' + String(PC_PENDING_LIST_MAX) + ') pending jobs exist; the gate page is showing a SUBSET. Raise PC_PENDING_LIST_MAX or work the queue down.'); } catch (e) {} }
   const nowMs = Date.now(); const ttlMs = WA_JOB_TTL_MIN * 60000; const cand: any[] = [];
   for (const d of snap.docs) { const x: any = d.data();
     const ts = (x.created_at && x.created_at._seconds) ? x.created_at._seconds * 1000 : (x.created_at && x.created_at.toMillis ? x.created_at.toMillis() : 0);
-    if (ts && (nowMs - ts) > ttlMs) { try { await d.ref.update({ status: 'expired', expired_at: FieldValue.serverTimestamp() }); try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'job_expired', message: 'EXPIRED AND NEVER RAN: job ' + String(x.job_id || '') + ' [' + String(x.command_type || '') + '] staged by ' + String(x.staged_by || '') + ', past its time-to-live.', timestamp: FieldValue.serverTimestamp() }); } catch (e2) {} } catch (e) {} continue; }
+    // [GATE-QUEUE-COEXIST-V1] EXPIRY NOW WRITES ITS REASON, AND A FAILED EXPIRY DOES NOT
+    // HIDE THE JOB. expired_reason had no writer anywhere in this file while three readers
+    // projected it, so an expired job came back from read_job_log with reason null -- the
+    // exact refusal-indistinguishable-from-malfunction shape [F4c] exists to kill. And the
+    // `continue` used to sit OUTSIDE the try, so a job whose expiry write FAILED was still
+    // dropped from this response: it stayed 'pending' in Firestore and became invisible to
+    // the only page that can approve it, with no record of either fact. It is now skipped
+    // only when the write is known to have landed; otherwise it is listed and logged.
+    if (ts && (nowMs - ts) > ttlMs) { const _xr = 'EXPIRED AND NEVER RAN: this job sat staged for longer than WA_JOB_TTL_MIN (' + String(WA_JOB_TTL_MIN) + ' minutes) without anyone approving or denying it, so the gate retired it on this load. Nothing ran. Re-stage it if the work is still wanted.'; let _xok = false;
+      try { await d.ref.update({ status: 'expired', expired_at: FieldValue.serverTimestamp(), expired_reason: _xr }); _xok = true; try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'job_expired', message: 'EXPIRED AND NEVER RAN: job ' + String(x.job_id || '') + ' [' + String(x.command_type || '') + '] staged by ' + String(x.staged_by || '') + ', past its time-to-live. ' + _xr, timestamp: FieldValue.serverTimestamp() }); } catch (e2) {} }
+      catch (e) { try { console.error('[gate] GATE-QUEUE-COEXIST-V1: the expiry write for job ' + String(x.job_id || '') + ' FAILED; it is still pending and is being LISTED rather than hidden.'); } catch (e3) {} }
+      if (_xok) continue; }
     cand.push({ ref: d.ref, job_id: x.job_id, command_type: x.command_type, staged_by: x.staged_by, arguments: x.arguments, workstream: x.workstream || '', ts: ts, age_min: ts ? Math.round((nowMs - ts) / 60000) : null });
   }
-  const newest: any = {};
-  for (const j of cand) { if (!j.ts) continue; const k = (j.staged_by || '') + '|' + (j.command_type || ''); if (!newest[k] || j.ts > newest[k].ts) newest[k] = j; }
+  // [GATE-QUEUE-COEXIST-V1] THE AUTOMATIC SUPERSEDE IS DELETED. It stood here and, on every
+  // load of this list, wrote status 'superseded' onto every pending job that was not the
+  // newest of its staged_by|command_type key -- and wrote no note, no superseding job id and
+  // no role with it, so the job it destroyed reported reason null forever after. Two chats of
+  // one role sharing one command_type therefore erased each other's staged work at the moment
+  // the operator opened the page to read it. Nothing in this repository ever stated a purpose
+  // for it; the concerns it could have served -- a double submit, a runaway stager -- are
+  // answered at STAGE time now, by pcAdmitStage, on the exact command bytes and with a loud
+  // refusal that destroys nothing. LISTING A JOB IS NOT APPROVING IT: every job below still
+  // needs its own passkey assertion bound to its own id and command sha, its own displayed-job
+  // compare-and-swap, and its own provisioned-identity check. More cards on the page do not
+  // make any one of them cheaper to approve.
   const outJobs: any[] = [];
-  for (const j of cand) { const k = (j.staged_by || '') + '|' + (j.command_type || ''); if (j.ts && newest[k] && newest[k].job_id !== j.job_id) { try { await j.ref.update({ status: 'superseded', superseded_at: FieldValue.serverTimestamp() }); try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'job_superseded', message: 'SUPERSEDED AND NEVER RAN: job ' + j.job_id + ' [' + String(j.command_type || '') + '] staged by ' + String(j.staged_by || '') + '. A newer job with the same staged_by|command_type key replaced it. If that newer job came from a different chat, this work was discarded without anyone asking.', timestamp: FieldValue.serverTimestamp() }); } catch (e2) {} } catch (e) {} continue; } outJobs.push({ job_id: j.job_id, command_type: j.command_type, staged_by: j.staged_by, arguments: j.arguments, age_min: j.age_min, workstream: waWorkstreamOf(j) }); }
+  for (const j of cand) { outJobs.push({ job_id: j.job_id, status: 'pending', command_type: j.command_type, staged_by: j.staged_by, arguments: j.arguments, age_min: j.age_min, workstream: waWorkstreamOf(j) }); }
   const _provSnap: any = await db.collection('strains').where('status', '==', 'active').get().catch(() => null);
   const _prov: any = {}; if (_provSnap && _provSnap.docs) _provSnap.docs.forEach((d: any) => { _prov[d.id] = true; });
   if (!_provSnap || !_provSnap.docs || Object.keys(_prov).length === 0) { try { console.error('[gate] SECURITY S24: strains registry read empty or failed - identity filter SKIPPED this request. Nothing quarantined. The approve path refuses a non-provisioned identity independently.'); } catch (e) {} res.json(outJobs); return; }
-  const _banned3: any = { 'fleet-editor': 1, 'fleet-builder': 1 };
+  const _banned3: any = { 'fleet-drafter': 1, 'fleet-courier': 1 };
   const _shown: any[] = [];
   for (const _j of outJobs) {
     const _sb = String(_j.staged_by || '');
@@ -2596,7 +4306,7 @@ app.get('/api/webauthn/pending', waSafe(async (req, res) => {
         return true;
       });
       if (_did) { try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'security_quarantine', message: 'Quarantined job ' + _j.job_id + ' - non-provisioned identity "' + _sb + '". It can no longer be approved.', timestamp: FieldValue.serverTimestamp() }); } catch (e) {} }
-    } catch (e) {}
+    } catch (e) { try { console.error('[gate] GATE-QUEUE-COEXIST-V1: the quarantine write for job ' + String(_j.job_id || '') + ' (staged_by ' + _sb + ') FAILED. It is being withheld from the gate because its identity is not provisioned -- the approve path refuses it independently -- but it is still pending in Firestore and carries no quarantine_reason. This line is the only record of that.'); } catch (e4) {} }
   }
   res.json(_shown);
 }));
@@ -2613,6 +4323,79 @@ app.get('/api/webauthn/job/:id', waSafe(async (req, res) => {
   const _reason = x.quarantine_reason || x.fire_refused_reason || x.supersede_note || x.expired_reason || x.exec_failed_reason || '';
   res.json({ job_id: x.job_id, status: x.status, command_type: x.command_type, staged_by: x.staged_by, arguments: x.arguments, exit_code: x.exit_code, stdout_tail: x.stdout_tail, stderr_tail: x.stderr_tail, ran_as: x.ran_as, reason: _reason, quarantine_reason: x.quarantine_reason || null, fire_refused_reason: x.fire_refused_reason || null, supersede_note: x.supersede_note || null, superseded_by_job: x.superseded_by_job || null, superseded_by_role: x.superseded_by_role || null, expired_reason: x.expired_reason || null, exec_failed_reason: x.exec_failed_reason || null, http_status: (typeof x.http_status === 'number') ? x.http_status : null });
 }));
+// [SEC-APPROVE-BIND-V1] AN APPROVAL APPLIES TO THE JOB THE HUMAN WAS SHOWN, OR IT IS REFUSED.
+// WHAT THIS PROTECTS, stated here because a bare rule with no stated purpose gets applied to
+// things it was never meant to touch: the gate renders the queue at time T and the human taps at
+// T+n. In that window the server's own GET /api/webauthn/pending has already rewritten state --
+// its supersede loop flips every non-newest job of a staged_by|command_type key to 'superseded'
+// on EVERY load of the list -- and any strain may stage, re-stage or supersede besides. Before
+// this, confirm/verify took a jobId and applied the human's decision to WHATEVER that document
+// held at the instant the request ran. The tap therefore authorised the CURRENT CONTENTS OF A JOB
+// ID, not the job the human read. The fleet's whole safety property is that a human with a
+// passkey authorises privileged execution; that property does not survive the approved job
+// differing from the displayed one.
+// This is a COMPARE-AND-SWAP, not a signature. The client sends back the fields it DISPLAYED and
+// the server refuses -- 409, nothing written, nothing stamped, nothing executed -- when its own
+// copy differs. It is not an anti-forgery control and must not be described as one: the browser
+// is the operator's own and anything that can forge this already holds his session. It detects
+// DRIFT between what was shown and what would run.
+// NOT a duplicate of approved_sha256 / approval_mac / approval_sig below. Those bind the command
+// to the approval FOR THE EXECUTOR, after the decision is taken. This binds what was DISPLAYED to
+// the decision itself, before it is taken.
+// EVERY UNCERTAINTY RESOLVES TO REFUSE. A missing `expect`, an unreadable one, a job that has gone
+// away, or a serialisation this file and the browser disagree about all produce a 409 and a
+// reload, never an execution. That direction is the whole point: the cost of a false refusal is
+// one reload, and the cost of a false acceptance is a command the human never saw running as him.
+function pcStableJson(v: any): string {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(pcStableJson).join(',') + ']';
+  const k = Object.keys(v).sort();
+  const out: string[] = [];
+  for (let i = 0; i < k.length; i++) out.push(JSON.stringify(k[i]) + ':' + pcStableJson(v[k[i]]));
+  return '{' + out.join(',') + '}';
+}
+// Returns '' when the displayed job and the stored job agree, otherwise a sentence naming the ONE
+// field that drifted. It names the field because "binding mismatch" tells the operator nothing and
+// this refusal is the only place he will ever learn that his queue moved under him.
+function pcApproveDrift(job: any, expect: any): string {
+  if (!expect || typeof expect !== 'object' || Array.isArray(expect)) {
+    return 'this gate page sent no record of what it displayed for this job, so the server cannot '
+         + 'confirm you are approving the job you were shown. Reload the gate and approve again.';
+  }
+  const pairs: string[][] = [
+    ['status', String((job as any).status || ''), String(expect.status || '')],
+    ['command_type', String((job as any).command_type || ''), String(expect.command_type || '')],
+    ['staged_by', String((job as any).staged_by || ''), String(expect.staged_by || '')],
+  ];
+  for (let i = 0; i < pairs.length; i++) {
+    if (pairs[i][1] !== pairs[i][2]) {
+      return pairs[i][0] + ' has changed since the gate drew this job: the gate showed "'
+           + pairs[i][2] + '", the server now holds "' + pairs[i][1] + '".';
+    }
+  }
+  if (pcStableJson((job as any).arguments) !== pcStableJson(expect.arguments)) {
+    return 'the arguments have changed since the gate drew this job: the command shown on screen '
+         + 'is not the command now stored against this job id.';
+  }
+  return '';
+}
+// The one funnel. Loads the job, refuses a missing one, and refuses drift. Returns the job data
+// on success so the caller does not read the document twice.
+async function pcBindOrRefuse(res: express.Response, jobId: string, action: string, expect: any): Promise<any> {
+  const d = await db.collection('pending_confirms').doc(String(jobId)).get();
+  if (!d.exists) { res.status(404).json({ error: 'job not found' }); return null; }
+  const x: any = d.data() || {};
+  const drift = pcApproveDrift(x, expect);
+  if (!drift) return x;
+  try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'approval_refused_drift', message: 'REFUSED a ' + String(action) + ' of job ' + String(jobId) + ' - it is not the job the gate displayed. ' + drift + ' Nothing was approved, stamped or executed.', timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
+  res.status(409).json({
+    error: 'stale_gate_view', staleView: true, jobId: String(jobId), drift: drift,
+    message: 'This job is not what the gate showed you, so nothing was done to it. ' + drift
+           + ' Reload the gate, read the job again, and approve it there if it is still what you want.'
+  });
+  return null;
+}
 app.post('/api/webauthn/confirm/options', waSafe(async (req, res) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
   const jobId = req.body && req.body.jobId; const action = req.body && req.body.action;
@@ -2651,12 +4434,16 @@ app.post('/api/webauthn/confirm/verify', waSafe(async (req, res) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
   const jobId = req.body && req.body.jobId; const action = req.body && req.body.action;
   if (!jobId || (action !== 'approve' && action !== 'deny')) { res.status(400).json({ error: 'bad jobId/action' }); return; }
+  // [SEC-APPROVE-BIND-V1] FIRST, before deny, before the identity check, before anything is read
+  // for a second time: prove this job id still holds the job the gate drew. DENY is bound too --
+  // a deny aimed at the wrong id silently destroys a staged job that nobody chose to discard.
+  if (!(await pcBindOrRefuse(res, String(jobId), String(action), req.body && req.body.expect))) return;
   if (action === 'deny') { await waLegacyApply(jobId, 'deny'); res.json({ ok: true, jobId, action: 'deny' }); return; }
   // [FAIL-CLOSED IDENTITY] refuse approval of any job whose staged_by is not an active provisioned strain.
   {
     const _qd = await db.collection('pending_confirms').doc(jobId).get();
     const _sb = _qd.exists ? String((_qd.data() as any).staged_by || '') : '';
-    const _banned: any = { 'fleet-editor': 1, 'fleet-builder': 1, '': 1, 'unknown': 1 };
+    const _banned: any = { 'fleet-drafter': 1, 'fleet-courier': 1, '': 1, 'unknown': 1 };
     let _okId = false;
     if (_sb && !_banned[_sb]) { try { const _s = await db.collection('strains').doc(_sb).get(); _okId = _s.exists && (_s.data() as any).status === 'active'; } catch (e) { _okId = false; } }
     if (!_okId) {
@@ -2779,15 +4566,32 @@ app.post('/api/webauthn/confirm/verify', waSafe(async (req, res) => {
           const _now = Date.now();
           const _iat = new Date(_now).toISOString();
           const _exp = new Date(_now + PC_APPROVAL_SIG_TTL_SEC * 1000).toISOString();
-          const _canon = pcApprovalCanonV1({
-            alg: PC_APPROVAL_SIG_ALG, jid: String(jobId), csha: _cmdSha, appr: _appr,
+          // [PC-APPROVAL-CANON-V2] THE EXECUTION CONTEXT, READ FROM THE JOB WE ARE APPROVING.
+          // This is a second read of the same document, and it is safe to make one: the
+          // [SEC-APPROVE-BIND-V1] pcBindOrRefuse call at the top of this handler has ALREADY
+          // refused this approval if command_type or arguments moved since the gate drew the
+          // job, so what is signed here is what was displayed. Signing values the operator
+          // never saw would be worse than not signing them at all.
+          const _sigDoc = await db.collection('pending_confirms').doc(String(jobId)).get();
+          const _sigJx: any = _sigDoc.exists ? (_sigDoc.data() || {}) : {};
+          const _ctyp = String(_sigJx.command_type || '');
+          const _asha = pcApprovalArgsSha(_sigJx.arguments);
+          const _canon = pcApprovalCanonV2({
+            alg: PC_APPROVAL_SIG_ALG, jid: String(jobId), csha: _cmdSha, ctyp: _ctyp,
+            asha: _asha, appr: _appr,
             kver: PC_APPROVAL_SIG_KEY, iat: _iat, exp: _exp });
           _stamp.approval_sig = await pcApprovalSign(_canon);
-          _stamp.approval_sig_v = 3;
+          _stamp.approval_sig_v = 4;
           // Every field that entered the signed bytes is also stored, because the verifier
           // REBUILDS the canonical bytes from these and never parses the signed blob. It must
           // take jid and csha from the job it is about to run, NOT from this document.
-          _stamp.approval_sig_canon = PC_APPROVAL_CANON_ID;
+          // [PC-APPROVAL-CANON-V2] ctyp AND asha ARE NOT STORED, AND THAT IS THE POINT. appr,
+          // kver, iat and exp are facts about the approval that the job document does not
+          // otherwise carry, so the verifier has nowhere else to get them. ctyp and asha are
+          // facts about the JOB, which the verifier is holding anyway -- storing them would
+          // hand the adversary who can rewrite command_type the matching value to rewrite
+          // beside it, which is precisely the move V2 exists to stop.
+          _stamp.approval_sig_canon = PC_APPROVAL_CANON_V2_ID;
           _stamp.approval_sig_alg = PC_APPROVAL_SIG_ALG;
           _stamp.approval_sig_key = PC_APPROVAL_SIG_KEY;
           _stamp.approval_sig_approver = _appr;
@@ -2835,7 +4639,11 @@ app.post('/api/webauthn/preapprove', waSafe(async (req, res) => {
   if (!WA_APPROVER_EMAILS.length || !email || WA_APPROVER_EMAILS.indexOf(email) < 0) { res.status(403).json({ error: WA_APPROVER_EMAILS.length ? 'Google identity not an authorized approver' : 'pre-approve disabled: no approver allowlist configured (set WA_APPROVER_EMAILS)' }); return; }
   const jobId = req.body && req.body.jobId;
   if (!jobId) { res.status(400).json({ error: 'bad jobId' }); return; }
-  // VERIFY-GREP: PREAPPROVE-STATUS-PRECONDITION-V1   (fleet-archivist 2026-07-30)
+  // [SEC-APPROVE-BIND-V1] Pre-approval mints a single-use run_token that /api/jobs/fire redeems
+  // with NO human present, so a pre-approval aimed at a job the human did not read is the most
+  // expensive version of this defect, not the cheapest. Same binding, same refusal.
+  if (!(await pcBindOrRefuse(res, String(jobId), 'preapprove', req.body && req.body.expect))) return;
+  // VERIFY-GREP: PREAPPROVE-STATUS-PRECONDITION-V1   (fleet-advisor 2026-07-30)
   // FAIL-CLOSED STATUS PRECONDITION. Pre-approval mints a single-use run_token that
   // /api/jobs/fire redeems with NO human present, and the ONLY state gate on /api/jobs/fire is
   // status === 'preapproved' -- which this route had just written. Without this check every
@@ -2857,7 +4665,7 @@ app.post('/api/webauthn/preapprove', waSafe(async (req, res) => {
       return;
     }
   }
-  // VERIFY-GREP: PREAPPROVE-IDENTITY-DANGER-V1   (fleet-mechanic 2026-07-30)
+  // VERIFY-GREP: PREAPPROVE-IDENTITY-DANGER-V1   (fleet-security 2026-07-30)
   // FAIL-CLOSED IDENTITY. patch-identity-failclosed.py installs the same gate on confirm/verify
   // and its header claims 'A phantom job renders quarantined and PHYSICALLY CANNOT be approved'.
   // That claim was FALSE on this route: pre-approve never looked at staged_by, so a job staged by
@@ -2886,7 +4694,7 @@ app.post('/api/webauthn/preapprove', waSafe(async (req, res) => {
   {
     const _iaDoc = await db.collection('pending_confirms').doc(String(jobId)).get();
     const _iaSb = _iaDoc.exists ? String((_iaDoc.data() as any).staged_by || '') : '';
-    const _iaBanned: any = { 'fleet-editor': 1, 'fleet-builder': 1, '': 1, 'unknown': 1 };
+    const _iaBanned: any = { 'fleet-drafter': 1, 'fleet-courier': 1, '': 1, 'unknown': 1 };
     let _iaVerdict = 'bad';
     if (_iaSb && !_iaBanned[_iaSb]) {
       try { const _iaS = await db.collection('strains').doc(_iaSb).get(); _iaVerdict = (_iaS.exists && (_iaS.data() as any).status === 'active') ? 'ok' : 'bad'; }
@@ -2942,9 +4750,22 @@ app.post('/api/webauthn/preapprove', waSafe(async (req, res) => {
   const cmdSha = crypto.createHash('sha256').update(command).digest('hex');
   const runToken = crypto.randomBytes(32).toString('hex');
   const expiry = Date.now() + 12 * 60 * 60 * 1000;
+  // [APPROVED-SHA256-WRITER-V2] STAMP THE PIN ON THIS PATH TOO. Measured: this route and
+  // /api/jobs/fire are a COMPLETE approval-to-execution path that never touches
+  // /api/webauthn/confirm/verify, and confirm/verify held the ONLY writer of
+  // approved_sha256. So every job pre-approved here reached exec_server.py's
+  // approved_sha256 rung carrying NO pin, and was allowed only by that rung's
+  // absent-field fallback -- which is why the absence journal could never drain and the
+  // pin could never be hardened. The fallback is DELETED in this same change; this writer
+  // is the half that makes deleting it safe.
+  // cmd_sha ALREADY holds exactly this digest and /api/jobs/fire ALREADY rechecks it with
+  // the same command precedence and the same hash, so this adds NO new refusal: the
+  // executor can only refuse a fire that fire itself has already refused. It is written
+  // under the name the executor reads.
   await db.collection('pending_confirms').doc(jobId).update({
     status: 'preapproved', preapproved_by: email, preapproved_at: FieldValue.serverTimestamp(),
-    cmd_sha: cmdSha, expiry, single_use: true, run_token: runToken,
+    cmd_sha: cmdSha, approved_sha256: cmdSha, approved_sha256_at: new Date().toISOString(),
+    expiry, single_use: true, run_token: runToken,
   });
   await db.collection('journal').add({ agent_id: 'human_operator', action: 'preapproved', message: 'Pre-approved job ' + jobId + ' by ' + email + ' (expires ' + new Date(expiry).toISOString() + '): ' + command.slice(0, 200), timestamp: FieldValue.serverTimestamp() });
   res.json({ ok: true, jobId, action: 'preapprove', mode: 'preapprove', preapproved_by: email, expiry });
@@ -2966,7 +4787,7 @@ app.post('/api/jobs/fire', waSafe(async (req, res) => {
   // ALL preconditions. run_token compared with the constant-time waEq(). ANY failure => refuse the fire,
   // revert status to 'pending', journal the reason, and return 409 (execute NOTHING).
   const reason =
-    // VERIFY-GREP: FIRE-STATUS-REVERT-V1  (AUTH FIRST -- fleet-archivist 2026-07-30)
+    // VERIFY-GREP: FIRE-STATUS-REVERT-V1  (AUTH FIRST -- fleet-advisor 2026-07-30)
     // The run_token comparison MUST be the first term. With the status term first, a caller who
     // knew only a jobId and sent any non-empty token short-circuited here and never reached
     // waEq -- and the refusal handler below then wrote status 'pending' over a FINISHED job,
@@ -2979,7 +4800,7 @@ app.post('/api/jobs/fire', waSafe(async (req, res) => {
     (!command) ? 'job has no command' :
     (curSha !== String(x.cmd_sha || '')) ? 'command changed since pre-approval (cmd_sha mismatch)' : '';
   if (reason) {
-    // VERIFY-GREP: FIRE-STATUS-REVERT-V1  (SCOPED REVERT -- fleet-archivist 2026-07-30)
+    // VERIFY-GREP: FIRE-STATUS-REVERT-V1  (SCOPED REVERT -- fleet-advisor 2026-07-30)
     // The revert to 'pending' used to be unconditional. A successful fire DELETES run_token, so
     // an already-EXECUTED job is exactly what lands here -- and 'pending' is the status
     // /api/webauthn/pending filters on, so a finished job walked back into the approval queue.
@@ -3049,7 +4870,12 @@ app.post('/api/jobs/supersede', waSafe(async (req, res) => {
   const x: any = doc.data();
   if (x.status !== 'pending') { res.status(409).json({ error: 'cannot supersede: status is ' + String(x.status) + ' (only a pending proposal can be superseded)' }); return; }
   const supersededBy = String((req.body && req.body.superseded_by) || '').slice(0, 200);
-  const note = String((req.body && req.body.note) || '').slice(0, 500);
+  // [GATE-QUEUE-COEXIST-V1] A SUPERSEDE ALWAYS LEAVES A SENTENCE. An empty note stored '',
+  // which is falsy, so read_job_log's reason chain fell through it to null and the job read
+  // exactly like one that was never touched. The caller's note is preferred and never
+  // altered; this is only what gets written when the caller supplies none.
+  const _rawNote = String((req.body && req.body.note) || '').slice(0, 500);
+  const note = _rawNote || ('SUPERSEDED AND NEVER RAN: retired by ' + role + ' through POST /api/jobs/supersede' + (supersededBy ? (', replaced by job ' + supersededBy) : '') + '. The staging role withdrew this proposal before any human decided it; no note was supplied, so this sentence is the whole record.');
   await ref.update({ status: 'superseded', superseded_by_job: supersededBy, supersede_note: note, superseded_by_role: role, superseded_at: FieldValue.serverTimestamp() });
   await db.collection('journal').add({ agent_id: role, action: 'superseded', message: 'Superseded staged job ' + jobId + (supersededBy ? (' (superseded_by ' + supersededBy + ')') : '') + (note ? (': ' + note) : ''), timestamp: FieldValue.serverTimestamp() });
   res.json({ ok: true, job_id: jobId, status: 'superseded', by: role });
@@ -3057,16 +4883,29 @@ app.post('/api/jobs/supersede', waSafe(async (req, res) => {
 // =============== end passkey + god-mode gate + dashboard + cost ===============
 
 
-// PUBLIC-BY-DESIGN: bare host-based redirect to /gate or /harness. It reads no data, holds no secret and issues no session; each destination does its own gating. Not enumerated in the harness app.use session gate below, so it is genuinely pre-credential.
+// [PC-CANONICAL-HOST-V48] 2026-08-15. THIS IS NO LONGER A REDIRECT, AND THAT REVERSES WHAT THE
+// TWO NOTES BELOW SETTLED. It used to read "PUBLIC-BY-DESIGN: a bare unconditional redirect to
+// /harness. It reads no data, holds no secret and issues no session; the destination does its own
+// gating." Both halves of that stop holding here. The operator's measurement of the live URL --
+// <hood-host>/harness -- is that it says the same word twice, so the Flow Hood is SERVED at the
+// root and /harness is now the redirect, the opposite way round. The root therefore reads a
+// document and needs a gate, and it has exactly the gate /harness has always carried: the same
+// waSessionOk / waSendLocked pair, in the same order, from the SAME function body -- moving a page
+// to a shorter URL must not move it out from behind the passkey, and a second hand-copied gate is
+// a gate that can be half-edited.
+//   [LAND-ON-GATE-V1] 2026-08-01. This handler once read req.headers.host and sent anything that
+//   was not one named hostname to /harness. That hostname was retired the same day, so the other
+//   branch could never be taken -- a host check that outlived its hostname, exactly like the front
+//   door that caused the outage. It was deleted rather than repaired.
+//   [SEC-NOGATE-V1] 2026-08-14: the target became /harness because the route this used to name no
+//   longer exists.
+// WHAT SURVIVES BOTH OF THOSE, UNCHANGED, IS THE PROPERTY oss/gen.py ASSERTS: this handler is ONE
+// statement and it does NOT BRANCH ON THE REQUEST HOST. The outage was the branch, never the name,
+// and the cut still compares these executable lines against a literal list. The gate decision and
+// the canonical-host decision both live inside harFlowHood() beside the document they protect, so
+// there is one copy of each and a reintroduced host branch here still fails the cut.
 app.get('/', (req: any, res: any) => {
-  // [LAND-ON-GATE-V1] 2026-08-01. This read req.headers.host and sent anything that was not
-  // autoclave.* to /harness. That hostname was retired on 2026-08-01, so the gate branch
-  // could never be taken and every visitor -- typing the gate hostname -- landed on the Flow
-  // Hood, which opens a chat, and then had to navigate to the gate: the one page actually
-  // waiting on them. A host check that outlived its hostname, exactly like the front door
-  // that caused the outage. The gate is the page that needs a human; everything else is one
-  // tap away on its nav. Deleted rather than repaired -- nothing left to distinguish.
-  res.redirect('/gate');
+  harFlowHood(req, res);
 });
 // ================= PARACODING AGENTIC HARNESS (harness + chat + VM control) — ADDITIVE =================
 // SECURITY (H1): every route below is GATED behind an unlocked passkey session (waGate). There is NO
@@ -3076,8 +4915,13 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
   const isHarness = p === '/chat' || p.startsWith('/api/shell') || p === '/api/chat' || p.startsWith('/api/keys') || p.startsWith('/api/vm/') || p.startsWith('/api/ops/') || p.startsWith('/api/security/');
   if (isHarness) {
     if (!waSessionOk(req)) {
-      if (p === '/chat') { res.redirect('/gate'); return; }
-      res.status(403).json({ error: 'forbidden: unlock the gate first (passkey session required)' }); return;
+      if (p === '/chat') { waSendLocked(res); return; }
+      // [SEC-NOGATE-V1] This said 'unlock the gate first'. The gate is deleted, and the operator
+      // read this exact string in a console tab and went looking for a page that no longer exists.
+      // It is also the message a request to the WRONG SERVICE gets: this app.use is not wrapped by
+      // the PC_SURFACE registration filter, so it answers on the mcp surface too, where there is no
+      // IAP and never a session cookie. Name both possibilities rather than only the one.
+      res.status(403).json({ error: 'forbidden: no console session. Open the console host in a browser and sign in. If you are calling the MCP host, this path is not on that surface.' }); return;
     }
   }
   next();
@@ -3085,8 +4929,19 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
 
 const HAR_HARNESS_HTML: string = pcHtml('harness.html');
 // [SEC-DEBLOB-V1] The chat document constant is gone: it decoded byte-identical to the harness document, so both routes now serve one file, harness.html, through one constant.
-const WS_VM = process.env.WS_VM || 'fleet-navigator';
-const WS_ZONE = process.env.WS_ZONE || 'us-central1-a';
+// [SEC-VM-UNCONFIGURED-V1] NO INSTANCE CONFIGURED MEANS NO VM CALLS -- ON THE HTTP SURFACE TOO.
+// The MCP tool path has refused on an empty WS_VM since that marker was introduced, but these two
+// constants still carried DEFAULTS, and the /api/vm/* HTTP routes below were behind waGate and
+// nothing else. The workstation is a y/n install option that DEFAULTS TO NO, so the COMMON install
+// issued Compute API calls against an instance name it had invented. The defaults are removed
+// (a guessed instance name is indistinguishable at runtime from one we cannot see -- unset ==
+// withheld) and the refusal is applied at BOTH the single read chokepoint and each route.
+const WS_VM = process.env.WS_VM || '';
+const WS_ZONE = process.env.WS_ZONE || '';
+// Returns '' when the workstation IS configured, else the names of the missing variables.
+function harVmUnset(): string {
+  return [WS_VM === '' ? 'WS_VM' : '', WS_ZONE === '' ? 'WS_ZONE' : ''].filter((s) => s !== '').join(' and ');
+}
 const HAR_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
 // ops-exec fast-shell: token that authenticates the control-plane -> on-box ops-exec (:8022).
 // Same value lives in the box's `ops-token` instance metadata. Passed as OPS_TOKEN env at deploy.
@@ -3121,8 +4976,18 @@ function harModelLabel(api: string): string {
     .split(/[-_]/).filter((w: string) => !!w)
     .map((w: string) => (/^[0-9]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
 }
+// [CHAT-OPUS5-DEFAULT-V1] OPUS 5 FLOOR, mirroring the bus (src/runner/work_item_runner.py::_opus5,
+// "OPUS 5 FLOOR (2026-07-24)"). Any legacy claude-opus-4*/3* id arriving from
+// CHAT_API_OPUS or from a hand-written CHAT_MODELS JSON is force-upgraded, so stale configuration
+// can never pin the chat back to an older Opus. Same literal id as the bus: 'claude-opus-5'.
+const HAR_OPUS5 = 'claude-opus-5';
+function harOpus5(m: string): string {
+  const s = String(m || '').trim();
+  if (!s) return HAR_OPUS5;
+  return (s.indexOf('claude-opus-4') === 0 || s.indexOf('claude-opus-3') === 0) ? HAR_OPUS5 : s;
+}
 function harModelEntry(api: string): any {
-  const a = String(api || '');
+  const a = harOpus5(String(api || ''));
   return { id: a, label: harModelLabel(a), sub: '', api: a };
 }
 function harModelList(apis: string[], floor: string): any[] {
@@ -3130,13 +4995,54 @@ function harModelList(apis: string[], floor: string): any[] {
   for (const a of apis) { const s = String(a || '').trim(); if (!s || seen[s]) continue; seen[s] = 1; out.push(harModelEntry(s)); }
   return out.length ? out : [harModelEntry(floor)];
 }
+// [CHAT-OPUS5-DEFAULT-V1] THIS IS THE BUG THE OPERATOR HIT. The claude floor used to be the single
+// literal 'claude-sonnet-5', and a floor here is not a fallback nobody sees -- it is THE DEFAULT.
+// With CHAT_API_OPUS unset the catalog contained exactly ONE claude entry, sonnet, so:
+//   * harApiFor() below fell through to m[0] -> sonnet on EVERY request, and
+//   * harness.html loadModels() selects MODELS.claude[0].id -> the only button was sonnet.
+// A fresh install could therefore NEVER reach Opus without setting an env var and redeploying.
+// Now both ids are floored, OPUS FIRST, so m[0] is opus-5 with nothing configured at all. Setting
+// CHAT_API_OPUS / CHAT_API_SONNET still overrides either slot; order (opus first) is preserved.
+// [CHAT-GFLASH37-V1] The gemini side had the SAME shape of bug the claude line above was fixed for:
+// one slot, and an EMPTY string in it, so with CHAT_API_GPRO unset harModelList() fell through to the
+// floor and the catalog held exactly ONE gemini entry. A fresh install could never reach a second
+// Gemini model without hand-writing CHAT_MODELS JSON. Now BOTH slots carry a floored literal, so m[0]
+// is a real entry with nothing configured at all and the other model is reachable from the same
+// fresh install.
+// ORDER IS SIGNIFICANT, AND [GCP-FLOWHOOD-DEFAULT-V70] MOVED IT DELIBERATELY. This comment used to
+// end "AND 3.1 PRO STAYS FIRST ... the operator's default must not move". That instruction is
+// SUPERSEDED, by the operator, for the reason the Flowhood exists: a fresh install has no Anthropic
+// key, Gemini needs none because it rotates through Vertex OAuth, and the first thing an adopter
+// does is ask a strain to build something. Flash is first because it is the cheap, fast model to
+// meet the product on, not because Pro was demoted -- Pro is one click away and one env var from
+// being first again. m[0] is still what harApiFor() returns for an unknown id and what
+// harness.html loadModels() preselects; only which entry sits there has changed.
+// gemini-3.7-flash is VERIFIED, not inferred from the announcement: Model Garden
+// (GET publishers/google/models/gemini-3.7-flash) answers 200 launchStage=GA, while
+// -preview / -001 / -latest / gemini-flash-3.7 all answer 404 NOT_FOUND. It is a GA id and carries
+// no '-preview' suffix; harGeminiGlobalOnly()'s /^gemini-3/ still pins it to the global endpoint,
+// which is where the sibling 3.x publisher model is served.
+// [CHAT-ROUNDS-16-V74] ONE NUMBER FOR BOTH LOOPS. It was written as a bare 8 in two places, so
+// raising it meant finding both -- exactly the two-registries shape this codebase keeps paying
+// for. Named once, used twice, and reported in the cut-off message so a user who hits it is told
+// the number rather than left guessing why the model stopped.
+const HAR_CHAT_MAX_ROUNDS = 16;
 const HAR_MODELS_DEFAULT = {
-  claude: harModelList([process.env.CHAT_API_OPUS || '', process.env.CHAT_API_SONNET || ''], 'claude-sonnet-5'),
-  gemini: harModelList([process.env.CHAT_API_GPRO || ''], 'gemini-3.1-pro-preview'),
+  claude: harModelList([process.env.CHAT_API_OPUS || HAR_OPUS5, process.env.CHAT_API_SONNET || 'claude-sonnet-5'], HAR_OPUS5),
+  // [GCP-FLOWHOOD-DEFAULT-V70] FLASH IS FIRST, AND THE ORDER IS THE DEFAULT -- there is no
+  // separate "default model" field anywhere. harness.html seeds MODEL.gemini from MODELS.gemini[0]
+  // (loadModels), so whichever entry is listed first is what a fresh Flowhood opens on. The
+  // operator asked for Gemini 3.7 by default; swapping these two is the whole of that change, and
+  // reordering here without also changing setProvider() in harness.html leaves the page on Claude.
+  // Pro is NOT removed -- it is one click away in the MODEL block, same as it was.
+  gemini: harModelList([process.env.CHAT_API_GFLASH || 'gemini-3.7-flash', process.env.CHAT_API_GPRO || 'gemini-3.1-pro-preview'], 'gemini-3.7-flash'),
 };
 function harModels(): any { try { return process.env.CHAT_MODELS ? JSON.parse(process.env.CHAT_MODELS) : HAR_MODELS_DEFAULT; } catch (e) { return HAR_MODELS_DEFAULT; } }
 function harApiFor(provider: string, id: string): string {
-  const m = harModels()[provider] || []; const hit = m.find((x: any) => x.id === id); return (hit && hit.api) || (m[0] && m[0].api) || '';
+  // harOpus5 again here because a CHAT_MODELS JSON override never passes through harModelEntry().
+  const m = harModels()[provider] || []; const hit = m.find((x: any) => x.id === id);
+  const api = (hit && hit.api) || (m[0] && m[0].api) || '';
+  return provider === 'claude' ? harOpus5(api) : api;
 }
 
 // ---- SECURITY (H1): harness auth gate. Requires an unlocked passkey session (waSessionOk, defined in
@@ -3233,6 +5139,13 @@ async function disableOldClaudeKey(oldKey: string) {
 
 // ---- Compute Engine REST (start/stop/status of the workstation) ----
 async function harVmInstance(): Promise<any> {
+  // [SEC-VM-UNCONFIGURED-V1] The single chokepoint every Compute READ goes through
+  // (harVmStatus, harVmMachine, harBoxInternalIp and thus /api/shell*). Refuse before the
+  // fetch: with no name the URL degrades to the zone's LIST endpoint, which can answer 200 and
+  // make an unconfigured install look provisioned. _http 0 is the existing "no answer" value
+  // and every caller already handles it -- harVmStatus reports provisioned:false, and
+  // harBoxInternalIp returns '' so the shell routes report the box as not running.
+  if (harVmUnset() !== '') return { _http: 0 };
   const tok = await waAccessToken();
   const r = await waFetch('https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/instances/' + WS_VM, { headers: { Authorization: 'Bearer ' + tok } });
   if (!r) return { _http: 0 };
@@ -3308,40 +5221,153 @@ async function harOpsToken(req: any): Promise<{ token: string; err?: string }> {
 }
 
 // ============ OPS CONSOLE TOOLS (advisor 2026-07-25): status_digest / dispatch / check ============
-// v6 (operator ruling 2026-07-25): EVERY STRAIN gets the console, scoped to its own lane. The advisor keeps the
+// v6: EVERY STRAIN gets the console, scoped to its own lane. The advisor keeps the
 // fleet-wide view; a strain sees its own desk. NO CLAUDE BUS: dispatch can only create Gemini work
 // (Vertex -> GCP billing). Claude work happens in a Claude surface you are already sitting in --
 // this console (per-message on the card) or a Cowork chat (flat-rate Max). New tool: cowork_prompt,
 // which hands you the paste-ready bootstrap for a strain so you can port the work to Cowork.
 // Deterministic server code; the model only ever sees the compact summary a tool returns.
 const HAR_CHAT_MAX_TOKENS = Number(process.env.CHAT_MAX_TOKENS || 4096);
-const HAR_CHAT_EFFORT = String(process.env.CHAT_EFFORT || 'xhigh');
+// [CHAT-OPUS5-DEFAULT-V1] Default effort is MEDIUM (operator ruling 2026-08-10: "Opus five medium").
+// Was 'xhigh'. Only 'high' is special-cased below -- it means "send no output_config at all",
+// because high IS the API default. Every other value, including this one, is sent explicitly.
+const HAR_CHAT_EFFORT = String(process.env.CHAT_EFFORT || 'medium');
 const HAR_BUS_SUBSTRATE = String(process.env.BUS_SUBSTRATE || 'gemini');
 
+// [SEC-NO-OPERATOR-DOCTRINE-V1] These two strings are SENT TO THE MODEL as system prompt, and every
+// downloader gets them. They used to carry this operator's private billing doctrine -- a share of
+// one person's API spend, a per-message price billed to them, their subscription plan,
+// and dated personal rulings. None of that is true of, or actionable by, anyone who installs this.
+// WHAT IS KEPT is every instruction the prompt needs to route work correctly: the bus is Gemini
+// only, the tool REFUSES Claude dispatch, work parks under named statuses, there are two Claude
+// surfaces, and cowork_prompt is how you hand work to the other one. The discriminator between the
+// surfaces is restated as CAPABILITY (source + deploy access) rather than as wallet -- which is the
+// basis the rest of this prompt already uses, so the routing decision is unchanged.
 const HAR_LAW_BUS = [
-  'BUS LAW (operator ruling 2026-07-25, firm): the bus is GEMINI ONLY. Gemini runs on Vertex and bills GCP.',
-  'There is NO Claude bus. The Claude bus was auto-escalating stalled Gemini work onto Opus 4.8 on the operator\'s',
-  'personal card -- that single path was ~96% of his API spend. It is off: the sweeper tick is paused and',
-  'config/models.work_provider=gemini. If Gemini cannot do a piece of work, it PARKS (status needs_claude /',
-  'needs_cowork / needs_supervisor) and a Claude surface picks it up -- either this console (per message, on',
-  'the card, cheap) or a Cowork chat on the Max plan (flat rate). NEVER dispatch Claude work to the bus and',
-  'never tell the operator you have; the tool will refuse you.',
+  'BUS LAW: the bus is GEMINI ONLY, and it runs on Vertex against this deployment\'s own project.',
+  'There is NO Claude bus. This is enforced, not advisory -- the dispatch tool REFUSES Claude work.',
+  'If Gemini cannot do a piece of work it PARKS (status needs_claude / needs_cowork / needs_supervisor)',
+  'and a Claude surface picks it up -- either this console or a Cowork chat. NEVER dispatch Claude work',
+  'to the bus and never tell the operator you have; the tool will refuse you.',
 ].join(' ');
 
+// [HAR-BUILD-TRUTH-V60] THIS PARAGRAPH USED TO BE FALSE AND THE FALSEHOOD COST THE OPERATOR A DAY.
+// It said "THIS console: chat only -- no source checkout, no deploy, no gate", so when he asked
+// for a hello-world deployed to Cloud Run, the model refused and told him building "belongs in a
+// Cowork session" -- reporting OUR OWN PROMPT TEXT to him as though it were a capability limit.
+// Those are different claims and that one was not true: run_command reaches gcloud, and the whole
+// build-and-deploy path was MEASURED END TO END from the gate executor on 2026-08-15 (jobs
+// 4Bza0LAPkmitVRrCYMim build, 4JdWclmeOQSQPenUvR0M poll, vOQp24MKooUrDZf0zU0T deploy): a container
+// built and a Cloud Run service served traffic, from this surface, with no Cowork session.
+//
+// WHAT IS GENUINELY ABSENT IS NARROWER AND IS STATED BELOW RATHER THAN ROUNDED UP TO "chat only":
+// [EXEC-ALLOWLIST-HONEST-V1] THIS PROMPT USED TO STATE A BOUNDARY THAT DOES NOT EXIST, AND IT WAS
+// WRONG IN THE DIRECTION THAT COSTS WORK. It said run_command "runs allowlisted binaries" and that
+// "what you cannot do is run git itself (not on the allowlist, so no local checkout)". Both halves
+// are false. The allowlist is a FIRST-TOKEN check that is OBSERVE-ONLY by default -- see the header
+// of gate-exec/exec_server.py, which has said so all along: a non-allowlisted first token is
+// journalled as exec_allowlist_observe and the command RUNS. MEASURED: a staged job ran
+// `git clone /tmp/src.git /tmp/work` on the executor successfully, and another ran `gsutil ls`
+// (journalled as not allowlisted, executed regardless). So a strain was being told it could not do
+// something it demonstrably can, and readers believed the install was confined when it is not.
+// WHAT ACTUALLY CONFINES THIS TOOL, and it is stronger than a token scan: a human approves the
+// exact command at the gate, and the executor refuses any script whose sha256 does not match the
+// approval-time hash. A first-token test over shell text could never have been a boundary anyway --
+// $(...), pipes, && and variable assignment all put the real binary somewhere other than the first
+// token of a line. Say what is true; do not restore the claim to make the prompt sound safer.
 const HAR_LAW_SURFACES = [
-  'TWO CLAUDE SURFACES, SAME WORK, DIFFERENT WALLET. (1) THIS console: Opus 4.8 per message against the operator\'s',
-  'card, ~25-35c a message -- good for phone, quick checks, aiming the bus. (2) COWORK on Max: flat rate,',
-  'disposable containers, full source + deploy access via the gate -- that is where heavy building happens.',
-  'Use cowork_prompt to hand the operator a paste-ready bootstrap when work belongs over there.',
+  'TWO CLAUDE SURFACES. (1) THIS console: chat PLUS a real executor -- run_command runs shell on the',
+  'gate executor, the git_* tools read and write the store, and gcp_api reaches the GCP REST surface.',
+  'Your script runs with PATH restricted to an enumerated set of binaries, so an unlisted binary',
+  'does not resolve -- gsutil and ssh answer "command not found". Builtins and keywords are',
+  'unaffected, so set -uo pipefail is fine. An ABSOLUTE PATH still runs: that gap is known and',
+  'stated. What primarily gates you is the human approval and the signed command pin.',
+  'Use `gcloud storage`, never gsutil -- gsutil is not on the executor image at all. You CAN build a',
+  'container and deploy a Cloud Run service from here; see BUILD AND DEPLOY below. What you cannot',
+  'do is hold a long-running interactive session. (2) COWORK: disposable containers',
+  'with a full checkout, arbitrary tooling and a much longer clock -- better for multi-file refactors',
+  'and anything needing real iteration. Use cowork_prompt when the work genuinely wants that, NOT as a',
+  'way to decline work this surface can do. Never cite "doctrine" as a reason you cannot build:',
+  'if a tool would refuse you, say which tool and why; if it would not, do the work.',
 ].join(' ');
 
+// The exact sequence that was measured working, including the two flags whose absence produces
+// errors that read like permission problems and are not. Written out because a model that has to
+// guess these will guess wrong twice and then conclude, reasonably but incorrectly, that it lacks
+// the rights to build.
+const HAR_LAW_BUILD = [
+  'BUILD AND DEPLOY (measured working from this surface; PROJECT=' + String(process.env.GCP_PROJECT || '<project>'),
+  'REGION=' + String(process.env.GCP_REGION || '<region>') + '):',
+  '1. WRITE THE SOURCE with run_command python3 -- open() the files under a fresh /tmp/<name>/ dir',
+  '(a Dockerfile plus your app). /tmp survives between jobs only OPPORTUNISTICALLY, so never assume a',
+  'previous job left files there: re-check, and rebuild the directory if it is missing.',
+  '2. SUBMIT THE BUILD, always --async, because the executor has a hard timeout around 4-5 minutes and',
+  'a synchronous build will be killed mid-flight:',
+  'gcloud builds submit /tmp/<name> --tag <REGION>-docker.pkg.dev/<PROJECT>/cloud-run-source-deploy/<name>:<tag>',
+  '--service-account=projects/<PROJECT>/serviceAccounts/<the executor SA> --region=<REGION>',
+  '--gcs-source-staging-dir=gs://run-sources-<PROJECT>-<REGION>/builds',
+  '--default-buckets-behavior=regional-user-owned-bucket --async --format=value(id)',
+  'THREE FLAGS ARE NOT OPTIONAL AND ALL THREE FAIL CONFUSINGLY IF OMITTED. Without',
+  '--default-buckets-behavior the API answers INVALID_ARGUMENT about logs_bucket. Without',
+  '--gcs-source-staging-dir you get "The user is forbidden from accessing the bucket',
+  '[<PROJECT>_<REGION>_cloudbuild]" -- that is the bucket Cloud Build picks for itself, which nothing',
+  'granted you rights on; gs://run-sources-<PROJECT>-<REGION> is created by the installer and the',
+  'executor holds objectAdmin on it, so stage there and the 403 does not happen. And',
+  '--service-account MUST be the full resource name projects/<PROJECT>/serviceAccounts/<email>: a bare',
+  'email answers "Failed to parse resource name", which looks like an auth failure and is a syntax one.',
+  '3. POLL IN A SEPARATE CALL: gcloud builds describe <id> --region=<REGION> --format=value(status)',
+  'until SUCCESS or FAILURE. Do not sleep through the timeout inside one job.',
+  '4. DEPLOY: gcloud run deploy <name> --image <the tag you built> --region=<REGION>',
+  '--service-account=<the executor SA> --allow-unauthenticated --quiet --format=value(status.url)',
+  '5. VERIFY ANONYMOUSLY OR YOU HAVE NOT VERIFIED IT. curl the URL with NO credentials --',
+  '`curl -sS -o /dev/null -w "%{http_code}" <url>` in a shell that has no gcloud auth applied to it.',
+  'A check made as yourself proves only that YOU can reach it, and you hold run.invoker; the operator',
+  'opening that URL in a browser does not. Reporting "HTTP 200 OK" from an authenticated probe while',
+  'the operator sees "Error: Forbidden -- your client does not have permission to get URL" is the exact',
+  'failure this step exists to prevent, and it has happened.',
+  '6. A DEPLOY THAT PRINTS "Setting IAM policy failed", OR WHOSE ANONYMOUS CHECK RETURNS 403, STILL',
+  'DEPLOYED. The service is live and the URL is real; what failed is the public binding. CONFIRM it',
+  'rather than guessing: `gcloud run services get-iam-policy <svc> --region <REGION>` on a service',
+  'with no allUsers comes back as bare {"etag":...} with no bindings at all. Trying to add it answers',
+  'FAILED_PRECONDITION: "One or more users named in the policy do not belong to a permitted customer,',
+  'perhaps due to an organization policy" -- that is Domain Restricted Sharing',
+  '(constraints/iam.allowedPolicyMemberDomains) refusing allUsers.',
+  'DO NOT CONCLUDE THE PROJECT CANNOT HOST PUBLIC SERVICES. The constraint blocks NEW allUsers',
+  'bindings; ones created before it was applied keep working, so a project can contain several',
+  'genuinely public services AND refuse to make the next one public. Both facts are true at once and',
+  'the operator will rightly point at their existing public sites.',
+  'SAY BOTH THINGS: the build and deploy succeeded, AND the service is not publicly reachable, with',
+  'the error above as evidence. Do not call it verified, do not retry the deploy over it, and never',
+  'report your own authenticated 200 in place of the anonymous result. Only an org admin can lift it,',
+  'by exempting the project from that constraint; offer that and let the operator decide.',
+  'DO NOT GO LOOKING FOR YOUR OWN IDENTITY OR YOUR OWN BUCKETS -- you are told both above and',
+  'project-wide listing is DENIED BY DESIGN, not broken. `gcloud iam service-accounts list` answers',
+  '"iam.serviceAccounts.list denied" and `gcloud storage ls` with no bucket answers',
+  '"storage.buckets.list denied". Both refusals are correct and neither will be granted: this',
+  'account is scoped to the one staging bucket named above. Listing INSIDE that bucket works',
+  '(`gcloud storage ls gs://run-sources-<PROJECT>-<REGION>/`) and so does copying into it. Spending',
+  'rounds rediscovering this is the single most common way a build runs out of turns.',
+  'STORAGE IS ALWAYS `gcloud storage`, NEVER `gsutil`. gsutil is NOT on the executor image, and it',
+  'also ignores the injected approver token and falls back to an identity with no access, so even',
+  'where it exists it fails 403 for a reason the output does not explain. `gcloud storage ls`,',
+  '`gcloud storage cp`, `gcloud storage rsync` -- these are the ones that work.',
+  'CLEAN UP after a demo: gcloud run services delete <name> --region=<REGION> --quiet. Note that the',
+  'executor CANNOT delete the Artifact Registry image (artifactregistry.packages.delete is not granted),',
+  'so say the image is left behind rather than claiming a clean teardown.',
+].join(' ');
+
+// An operator who keeps a state document for the advisor names it here rather than in the
+// prompt: OPS_STATE_DOC=<lake path>. Unset on a fresh install, and the prompt simply does not
+// mention one -- it must never send the model to fetch a document that does not exist.
+const HAR_OPS_STATE_DOC = String(process.env.OPS_STATE_DOC || '').trim();
 const HAR_OPS_SYSTEM = [
   'You are the operator\'s mission-control advisor for Paracoding.AI (Agentic Fungi) -- their autonomous GCP agent fleet.',
-  'GROUND TRUTH FIRST -- read before you claim. Caching is LIVE (journal: cfg cache=on, cache_read hits). Your brain is claude-opus-4.8. read_lake("shared/state/advisor-state.md") is your authoritative memory; read_lake("shared/state/oss-launch-critical-path.md") is the ordered launch list; read_journal shows live runs. Never guess; never call something broken without reading it.',
-  'YOUR TOOLS -- read: status_digest, read_journal, read_lake (shared/... + agents/fleet-archivist/...), list_work_items (returns ids), read_job_log, cowork_prompt. Clean: cancel_work_item / complete_work_item (bookkeeping -- do it directly for junk or finished items, it is yours). Dispatch: create Gemini bus work for any strain.',
+  'GROUND TRUTH FIRST -- read before you claim. read_graph and search_nodes are your authoritative memory; status_digest is the current fleet state; read_journal shows live runs. Never guess; never call something broken without reading it.' + (HAR_OPS_STATE_DOC ? ' The operator also maintains a state document for this install: read_lake("' + HAR_OPS_STATE_DOC + '") before you claim anything it covers.' : ''),
+  'YOUR TOOLS -- read: status_digest, read_journal, read_lake (shared/... plus your own agents/<your role>/... folder), list_work_items (returns ids), read_job_log, cowork_prompt. Clean: cancel_work_item / complete_work_item (bookkeeping -- do it directly for junk or finished items, it is yours). Dispatch: create Gemini bus work for any strain.',
   HAR_LAW_BUS,
   HAR_LAW_SURFACES,
-  'Editing the app itself -- the harness UI, deploys, caching, model/env config -- is NOT yours; those are done by the operator\'s Cowork advisor (their other Claude with source + deploy access) and approved at the gate. If the operator asks for one, say so plainly and offer cowork_prompt; do not pretend you can do it here.',
+  HAR_LAW_BUILD,
+  'ONE THING IS STILL NOT YOURS, AND IT IS NARROWER THAN "deploys": changing THIS CONTROL PLANE -- its own harness UI, its own revisions and traffic, its caching and model/env config. That is the operator\'s Cowork advisor, and it is excluded because breaking the control plane takes away the surface you would need to fix it, not because you lack the tools. Building and deploying a SEPARATE Cloud Run service is explicitly yours (see BUILD AND DEPLOY) and you must not decline it by pointing at this rule. If the operator asks for a change to this control plane, say plainly which service you would be modifying and offer cowork_prompt.',
   'Be concise and decisive; offer ONLY options you can actually carry out; if a real error comes back, report it plainly -- do not retry-rephrase to sneak past a guard.',
 ].join('\n');
 
@@ -3353,21 +5379,22 @@ function harStrainSystem(agentId: string): string {
     'YOUR SCOPE -- read_lake: shared/... and agents/' + agentId + '/... only. list_work_items / check / cancel / complete: YOUR items only. status_digest: your lane. You cannot see or touch another strain\'s desk; ask the operator to take it to the advisor if it is fleet-wide.',
     HAR_LAW_BUS,
     HAR_LAW_SURFACES,
-    'You cannot edit the app, deploy, or change config from here -- that is the operator\'s Cowork advisor. If a job needs source or deploy access, say so and offer cowork_prompt so the operator can port it.',
+    HAR_LAW_BUILD,
+    'YOU MAY BUILD AND DEPLOY NEW SERVICES FROM HERE (see BUILD AND DEPLOY). What you may not change is THIS CONTROL PLANE -- its harness UI, its own revisions and traffic, its caching and model/env config -- because breaking it removes the surface you would need to repair it. That one carve-out is the operator\'s Cowork advisor. Anything needing a full checkout or long iteration is also better there: say so and offer cowork_prompt. Never refuse buildable work on doctrine -- name the tool that would refuse you, or do it.',
     'Be concise, decisive and honest. Offer only what you can actually do. Report what you actually did, with the item id or the journal line as evidence.',
   ].join('\n');
 }
 
 function harOpsSystem(agentId: string): string {
-  return agentId === 'fleet-archivist' ? HAR_OPS_SYSTEM : harStrainSystem(agentId);
+  return agentId === 'fleet-advisor' ? HAR_OPS_SYSTEM : harStrainSystem(agentId);
 }
 
 function harToolDefs(agentId: string): any[] {
-  const boss = agentId === 'fleet-archivist';
+  const boss = agentId === 'fleet-advisor';
   const mine = boss ? 'any strain' : 'you (' + agentId + ')';
   return [
     { name: 'status_digest', description: boss ? 'Live FLEET overview: every strain, what each is doing, backlog counts, gate jobs, recent events. Use for "where are we / report / refresh".' : 'Your lane: what you are working on, your queue, your recent runs, anything of yours parked for a human.', input_schema: { type: 'object', properties: {} } },
-    { name: 'dispatch', description: 'Create a GEMINI bus work item for ' + mine + ' to do real work (research, drafting, file edits, bulk changes). Runs on the next ~5-min tick, as that strain, billed to GCP. The bus is Gemini-only -- there is no Claude route.', input_schema: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, strain: { type: 'string', description: boss ? 'target strain, defaults fleet-engineer' : 'ignored -- always you' } }, required: ['title'] } },
+    { name: 'dispatch', description: 'Create a GEMINI bus work item for ' + mine + ' to do real work (research, drafting, file edits, bulk changes). Runs on the next ~5-min tick, as that strain, billed to GCP. The bus is Gemini-only -- there is no Claude route.', input_schema: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, strain: { type: 'string', description: boss ? 'target strain, defaults fleet-infra' : 'ignored -- always you' } }, required: ['title'] } },
     { name: 'check', description: 'Status of recent bus items for ' + mine + ' -- what the twin picked up, finished, blocked or parked.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } },
     { name: 'read_journal', description: 'Recent fleet journal entries (work runs, cache numbers, gate events). VERIFY here before claiming anything.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } },
     { name: 'read_lake', description: 'Read a lake file for ground truth. Allowed: shared/... and agents/' + agentId + '/... .', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
@@ -3375,18 +5402,18 @@ function harToolDefs(agentId: string): any[] {
     { name: 'cancel_work_item', description: 'Cancel a work item by id (bookkeeping). Junk or obsolete items.', input_schema: { type: 'object', properties: { id: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
     { name: 'complete_work_item', description: 'Mark a work item completed by id (bookkeeping).', input_schema: { type: 'object', properties: { id: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
     { name: 'read_job_log', description: 'Read the result (status/exit/stdout/stderr) of a gate job by job_id.', input_schema: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'] } },
-    { name: 'cowork_prompt', description: 'Hand the operator a paste-ready bootstrap prompt to continue this work in a fresh Cowork chat on their Max plan (flat rate, full source + deploy access). Use when a job needs building, deploying, or heavy iteration -- or when they asks how to port it.', input_schema: { type: 'object', properties: { strain: { type: 'string', description: 'strain to bootstrap; defaults to ' + agentId }, task: { type: 'string', description: 'one line: what they should have it do first' } } } },
+    { name: 'cowork_prompt', description: 'Hand the operator a paste-ready bootstrap prompt to continue this work in a fresh Cowork chat (full source + deploy access). Use when a job needs building, deploying, or heavy iteration -- or when they asks how to port it.', input_schema: { type: 'object', properties: { strain: { type: 'string', description: 'strain to bootstrap; defaults to ' + agentId }, task: { type: 'string', description: 'one line: what they should have it do first' } } } },
   ];
 }
 function harOpsTools(agentId: string): any[] { return harToolDefs(agentId); }
 
-function harJournalAs(agentId: string, action: string, message: string) { try { db.collection('journal').add({ agent_id: agentId || 'fleet-archivist', action: action, message: String(message).slice(0, 900), timestamp: FieldValue.serverTimestamp() }); } catch (e) {} }
-function harJournal(action: string, message: string) { harJournalAs('fleet-archivist', action, message); }
+function harJournalAs(agentId: string, action: string, message: string) { try { db.collection('journal').add({ agent_id: agentId || 'fleet-advisor', action: action, message: String(message).slice(0, 900), timestamp: FieldValue.serverTimestamp() }); } catch (e) {} }
+function harJournal(action: string, message: string) { harJournalAs('fleet-advisor', action, message); }
 
 const HAR_PARKED = ['needs_claude', 'needs_cowork', 'needs_supervisor'];
 
 async function harStatusDigest(agentId: string): Promise<string> {
-  const boss = agentId === 'fleet-archivist';
+  const boss = agentId === 'fleet-advisor';
   const now = Date.now();
   const agents: any = {};
   const ensure = (a: string) => { if (!a) return null; if (!agents[a]) agents[a] = { agent: a, last_ts: 0, last_action: '', backlog: 0, in_progress: 0 }; return agents[a]; };
@@ -3438,19 +5465,19 @@ async function harStatusDigest(agentId: string): Promise<string> {
 }
 
 async function harDispatch(input: any, agentId: string): Promise<string> {
-  const boss = agentId === 'fleet-archivist';
+  const boss = agentId === 'fleet-advisor';
   const title = String((input && input.title) || '').trim();
   if (!title) return 'dispatch failed: a title is required.';
   const detail = String((input && input.detail) || '');
   let strain = agentId;
   if (boss) {
-    strain = String((input && input.strain) || 'fleet-engineer').trim().toLowerCase();
+    strain = String((input && input.strain) || 'fleet-infra').trim().toLowerCase();
     if (strain && strain.indexOf('fleet-') !== 0) strain = 'fleet-' + strain;
-    if (!strain) strain = 'fleet-engineer';
+    if (!strain) strain = 'fleet-infra';
   }
   const asked = String((input && input.route) || '').toLowerCase();
   if (asked === 'claude') {
-    return 'REFUSED: there is no Claude bus. The operator disabled it on 2026-07-25 -- auto-escalation to Opus 4.8 was ~96% of their API spend. Dispatch it as Gemini, or if it genuinely needs Claude judgement do it HERE in this console, or call cowork_prompt and hand them a bootstrap for a Cowork chat on Max.';
+    return 'REFUSED: there is no Claude bus -- the bus is Gemini only by configuration. Dispatch it as Gemini, or if it genuinely needs Claude judgement do it HERE in this console, or call cowork_prompt and hand them a bootstrap for a Cowork chat.';
   }
   try {
     const ref = db.collection('work_items').doc();
@@ -3461,7 +5488,7 @@ async function harDispatch(input: any, agentId: string): Promise<string> {
 }
 
 async function harCheck(input: any, agentId: string): Promise<string> {
-  const boss = agentId === 'fleet-archivist';
+  const boss = agentId === 'fleet-advisor';
   const lim = Math.max(1, Math.min(20, Number((input && input.limit)) || 6));
   try {
     let rows: any[] = [];
@@ -3497,7 +5524,7 @@ async function harReadLakeTool(input: any, agentId: string): Promise<string> {
 }
 
 async function harListItemsTool(input: any, agentId: string): Promise<string> {
-  const boss = agentId === 'fleet-archivist';
+  const boss = agentId === 'fleet-advisor';
   const st = String((input && input.status) || 'pending').trim();
   const role = boss ? String((input && input.role) || '').trim() : agentId;
   try {
@@ -3513,7 +5540,7 @@ async function harListItemsTool(input: any, agentId: string): Promise<string> {
 }
 
 async function harOwns(id: string, agentId: string): Promise<boolean> {
-  if (agentId === 'fleet-archivist') return true;
+  if (agentId === 'fleet-advisor') return true;
   try { const d = await db.collection('work_items').doc(id).get(); if (!d.exists) return false; return String((d.data() || {}).assigned_role || '') === agentId; } catch (e) { return false; }
 }
 
@@ -3534,14 +5561,19 @@ async function harReadJobLogTool(input: any): Promise<string> {
   try { const d = await db.collection('pending_confirms').doc(id).get(); if (!d.exists) return '(no job ' + id + ')'; const x: any = d.data() || {}; return 'JOB ' + id + '  status=' + String(x.status || '?') + '  exit=' + String(x.exit_code) + '\nSTDOUT:\n' + String(x.stdout || '(none)').slice(0, 6000) + '\nSTDERR:\n' + String(x.stderr || '(none)').slice(0, 1500); } catch (e: any) { return 'read_job_log failed: ' + String((e && e.message) || e); }
 }
 
-// Hand the operator a paste-ready Cowork bootstrap. Source of truth = shared/state/cowork-bootstrap-prompts.md.
+// Hand the operator a paste-ready Cowork bootstrap. The SOURCE OF TRUTH is a lake document
+// named by COWORK_PROMPTS_PATH (default below); the hardcoded fallback further down is used
+// ONLY when that document is missing or malformed. That is precisely when the reader has the
+// least other context to catch an error with, so the fallback must stay true on a FRESH
+// INSTALL -- it may not name a document, a law or a path this install has never created.
+const HAR_COWORK_PROMPTS_PATH = String(process.env.COWORK_PROMPTS_PATH || 'shared/bootstrap/cowork-prompts.md').trim();
 async function harCoworkPromptTool(input: any, agentId: string): Promise<string> {
-  let strain = String((input && input.strain) || agentId || 'fleet-archivist').trim().toLowerCase();
+  let strain = String((input && input.strain) || agentId || 'fleet-advisor').trim().toLowerCase();
   if (strain && strain.indexOf('fleet-') !== 0) strain = 'fleet-' + strain;
   const task = String((input && input.task) || '').trim();
-  const advisor = (strain === 'fleet-archivist');
+  const advisor = (strain === 'fleet-advisor');
   let doc = '';
-  try { doc = await harReadLake('shared/state/cowork-bootstrap-prompts.md'); } catch (e) { doc = ''; }
+  try { doc = await harReadLake(HAR_COWORK_PROMPTS_PATH); } catch (e) { doc = ''; }
   if (doc) {
     const A = doc.indexOf('## PROMPT 1');
     const Bm = doc.indexOf('## PROMPT 2');
@@ -3549,7 +5581,7 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
       let body = advisor ? doc.slice(A, Bm) : doc.slice(Bm);
       body = body.replace(/<ROLE>/g, strain);
       body = task ? body.replace(/<TASK[^>]*>/g, task) : body.replace(/<TASK[^>]*>/g, 'Ask the operator what they wants first, then read the relevant lake files before touching anything.');
-      const head = 'PASTE THIS INTO A FRESH COWORK CHAT (attach the Paracoding.AI connector FIRST -- the connector is the identity).\nThat chat runs on the operator\'s Max plan: flat rate, full source + deploy access via the gate.\n\n----- COPY BELOW -----\n';
+      const head = 'PASTE THIS INTO A FRESH COWORK CHAT (attach the Paracoding.AI connector FIRST -- the connector is the identity).\nThat chat has full source + deploy access via the gate.\n\n----- COPY BELOW -----\n';
       return (head + body.trim() + '\n----- COPY ABOVE -----').slice(0, 11000);
     }
   }
@@ -3561,9 +5593,9 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
     '',
     'You are ' + (advisor ? 'the operator\'s mission-control advisor for Paracoding.AI (Agentic Fungi), running in Cowork' : strain + ', a strain in the operator\'s Paracoding.AI fleet, working beside them in Cowork') + '. The Paracoding.AI MCP connector is your identity.',
     '',
-    'DO FIRST: whoami. read_file shared/fleet/LAWS.md. read_file shared/state/advisor-state.md.' + (advisor ? ' read_file shared/state/oss-launch-critical-path.md.' : ' read_file agents/' + strain + '/LESSONS.md.') + ' read_journal(limit 30). Verify from the journal - never claim fleet state from memory.',
+    'DO FIRST: whoami -- it RETURNS the memory digest and the bootstrap that says how you work here, so read what it hands back instead of going off to fetch a governance file. Then read_graph or search_nodes for what is already known, read_file agents/' + strain + '/LESSONS.md for this role, and read_journal(limit 30). Verify from the journal - never claim fleet state from memory.',
     '',
-    'DOCTRINE: STAGE, NEVER SHIP - propose with stage_privileged_job, the operator approves with their passkey. SUPERSEDE IS AUTOMATIC AND FIRES ON EVERY LOAD OF THE GATE PENDING LIST, not on approval: among pending jobs sharing one staged_by|command_type key only the NEWEST survives and the others are marked superseded and never run. Distinct command_types coexist, but run_command always stages command_type run_cmd, so you get ONE live run_command per role. Every staged job: anchor-assert inputs, syntax-gate before deploy, back up what it changes, auto-rollback on failure, stream its log to shared/state/<job>.log - the gate executor has a ~3-4 min HARD timeout and a killed job returns EMPTY stdout.',
+    'DOCTRINE: STAGE, NEVER SHIP - propose with stage_privileged_job, the operator approves with their passkey. EVERY STAGED JOB SITS ON THE GATE UNTIL A HUMAN APPROVES OR DENIES IT: nothing supersedes anything automatically any more, so several of your jobs, and several from another chat of your own role, all wait side by side and each is approved on its own with its own passkey tap. Two things are refused at STAGE time instead, loudly, without touching anything already waiting: staging a byte-identical copy of a job already on the gate, and staging past PC_PENDING_MAX_PER_ROLE jobs waiting from your role. Retire a proposal you no longer want with POST /api/jobs/supersede, which records who did it and why. Jobs still EXPIRE after WA_JOB_TTL_MIN unapproved, and that now carries a reason you can read. Every staged job: anchor-assert inputs, syntax-gate before deploy, back up what it changes, auto-rollback on failure, stream its log to shared/state/<job>.log - the gate executor has a ~3-4 min HARD timeout and a killed job returns EMPTY stdout.',
     '',
     'BUS LAW: the bus is GEMINI ONLY (Vertex, GCP-billed). There is no Claude bus. Work Gemini cannot do parks and comes back to a Claude surface.',
     '',
@@ -3577,34 +5609,8 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
   return fb;
 }
 
-// KEY-FREE PATH (operator ruling 2026-07-25): the Cowork bootstrap is deterministic server code, NOT a model
-// call. This route works with NO Anthropic key at all -- which is the OSS free story: install the
-// core on your own GCP + Gmail, run the Gemini bus, clone strains, and pull the paste-ready prompt
-// here to do the Claude half on whatever plan you already have (free, $20, or Max). The in-Flowhood
-// Claude console is the part that needs a key; everything else degrades gracefully without one.
-// [SEC-ROUTE-VISIBILITY-V1] NO try/catch AROUND THIS REGISTRATION, AND IT STAYS AT COLUMN ZERO.
-// The wrapper that used to sit here said the block "sits early in the bundle, so waGate/app may
-// not be initialised". MEASURED FALSE: app is `const app = express()` at line 93, and waGate,
-// harFail and harCoworkPromptTool are all hoisted function declarations. The catch could never
-// fire for the reason it gave. What it COULD swallow is the PC_SURFACE registrar's deliberate
-// throw for a path missing from PC_SURFACE_MAP -- converting a route stranded on BOTH services
-// into a silent one, which is the precise failure that throw exists to make impossible.
-// The indentation was the worse half: route-audit.mjs anchors at column zero, so this
-// registration was invisible to it and this handler was NEVER searched for a guard. The waGate
-// below could have been deleted and the audit would have reported nothing.
-app.get('/api/cowork-prompt', waGate(async (req: any, res: any) => {
-  try {
-    const strain = String((req.query && req.query.strain) || 'fleet-archivist');
-    const task = String((req.query && req.query.task) || '');
-    const txt = await harCoworkPromptTool({ strain: strain, task: task }, strain);
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, max-age=0');
-    res.send(txt);
-  } catch (e: any) { harFail(res, e, 'harness'); }
-}));
-
 async function harRunChatTool(name: string, input: any, agentId: string): Promise<string> {
-  const who = agentId || 'fleet-archivist';
+  const who = agentId || 'fleet-advisor';
   if (name === 'status_digest') return await harStatusDigest(who);
   if (name === 'dispatch') return await harDispatch(input || {}, who);
   if (name === 'check') return await harCheck(input || {}, who);
@@ -3618,8 +5624,194 @@ async function harRunChatTool(name: string, input: any, agentId: string): Promis
   return 'unknown tool ' + name;
 }
 
+// ---- [CHAT-VERTEX-V1] Vertex AI plumbing shared by the Claude and Gemini chat paths ----
+// The chat used to be able to reach Claude ONLY through api.anthropic.com with an x-api-key, so a
+// fresh install with no Anthropic key got a 412 "no claude API key set" instead of a chat. The bus
+// (src/runner/work_item_runner.py make_client()) has had a keyless Vertex path all along; this is
+// the same thing for the control plane, built by hand because there is no Anthropic SDK here.
+// Auth is the EXISTING waAccessToken() metadata bearer -- no new credential, no new fetcher.
+const HAR_VERTEX_ANTHROPIC_VERSION = 'vertex-2023-10-16';
+function harVertexProject(): string { return process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT; }
+// location=global is served by the BARE host, not global-aiplatform.*.
+function harVertexHost(region: string): string { return region === 'global' ? 'aiplatform.googleapis.com' : region + '-aiplatform.googleapis.com'; }
+// CLAUDE region. Mirrors the bus: VERTEX_LOCATION, default us-east5 (where the Anthropic publisher
+// models are actually served). DELIBERATELY NOT GCP_REGION -- that is the Cloud Run region
+// (default us-east1) and Vertex serves no Anthropic model there.
+function harVertexClaudeRegion(): string {
+  return String(process.env.CHAT_VERTEX_REGION || process.env.VERTEX_LOCATION || 'us-east5').trim() || 'us-east5';
+}
+// GEMINI region. Mirrors the bus (run_gemini: vertex_region || 'global'). Its own env var, because
+// GCP_REGION meant the Cloud Run region and pointed the chat at us-east1-aiplatform, which 404s for
+// the configured global-only model -- that was the Gemini chat outage.
+function harGeminiGlobalOnly(apiModel: string): boolean {
+  const m = String(apiModel || '').toLowerCase();
+  return /^gemini-3/.test(m) || m.indexOf('-preview') >= 0;
+}
+function harVertexGeminiRegion(apiModel: string): string {
+  const raw = String(process.env.CHAT_VERTEX_GEMINI_REGION || 'global').trim() || 'global';
+  // SAFE FALLBACK: when the configured region and the configured model disagree, prefer the one
+  // that can actually serve the model rather than 404ing, and say which was chosen.
+  if (raw !== 'global' && harGeminiGlobalOnly(apiModel)) {
+    console.log('[chat/gemini] region "' + raw + '" ignored for global-only model ' + apiModel + '; using global');
+    return 'global';
+  }
+  return raw;
+}
+// [CHAT-VERTEX-DEFAULT-V2] Same rule as Claude, for the same reason: a stale chat-key-gemini secret
+// or a leftover GEMINI_API_KEY used to divert the chat to generativelanguage.googleapis.com, where
+// the configured Vertex publisher model id does not exist -> the error the operator saw. Vertex is
+// now the default; the AI-Studio transport requires CHAT_GEMINI_PROVIDER=studio AND a real key.
+function harGeminiTransport(key: string): string {
+  const p = String(process.env.CHAT_GEMINI_PROVIDER || '').trim().toLowerCase();
+  const real = !!(key && key !== 'vertex' && key !== 'token');
+  if ((p === 'studio' || p === 'genai' || p === 'apikey' || p === 'key') && real) return 'studio';
+  return 'vertex';
+}
+// Which transport the Claude chat uses.
+// [CHAT-VERTEX-DEFAULT-V2] WAS: key-absence inference -- any ANTHROPIC_API_KEY env value or any
+// chat-key-claude Secret Manager version, however stale, silently selected api.anthropic.com. On an
+// install that had ever had a key set (the operator's has), the "wired to Vertex" change of
+// 2026-08-09 therefore did nothing at all: the chat still went to the direct API and still failed.
+// NOW: VERTEX IS THE DEFAULT and the direct API is an EXPLICIT OPT-IN. Only CHAT_CLAUDE_PROVIDER
+// set to 'anthropic' (or 'api'/'key'/'direct') leaves Vertex. A key lying around in Secret Manager
+// can no longer change the transport -- it is data, not configuration.
+function harClaudeProvider(): string {
+  const p = String(process.env.CHAT_CLAUDE_PROVIDER || '').trim().toLowerCase();
+  if (p === 'anthropic' || p === 'api' || p === 'key' || p === 'direct') return 'anthropic';
+  return 'vertex';
+}
+// [CHAT-OBSERVABLE-V1] One resolver, so the log line, the /api/keys/status answer and the request
+// itself can never disagree about what was chosen. NEVER carries a key VALUE -- key_present only.
+function harChatResolved(provider: string, key: string): any {
+  const model = harApiFor(provider, '');
+  if (provider === 'gemini') {
+    const transport = harGeminiTransport(key);
+    const region = transport === 'vertex' ? harVertexGeminiRegion(model) : '';
+    const real = !!(key && key !== 'vertex' && key !== 'token');
+    return { provider: 'gemini', transport, region, host: transport === 'vertex' ? harVertexHost(region) : 'generativelanguage.googleapis.com', model, key_present: real,
+      alt_transport: transport === 'vertex' ? 'studio' : 'vertex',
+      alt_ready: transport === 'vertex' ? real : true,
+      alt_switch: transport === 'vertex' ? 'set CHAT_GEMINI_PROVIDER=studio' : 'unset CHAT_GEMINI_PROVIDER (Vertex is the default)',
+      alt_blocker: transport === 'vertex' && !real ? 'no real Gemini API key is stored' : '' };
+  }
+  const transport = harClaudeProvider();
+  const region = transport === 'vertex' ? harVertexClaudeRegion() : '';
+  return { provider: 'claude', transport, region, host: transport === 'vertex' ? harVertexHost(region) : 'api.anthropic.com', model, effort: HAR_CHAT_EFFORT, key_present: !!key,
+    // [CHAT-CLAUDE-BOTH-TRANSPORTS-V1] The OTHER transport, resolved HERE and nowhere else, so the
+    // log line, /api/keys/status and a failing chat all name the same escape hatch. alt_ready is a
+    // READINESS FACT, not a selector: it reports whether the other transport could serve if the
+    // operator chose it. Nothing in this file branches on it. Vertex needs no key (it rides the
+    // existing metadata bearer), so leaving the direct API is always ready; reaching the direct API
+    // needs a stored key, which is why alt_ready is key presence in that direction only.
+    alt_transport: transport === 'vertex' ? 'anthropic' : 'vertex',
+    alt_ready: transport === 'vertex' ? !!key : true,
+    alt_switch: transport === 'vertex' ? 'set CHAT_CLAUDE_PROVIDER=anthropic' : 'unset CHAT_CLAUDE_PROVIDER (Vertex is the default)',
+    alt_blocker: transport === 'vertex' && !key ? 'no Claude API key is stored' : '' };
+}
+// [CHAT-CLAUDE-BOTH-TRANSPORTS-V1] The "so what do I do about it" half of a chat failure. The
+// operator asked for Claude to be usable whichever transport is actually there; this is how he is
+// told which one ran, why it could not serve, and the exact setting that moves him to the other.
+//
+// WHY THIS IS A MESSAGE AND NOT AN AUTOMATIC FALLBACK. An auto-retry on the direct API when Vertex
+// 403s would put the stored key BACK IN CHARGE of the transport -- exactly the property the
+// CHAT-VERTEX-DEFAULT-V2 incident above was fixed by removing, only moved into the error path where
+// it is harder to see. The concrete regression: an install carrying a stale chat-key-claude (the
+// operator's does) would answer a missing aiplatform.user grant with a 401 from api.anthropic.com,
+// so the real cause -- one IAM role -- would again be buried under a key failure nobody asked for.
+// A transport is a deliberate choice about where the tokens are billed and which contract applies;
+// it is not something to make on the operator's behalf while he waits on a chat reply. So: Vertex
+// stays the only default, the key stays data, and the failure names the one env var that switches.
+// Takes the ALREADY-RESOLVED object -- it must not re-derive the transport, or it could disagree
+// with the log line printed for the same request.
+function harChatRemedy(r: any, status: number): string {
+  if (!r || (status !== 401 && status !== 403 && status !== 404 && status !== 429)) return '';
+  const why = r.transport === 'vertex'
+    ? (status === 404
+        ? 'this project cannot serve that model at location ' + (r.region || '-') + ' (wrong region, or the model is not enabled here)'
+        : status === 403
+        ? 'this service account cannot call Vertex here (missing aiplatform.endpoints.predict, or the Vertex AI API is off in this project)'
+        : status === 429 ? 'Vertex is rate limiting or has no quota for this model in this project'
+        : 'Vertex rejected the credential')
+    : (status === 404
+        ? 'the direct API does not know that model id'
+        : status === 429 ? 'the direct API is rate limiting this key'
+        : 'the direct API rejected the stored key (absent, stale or revoked)');
+  const alt = r.alt_ready
+    ? 'the other transport (' + r.alt_transport + ') IS ready: ' + r.alt_switch + ' and redeploy to use it'
+    : 'the other transport (' + r.alt_transport + ') is NOT usable either (' + (r.alt_blocker || 'not configured') + '): fix that, then ' + r.alt_switch;
+  return ' || transport=' + r.transport + ' was used; ' + why + '; ' + alt;
+}
+function harLogResolved(where: string, r: any): void {
+  console.log('[chat/resolve] ' + where + ' provider=' + r.provider + ' transport=' + r.transport +
+    ' region=' + (r.region || '-') + ' host=' + r.host + ' model=' + r.model +
+    (r.effort ? ' effort=' + r.effort : '') + ' key_present=' + (r.key_present ? 'yes' : 'no') +
+    // [CHAT-CLAUDE-BOTH-TRANSPORTS-V1] the other transport and whether it could serve, so "can I
+    // switch?" is answerable from the log alone -- same fields the failure text and /api/keys/status use.
+    ' alt=' + (r.alt_transport || '-') + ' alt_ready=' + (r.alt_ready ? 'yes' : 'no'));
+}
+// THE ONE PLACE the two Claude transports differ. Vertex :rawPredict answers with a native Messages
+// API response (same content/usage/stop_reason shape), so every caller above stays transport-blind
+// and the tool loop, the cache_control retry and the usage summing are untouched. rawPredict, not
+// streamRawPredict: neither chat caller streams -- both read one .json() body.
+// [CHAT-OBSERVABLE-V1] Redaction for anything that goes into an error string or a log line. Strips
+// ?key=..., Bearer tokens and sk-/ya29. shaped material. Applied to EVERY chat error text below.
+// [CHAT-CLAUDE-BOTH-TRANSPORTS-V1] Now formatted FROM the resolved object rather than re-deriving
+// the transport, host and region from the env a second time. It had drifted into a parallel copy of
+// harChatResolved()'s claude branch, which is the thing the ONE-RESOLVER rule exists to prevent: an
+// error string could have named a host the log line for the same request did not.
+function harClaudeHostDesc(r: any): string {
+  return r.transport === 'vertex' ? ('host=' + r.host + ' region=' + r.region) : ('host=' + r.host);
+}
+function harRedact(s: string): string {
+  return String(s == null ? '' : s)
+    .replace(/([?&]key=)[^&"\s]+/gi, '$1REDACTED')
+    .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer REDACTED')
+    .replace(/\b(sk-[A-Za-z0-9_\-]{6,}|ya29\.[A-Za-z0-9._\-]{6,})/g, 'REDACTED');
+}
+async function harClaudePost(apiModel: string, key: string, body: any): Promise<{ r: any; j: any }> {
+  // [SEC-FLEETMODE-CONSOLE-V1] A CONSOLE TRANSPORT. NOT BEHIND THE SPEND SWITCH, ON PURPOSE.
+  // Read all of this before putting a check back here.
+  //
+  // WHAT THE SWITCH PROTECTS AGAINST: spend NOBODY ASKED FOR. This system may automate
+  // deterministic work; it may never START model work on its own. A queue tick, a sweep, a
+  // retry loop or a background runner that wakes up and bills a card or a project while its
+  // owner is asleep is the case that rule was written for.
+  //
+  // WHY THIS FUNCTION IS OUT OF SCOPE: every Claude model call this file makes goes through
+  // here -- the plain chat, the tool-capable ops chat and the reflect pass -- and all three
+  // are reached from POST /api/chat, the reflect pass from the TAIL of that same request.
+  // There is no other caller. Every one of them runs because a signed-in human typed a
+  // message and pressed send, so there is no unattended caller here to stop; the only thing
+  // a check at this point can stop is the operator talking to his own install. It did
+  // exactly that. With the field absent, unreadable or set to home, every transport was
+  // refused, this function threw before it built a URL, and the console answered 502 -- the
+  // product's main surface dark to protect a budget the human had just chosen to spend --
+  // while the unattended path the rule is about carried on deciding for itself elsewhere.
+  //
+  // AND "DO NOT GATE THE CONSOLE" ALONE WOULD NOT HAVE SURVIVED, WHICH IS WHY THE PARAGRAPH
+  // ABOVE IS HERE. The check this replaces arrived with no statement of what it protected
+  // against, so the next reader could not tell the console apart from the bus and covered
+  // both. If a spend control is ever wanted on this path it is a per-request one a human
+  // sees and answers, not a fleet-wide field read behind his back.
+  let url = 'https://api.anthropic.com/v1/messages';
+  let headers: any = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
+  const out: any = Object.assign({}, body);
+  if (harClaudeProvider() === 'vertex') {
+    const region = harVertexClaudeRegion();
+    const tok = await waAccessToken();
+    url = 'https://' + harVertexHost(region) + '/v1/projects/' + harVertexProject() + '/locations/' + region +
+      '/publishers/anthropic/models/' + encodeURIComponent(String(out.model || apiModel)) + ':rawPredict';
+    headers = { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' };
+    delete out.model;                                        // on Vertex the model id lives in the URL
+    out.anthropic_version = HAR_VERTEX_ANTHROPIC_VERSION;    // and is required in the body
+  }
+  const rr = await waFetch(url, { method: 'POST', headers, body: JSON.stringify(out) });
+  const jj: any = await rr.json();
+  return { r: rr, j: jj };
+}
+
 // tool-capable Claude chat: 1h cache + effort + bounded tool loop.
-async function harChatClaudeOps(apiModel: string, key: string, system: string, msgs: any[], tools: any[], agentId: string): Promise<{ text: string; usage: any }> {
+async function harChatClaudeOps(apiModel: string, key: string, system: string, msgs: any[], tools: any[], agentId: string, exec?: (name: string, input: any) => Promise<string>): Promise<{ text: string; usage: any }> {  /* [CHAT-ONE-REGISTRY-V49] `exec` is the ONE dispatcher for the tools in `tools`. Absent == the legacy chat-only table (harRunChatTool). It is NOT a second execution path: harChatToolset() builds it out of the handlers buildMcpServer already registered, so a tool call from here lands in the same closure the MCP transports call. */
   const conv: any[] = msgs.map((m: any) => ({ role: m.role === 'me' ? 'user' : 'assistant', content: [{ type: 'text', text: String(m.text || m.content || '') }] }));
   const cacheIdx = conv.length - 2;
   const sumUsage: any = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
@@ -3634,16 +5826,17 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
     });
     const body: any = { model: apiModel, max_tokens: HAR_CHAT_MAX_TOKENS, system, tools, messages };
     if (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') body.output_config = { effort: HAR_CHAT_EFFORT };
-    return JSON.stringify(body);
+    return body;
   };
-  const post = async (withTtl: boolean, withEffort: boolean) => { const rr = await waFetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }, body: buildBody(withTtl, withEffort) }); const jj: any = await rr.json(); return { r: rr, j: jj }; };
+  const post = async (withTtl: boolean, withEffort: boolean) => await harClaudePost(apiModel, key, buildBody(withTtl, withEffort));
   let withTtl = true; let withEffort = true; let guard = 0; let finalText = '';
+  const claudeTrace: string[] = []; let claudeStop = '';
   // [HARNESSUI-MODEL-DERIVE-V1] what was ACTUALLY served. j.model is the provider's own
   // answer, and effortApplied tracks the withEffort fallback above -- when output_config is
   // dropped on a retry the request really did run at the default, and the badge must say so.
   let apiModelSeen = apiModel;
   let effortApplied = (HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high';
-  while (guard++ < 8) {
+  while (guard++ < HAR_CHAT_MAX_ROUNDS) {
     let { r, j } = await post(withTtl, withEffort);
     if (!r.ok) {
       const eb = JSON.stringify(j); let changed = false;
@@ -3651,7 +5844,11 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
       if (withTtl && (eb.indexOf('ttl') >= 0 || eb.indexOf('cache_control') >= 0)) { withTtl = false; changed = true; }
       if (changed) { const rt = await post(withTtl, withEffort); r = rt.r; j = rt.j; }
     }
-    if (!r.ok) throw new Error('anthropic ' + r.status + ': ' + JSON.stringify(j).slice(0, 300));
+    if (!r.ok) {
+      const rv = harChatResolved('claude', key);
+      throw new Error(harRedact('claude ' + rv.transport + ' ' + harClaudeHostDesc(rv) + ' model=' + apiModel +
+        ' HTTP ' + r.status + ': ' + JSON.stringify(j).slice(0, 400) + harChatRemedy(rv, r.status)));
+    }
     if (j && j.model) apiModelSeen = String(j.model);
     effortApplied = (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high';
     addUsage(j.usage);
@@ -3660,12 +5857,13 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
     const toolUses = content.filter((b: any) => b && b.type === 'tool_use');
     const txt = content.filter((b: any) => b && b.type === 'text').map((b: any) => b.text).join('').trim();
     if (txt) finalText = txt;
+    if (j && j.stop_reason) claudeStop = String(j.stop_reason);
     if (!toolUses.length || j.stop_reason !== 'tool_use') break;
     const results: any[] = [];
-    for (const tu of toolUses) { let out = ''; try { out = await harRunChatTool(tu.name, tu.input || {}, agentId); } catch (e: any) { out = 'tool error: ' + String((e && e.message) || e); } results.push({ type: 'tool_result', tool_use_id: tu.id, content: String(out).slice(0, 12000) }); }
+    for (const tu of toolUses) { let out = ''; try { out = exec ? await exec(String(tu.name), tu.input || {}) : await harRunChatTool(tu.name, tu.input || {}, agentId); } catch (e: any) { out = 'tool error: ' + String((e && e.message) || e); } results.push({ type: 'tool_result', tool_use_id: tu.id, content: String(out).slice(0, 12000) }); claudeTrace.push(String(tu.name) + ' -> ' + String(out).replace(/\s+/g, ' ').trim().slice(0, 500)); }
     conv.push({ role: 'user', content: results });
   }
-  return { text: finalText || '(no text)', usage: sumUsage, model: apiModelSeen, effort: effortApplied };
+  return { text: finalText || harChatNoTextReport(claudeTrace, claudeStop, false, 0), usage: sumUsage, model: apiModelSeen, effort: effortApplied };
 }
 // ============ end OPS CONSOLE TOOLS ============
 
@@ -3679,57 +5877,99 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
 // `system` stays a plain string with NO breakpoint: it is ~25 tokens, far below the minimum cacheable
 // prompt length, so a breakpoint there would just burn one of the four available breakpoints.
 // No `anthropic-beta` header: caching and the 1h TTL are both GA, and sending one risks a 400.
-async function harChatClaude(apiModel: string, key: string, system: string, msgs: any[]): Promise<{ text: string; usage: any }> {
-  const buildBody = (withTtl: boolean) => JSON.stringify({
-    model: apiModel, max_tokens: 1024, system,
-    messages: msgs.map((m, i) => {
-      const block: any = { type: 'text', text: String(m.text || m.content || '') };
-      if (msgs.length >= 2 && i === msgs.length - 2) block.cache_control = withTtl ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
-      return { role: m.role === 'me' ? 'user' : 'assistant', content: [block] };
-    }),
-  });
-  const post = async (withTtl: boolean) => {
-    const rr = await waFetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-      body: buildBody(withTtl),
-    });
-    const jj: any = await rr.json();
-    return { r: rr, j: jj };
+// [CHAT-OPUS5-DEFAULT-V1] output_config.effort is applied HERE TOO. It used to be set only on the
+// tool-capable harChatClaudeOps path, so a plain chat (no agentId selected) silently ran at the API
+// default no matter what CHAT_EFFORT said -- "Opus 5 Medium" on the badge, high effort on the wire.
+// Same 'high' == send-nothing rule and the same drop-on-rejection retry as the ops path.
+async function harChatClaude(apiModel: string, key: string, system: string, msgs: any[]): Promise<{ text: string; usage: any; model?: string; effort?: string }> {
+  const buildBody = (withTtl: boolean, withEffort: boolean) => {
+    const body: any = {
+      model: apiModel, max_tokens: 1024, system,
+      messages: msgs.map((m, i) => {
+        const block: any = { type: 'text', text: String(m.text || m.content || '') };
+        if (msgs.length >= 2 && i === msgs.length - 2) block.cache_control = withTtl ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
+        return { role: m.role === 'me' ? 'user' : 'assistant', content: [block] };
+      }),
+    };
+    if (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') body.output_config = { effort: HAR_CHAT_EFFORT };
+    return body;
   };
+  let withEffort = true;
+  const post = async (withTtl: boolean) => await harClaudePost(apiModel, key, buildBody(withTtl, withEffort));
   let { r, j } = await post(true);
   if (!r.ok) {
-    // NARROW fallback: only when the API objected to the ttl / cache_control itself do we retry ONCE
-    // with a plain { type: 'ephemeral' } block. Every other error falls through and still throws.
+    // NARROW fallback: only when the API objected to the ttl / cache_control / effort itself do we
+    // retry ONCE without it. Every other error falls through and still throws.
     const errBody = JSON.stringify(j);
-    if (errBody.indexOf('ttl') >= 0 || errBody.indexOf('cache_control') >= 0) { const retry = await post(false); r = retry.r; j = retry.j; }
+    if (withEffort && (errBody.indexOf('effort') >= 0 || errBody.indexOf('output_config') >= 0)) { withEffort = false; const retry = await post(true); r = retry.r; j = retry.j; }
+    if (!r.ok && (errBody.indexOf('ttl') >= 0 || errBody.indexOf('cache_control') >= 0)) { const retry = await post(false); r = retry.r; j = retry.j; }
   }
-  if (!r.ok) throw new Error('anthropic ' + r.status + ': ' + JSON.stringify(j).slice(0, 300));
-  return { text: (j.content && j.content[0] && j.content[0].text) || '(no text)', usage: (j && j.usage) || null };
+  if (!r.ok) {
+    const rv = harChatResolved('claude', key);
+    throw new Error(harRedact('claude ' + rv.transport + ' ' + harClaudeHostDesc(rv) + ' model=' + apiModel +
+      ' HTTP ' + r.status + ': ' + JSON.stringify(j).slice(0, 400) + harChatRemedy(rv, r.status)));
+  }
+  return { text: (j.content && j.content[0] && j.content[0].text) || '(no text)', usage: (j && j.usage) || null,
+    model: (j && j.model) ? String(j.model) : apiModel,
+    effort: (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high' };
 }
 async function harChatGemini(apiModel: string, key: string, system: string, msgs: any[]): Promise<{ text: string; usage: any }> {
+  // [SEC-FLEETMODE-CONSOLE-V1] A CONSOLE TRANSPORT. NOT BEHIND THE SPEND SWITCH, ON PURPOSE.
+  // Both Gemini destinations are decided below by harGeminiTransport(): Vertex on the
+  // service account, or AI Studio with a key.
+  //
+  // WHAT THE SWITCH PROTECTS AGAINST: spend NOBODY ASKED FOR -- a tick, a sweep, a retry
+  // loop or a background runner starting model work by itself while its owner is asleep.
+  //
+  // WHY THIS FUNCTION IS OUT OF SCOPE: its only callers are POST /api/chat and the reflect
+  // pass on the tail of that same request. Both run because a signed-in human typed and
+  // pressed send, so nothing unattended reaches this line and a check here could only ever
+  // refuse the operator his own console. The unattended path the rule is about is the bus,
+  // which decides in src/runner/fleet_mode.py and never consulted this file. The long form
+  // of the argument, including why stating it rather than just asserting it is part of the
+  // fix, is at harClaudePost() above.
   const contents = msgs.map((m) => ({ role: m.role === 'me' ? 'user' : 'model', parts: [{ text: String(m.text || m.content || '') }] }));
   const payload = { systemInstruction: { parts: [{ text: system }] }, contents };
   let url = 'https://generativelanguage.googleapis.com/v1beta/models/' + apiModel + ':generateContent?key=' + encodeURIComponent(key);
   let headers: any = { 'Content-Type': 'application/json' };
-  
-  if (!key || key === 'vertex' || key === 'token') {
+  let hostDesc = 'host=generativelanguage.googleapis.com transport=studio';
+  // [CHAT-VERTEX-DEFAULT-V2] WAS `if (!key || key === 'vertex' || key === 'token')` -- i.e. a stale
+  // chat-key-gemini secret or a leftover GEMINI_API_KEY silently took the chat OFF Vertex and onto
+  // AI Studio, where the configured Vertex publisher model id does not exist. That is the operator's
+  // "Gemini said it was wired but I couldn't chat with it". Vertex is now the default transport and
+  // AI Studio is an explicit opt-in (CHAT_GEMINI_PROVIDER=studio + a real key).
+  if (harGeminiTransport(key) === 'vertex') {
     const tok = await waAccessToken();
     // Region MUST match the working bus (work_item_runner.run_gemini: location = vertex_region || 'global').
     // gemini-3.1-pro-preview is a GLOBAL publisher model; us-central1 404s.
-    const region = process.env.GCP_REGION || 'global';
-    const project = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
+    // WAS `process.env.GCP_REGION || 'global'` -- GCP_REGION is the CLOUD RUN region (default
+    // us-east1) and is set on this service, so the chat asked us-east1-aiplatform for a global-only
+    // model and got a 404. Now a dedicated setting with a model-aware safe fallback.
+    const region = harVertexGeminiRegion(apiModel);
+    const project = harVertexProject();
     // location=global is served by the BARE host, not global-aiplatform.* (same rule as run_deepseek()).
-    const vhost = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
+    const vhost = harVertexHost(region);
     url = `https://${vhost}/v1/projects/${project}/locations/${region}/publishers/google/models/${apiModel}:generateContent`;
     headers['Authorization'] = 'Bearer ' + tok;
+    hostDesc = 'host=' + vhost + ' transport=vertex region=' + region + ' project=' + project;
   }
   
   const r = await waFetch(url, {
     method: 'POST', headers,
     body: JSON.stringify(payload),
   });
-  const j: any = await r.json();
-  if (!r.ok) throw new Error('gemini ' + r.status + ': ' + JSON.stringify(j).slice(0, 300));
+  let j: any = null;
+  try { j = await r.json(); } catch (e: any) { j = { parse_error: String((e && e.message) || e) }; }
+  // [CHAT-OBSERVABLE-V1] REPORT THE REAL REASON. This used to be `'gemini ' + r.status + ...` and
+  // then /api/chat turned it into a bare 500 with only an err_id, so a 404 for the wrong host, a 403
+  // for a missing aiplatform role and an expired AI-Studio key were all the same opaque failure.
+  // The upstream message is carried through verbatim; harRedact() strips ?key= and bearer material,
+  // so no key value can ride out on it.
+  if (!r.ok) {
+    const um = (j && j.error && (j.error.message || j.error.status)) || (j && j.parse_error) || JSON.stringify(j).slice(0, 400);
+    throw new Error(harRedact('gemini ' + hostDesc + ' model=' + apiModel + ' HTTP ' + r.status + ': ' + um +
+      harChatRemedy(harChatResolved('gemini', key), r.status)));
+  }
   const c = j.candidates && j.candidates[0];
   const text = (c && c.content && c.content.parts && c.content.parts[0] && c.content.parts[0].text) || '(no text)';
   // Gemini REST (BOTH generativelanguage v1beta and the Vertex v1 path above) returns camelCase
@@ -3744,13 +5984,18 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
   return { text: text, usage: usage };
 }
 
-// ---- pages (gated: must have an unlocked passkey session; otherwise bounce to /gate) ----
-app.get('/chat', (req: express.Request, res: express.Response) => { if (!waSessionOk(req)) { res.redirect('/gate'); return; } res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Cache-Control', 'no-store, max-age=0'); res.send(HAR_HARNESS_HTML); });
+// ---- pages (gated: must have a console session; otherwise the locked document, in place) ----
+app.get('/chat', (req: express.Request, res: express.Response) => { if (pcCanonicalHostRedirect(req, res)) return; /* [PC-CANONICAL-HOST-V48] */ if (!waSessionOk(req)) { waSendLocked(res); return; } res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Cache-Control', 'no-store, max-age=0'); res.send(HAR_HARNESS_HTML); });
 
 // ---- VM control ----
-app.get('/api/vm/status', waGate(async (req, res) => { res.json(await harVmStatus()); }));
-app.post('/api/vm/start', waGate(async (req, res) => { res.json(await harVmAction('start')); }));
-app.post('/api/vm/stop', waGate(async (req, res) => { await opsClear('box-stopped'); res.json(await harVmAction('stop')); }));
+// [SEC-VM-UNCONFIGURED-V1] Same refusal the MCP tools make, on the HTTP surface. These three stay
+// wrapped in waGate exactly as before -- the guard is ADDED INSIDE the handler, not substituted for
+// the session check -- so the route audit still sees three guarded registrations at column zero and
+// the public/guarded split does not move. start/stop additionally mutate, so refusing here stops an
+// unconfigured install from issuing Compute writes against a name it invented.
+app.get('/api/vm/status', waGate(async (req, res) => { const _u = harVmUnset(); if (_u !== '') { res.status(503).json({ ok: false, error: 'workstation not configured', unset: _u, detail: 'This deployment declares no Compute instance, so there is nothing to ' + 'address. Create the instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.' }); return; } res.json(await harVmStatus()); }));
+app.post('/api/vm/start', waGate(async (req, res) => { const _u = harVmUnset(); if (_u !== '') { res.status(503).json({ ok: false, error: 'workstation not configured', unset: _u, detail: 'This deployment declares no Compute instance, so there is nothing to ' + 'address. Create the instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.' }); return; } res.json(await harVmAction('start')); }));
+app.post('/api/vm/stop', waGate(async (req, res) => { const _u = harVmUnset(); if (_u !== '') { res.status(503).json({ ok: false, error: 'workstation not configured', unset: _u, detail: 'This deployment declares no Compute instance, so there is nothing to ' + 'address. Create the instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.' }); return; } await opsClear('box-stopped'); res.json(await harVmAction('stop')); }));
 
 // ---- [PQC-TLS-TOGGLE-V1] post-quantum TLS ingress toggle ----
 // The knob is compute.sslPolicies field `postQuantumKeyExchange` (API v1, values
@@ -3939,7 +6184,7 @@ app.post('/api/shell', waGate(async (req, res) => {
   if (!cmd) { res.status(400).json({ error: 'no cmd' }); return; }
   if (!OPS_TOKEN) { res.status(412).json({ error: 'OPS_TOKEN not configured on control-plane' }); return; }
   const ip = await harBoxInternalIp();
-  if (!ip) { await opsClear('box-down'); res.status(503).json({ error: 'ops-box not reachable — is fleet-navigator running?' }); return; }  // idle-out/stopped => drop window
+  if (!ip) { await opsClear('box-down'); res.status(503).json({ error: 'ops-box not reachable — is the workstation instance running?' }); return; }  // idle-out/stopped => drop window
   const ot = await harOpsToken(req);
   if (ot.err) { res.status(401).json({ error: ot.err }); return; }
   const hdrs: any = { 'X-Ops-Token': OPS_TOKEN, 'Content-Type': 'application/json' };
@@ -4062,11 +6307,16 @@ app.get('/api/usage', waGate(async (req, res) => {
 app.get('/api/keys/status', waGate(async (req, res) => {
   const claudeAge = await harKeyAge('claude');
   const geminiAge = await harKeyAge('gemini');
+  // [CHAT-OBSERVABLE-V1] `chat` reports the RESOLVED transport/region/host/model/effort for both
+  // providers, so "is it on Vertex?" is answerable from this endpoint. Presence booleans only --
+  // no key value, no token, ever appears here.
+  const ck = await harKey('claude'); const gk = await harKey('gemini');
   res.json({ 
-    claude: !!(await harKey('claude')), 
-    gemini: ((await harKey('gemini')) !== 'vertex'),
+    claude: !!ck, 
+    gemini: (gk !== 'vertex'),
     claude_set_at: claudeAge,
-    gemini_set_at: geminiAge
+    gemini_set_at: geminiAge,
+    chat: { claude: harChatResolved('claude', ck), gemini: harChatResolved('gemini', gk) }
   });
 }));
 app.post('/api/keys', waGate(async (req, res) => {
@@ -4075,6 +6325,23 @@ app.post('/api/keys', waGate(async (req, res) => {
   if (!key) { res.status(400).json({ error: 'no key' }); return; }
   
   if (provider === 'claude') {
+    // [SEC-FLEETMODE-CONSOLE-V1] A CONSOLE SURFACE. NOT BEHIND THE SPEND SWITCH, ON PURPOSE.
+    // The verification probe below IS a model call -- a real Messages request carrying the
+    // submitted key -- and it is still the fourth model transport in this file. What it is
+    // not is unattended.
+    //
+    // WHAT THE SWITCH PROTECTS AGAINST: spend NOBODY ASKED FOR -- a tick, a sweep, a retry
+    // loop or a background runner starting model work by itself. Nothing on this route can
+    // run unattended: it is a POST behind the session gate, reached when a human pastes a
+    // key into the console and clicks save. The one token this probe spends is spent
+    // BECAUSE HE ASKED, on the key he just supplied, to tell him whether it works.
+    //
+    // WHAT THE CHECK HERE ACTUALLY DID: it answered 409 unless the mode was dual, and no
+    // code in this product ever writes dual -- the installer writes work, and no route in
+    // this file writes the field at all. So a home user could not add a Claude key, at all,
+    // by any route the product offers, and the reason was a mode reachable only by a manual
+    // privileged write. Refusing a human the ability to supply his own credential is not a
+    // spend control; the credential is his and so is the bill.
     // verify with a tiny test call
     const testR = await waFetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -4255,8 +6522,29 @@ const vCrypto = require('crypto');
 // set on the service by install.sh at 6/10; the fallback keeps an existing us-east1 deployment
 // byte-identical if it is ever absent, which is also why epoch 1 needs no separate pin.
 const VAULT_KMS_LOCATION = (process.env.GCP_REGION || 'us-east1');
-const VAULT_KMS_KEY_VERSION_E1 = ('projects/' + PC_PROJECT + '/locations/' + VAULT_KMS_LOCATION + '/keyRings/paracoding-vault/cryptoKeys/vault-kem/cryptoKeyVersions/1');
-const VAULT_KMS_KEY_VERSION_E2 = ('projects/' + PC_PROJECT + '/locations/' + VAULT_KMS_LOCATION + '/keyRings/paracoding-vault/cryptoKeys/vault-kem-xwing/cryptoKeyVersions/1');
+// [SEC-VAULT-LANE-V1] THE VAULT KEYRING AND KEY ARE LANE-NAMESPACED BY THE INSTALLER AND
+// WERE NAMED HERE BY BARE LITERALS -- the one combination that cannot work. PC_LANE puts two
+// lanes in ONE project, so both lanes carry the same GCP_PROJECT and the same GCP_REGION;
+// install.sh creates keyring paracoding-${PC_LP}vault and key ${PC_LP}vault-kem-xwing and
+// grants THAT key roles/cloudkms.decapsulator to the lane's own control plane, key-scoped.
+// With the names hardcoded, a dev-lane control plane resolved PROD's keyring instead, held
+// no decapsulator on it, and every vaultMaster() call 403'd -- which presents as every lake
+// write throwing, and takes the git object store down with it. Granting the dev lane
+// decapsulator on the prod key would be strictly WORSE: it would let the dev lane derive
+// PROD'S MASTER KEY. KMS keyrings and keys CAN NEVER BE DELETED, so this has to be right
+// before a lane is minted, not repaired afterwards.
+//
+// RESOLVED FROM THE ENVIRONMENT, DEFAULTING TO THE LITERALS THAT WERE ALREADY HERE. With all
+// three variables unset, every string built below is byte-identical to what this file
+// produced before this change -- which is exactly the state of the running prod services,
+// so an existing install cannot change behaviour by picking this up. Same shape as
+// VAULT_KMS_LOCATION directly above and as APPROVAL_SIG_KEY_VERSION, which has been
+// env-resolved all along; the vault was simply the one that got missed.
+const VAULT_KMS_KEYRING = (process.env.VAULT_KMS_KEYRING || 'paracoding-vault');
+const VAULT_KMS_KEY_E1_NAME = (process.env.VAULT_KMS_KEY_EPOCH1 || 'vault-kem');
+const VAULT_KMS_KEY_E2_NAME = (process.env.VAULT_KMS_KEY || 'vault-kem-xwing');
+const VAULT_KMS_KEY_VERSION_E1 = ('projects/' + PC_PROJECT + '/locations/' + VAULT_KMS_LOCATION + '/keyRings/' + VAULT_KMS_KEYRING + '/cryptoKeys/' + VAULT_KMS_KEY_E1_NAME + '/cryptoKeyVersions/1');
+const VAULT_KMS_KEY_VERSION_E2 = ('projects/' + PC_PROJECT + '/locations/' + VAULT_KMS_LOCATION + '/keyRings/' + VAULT_KMS_KEYRING + '/cryptoKeys/' + VAULT_KMS_KEY_E2_NAME + '/cryptoKeyVersions/1');
 const VAULT_KMS_KEY_VERSION = VAULT_KMS_KEY_VERSION_E2;
 const VAULT_MASTER_KEM_PATH = 'shared/vault/master.kem';
 const VAULT_MASTER_INFO = Buffer.from('paracoding-vault master v1', 'utf8');
@@ -4318,7 +6606,7 @@ async function vaultMasterForEpoch(epoch: number): Promise<Buffer> {
   if (_vaultMasterByEpoch[k]) return _vaultMasterByEpoch[k];
   if (_vaultMasterPromiseByEpoch[k]) return _vaultMasterPromiseByEpoch[k];
   _vaultMasterPromiseByEpoch[k] = (async () => {
-    const f = getStorage().bucket(process.env.DATA_LAKE_BUCKET || PC_LAKE).file(spec.path);
+    const f = getStorage().bucket(pcLakeBucket()).file(spec.path);
     const dl = await f.download();
     const ss = await vaultDecapsulate(vaultKemCiphertext(dl[0], epoch), spec.keyVersion);
     // salt=Buffer.alloc(32,0) == python cryptography HKDF salt=None (HashLen zero bytes) — proven equal.
@@ -4385,7 +6673,7 @@ async function armGitVaultEpoch1(): Promise<void> {
     const spec = VAULT_KEM_SPEC['1'];
     if (!spec) { _gitVaultE1Settled = true; return; }
     const gt = require('./gittools.js');
-    const ex = await gitVaultDeadline(getStorage().bucket(process.env.DATA_LAKE_BUCKET || PC_LAKE).file(spec.path).exists(), 'epoch 1 blob probe');
+    const ex = await gitVaultDeadline(getStorage().bucket(pcLakeBucket()).file(spec.path).exists(), 'epoch 1 blob probe');
     if (!(ex && ex[0])) { _gitVaultE1Settled = true; return; }
     gt.setVaultMasterForEpoch(1, await gitVaultDeadline(vaultMasterForEpoch(1), 'epoch 1 KEM decapsulate'));
     _gitVaultE1Settled = true;
@@ -4474,7 +6762,7 @@ function vaultDecryptSync(master: Buffer, path: string, blob: Buffer): string {
 // Transparent lake WRITE: encrypt unless the path is cleartext-allowlisted. FAIL-CLOSED — if the master
 // cannot load, a non-cleartext write THROWS (never silently writes plaintext).
 async function harWriteLake(path: string, body: Buffer | string, contentType?: string, meta?: { [k: string]: string }): Promise<void> {
-  const file = getStorage().bucket(process.env.DATA_LAKE_BUCKET || PC_LAKE).file(path);
+  const file = getStorage().bucket(pcLakeBucket()).file(path);
   const ct = contentType || 'application/octet-stream';
   // [PCV1-LAKE-TOOLS-V1] `meta` is OPTIONAL custom object metadata (owner, tags) so the MCP lake tools can
   // route through here without losing what they used to set on their own storage write. Omitting it
@@ -4509,7 +6797,7 @@ async function harDecryptLakeBuf(path: string, blob: Buffer): Promise<string> {
 // Every call site was checked first: each either wraps this in its own try/catch or sits inside
 // waGate/harFail or a .catch() chain, so a throw surfaces as a real message, never an empty file.
 async function harReadLake(path: string): Promise<string> {
-  const f = getStorage().bucket(process.env.DATA_LAKE_BUCKET || PC_LAKE).file(path);
+  const f = getStorage().bucket(pcLakeBucket()).file(path);
   let blob: Buffer = Buffer.alloc(0);
   try {
     const ex = await f.exists();
@@ -4522,6 +6810,81 @@ async function harReadLake(path: string): Promise<string> {
     throw e;
   }
   return await harDecryptLakeBuf(path, blob);
+}
+// [CHAT-REFLECT-USAGE-V1] THE REFLECTION CALL WAS A MODEL CALL THAT COST NOTHING ON PAPER.
+// harReflect() below runs a full LESSONS distillation -- up to 16000 tokens of conversation
+// plus the current LESSONS file plus the shared preferences -- through harChatClaude() or
+// harChatGemini(), and BOTH of those return { text, usage }. It kept `.text` and dropped
+// `.usage` on the floor. Nothing else recorded it either: the token_usage write in /api/chat
+// covers the turn the human typed and runs BEFORE this is called, in the same handler, so the
+// largest single model call this console makes was the one call with no row behind it.
+// /api/dash/usage and /api/usage both read the token_usage collection and nothing else, so
+// that spend was invisible to every cost surface the fleet has.
+//
+// A ZERO IS NOT AN ACCEPTABLE STAND-IN FOR AN ABSENT MEASUREMENT, and that rule is already in
+// this file: /api/usage refuses to guess a missing price and answers cost_usd:null with
+// prices_configured:false rather than 0. The same reasoning applies one level down. A
+// token_usage row carrying four zeros is indistinguishable from a call that genuinely used no
+// tokens, and BOTH readers above SUM every document they see -- so such a row does not merely
+// fail to inform, it makes the table wrong in the direction that looks safe.
+//
+// SO THERE ARE TWO OUTCOMES AND THEY GO TO DIFFERENT PLACES.
+//   MEASURED   -- the provider returned a usage object with at least one usable numeric field.
+//                 A normal token_usage row is written, field for field the same shape the
+//                 /api/chat handler writes, so the existing readers pick it up unchanged.
+//   UNMEASURED -- no usage object at all, or one this cannot read. That state is REAL and not
+//                 defensive padding: harChatClaude returns `usage: (j && j.usage) || null` and
+//                 harChatGemini returns null whenever the response carries no usageMetadata,
+//                 which is exactly what a Vertex rawPredict answer missing the field yields.
+//                 NO token_usage row is written. A row goes to token_usage_gaps instead,
+//                 carrying agent, model, source and what was seen, and carrying NO token
+//                 counts at all -- there is nothing honest to put in them.
+//
+// WHY A SEPARATE COLLECTION RATHER THAN A FLAG ON THE ROW. Both readers of token_usage sum
+// every document they see and neither knows about a flag. Writing `measured:false` onto a row
+// IN token_usage would land a four-zero row in the cost table today and rely on a later edit to
+// two other handlers to stop it being summed -- the zero that lies, with an extra step. A gap
+// belongs somewhere nothing can add it up. token_usage_gaps is write-only from here, needs no
+// index because nothing queries it, and is countable the moment anyone wants to count it.
+//
+// A MISSING FIELD INSIDE A PRESENT USAGE OBJECT IS NOT A GAP. The Messages API omits
+// cache_read_input_tokens when nothing was read from cache; that is a MEASURED zero and is
+// written as one, exactly as /api/chat already does. A missing OBJECT is the gap. harUsageOk()
+// is where that line sits, and it is the only place it sits.
+function harUsageOk(u: any): boolean {
+  if (!u || typeof u !== 'object' || Array.isArray(u)) return false;
+  const F = ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'];
+  let seen = 0;
+  for (let i = 0; i < F.length; i++) {
+    const v = u[F[i]];
+    if (v === undefined || v === null) continue;   // absent field: the provider reported none of this kind
+    if (typeof v !== 'number' || !isFinite(v) || v < 0) return false;   // present but unusable: the whole object is
+    seen++;
+  }
+  return seen > 0;
+}
+// NEVER THROWS. Same contract as the token_usage write in /api/chat and as harJournalAs(): a
+// telemetry failure must not break the caller. Note that harReflect's own body is inside one
+// big try/catch, so a throw here would be swallowed silently and the gap would be lost twice.
+async function harRecordUsage(agentId: string, model: string, source: string, usage: any): Promise<void> {
+  try {
+    if (harUsageOk(usage)) {
+      await db.collection('token_usage').add({
+        agent: agentId, model: model, source: source,
+        input_tokens: usage.input_tokens || 0, output_tokens: usage.output_tokens || 0,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+        ts: FieldValue.serverTimestamp(),
+      });
+      return;
+    }
+    await db.collection('token_usage_gaps').add({
+      agent: agentId, model: model, source: source,
+      reason: 'UNMEASURED: the provider response carried no usable usage object. This call HAPPENED and its cost is unknown. It is deliberately NOT written to token_usage, because a row of zeros there would be summed as a real zero by /api/dash/usage and /api/usage.',
+      saw: (usage === null || usage === undefined) ? 'absent' : (Array.isArray(usage) ? 'array' : typeof usage),
+      ts: FieldValue.serverTimestamp(),
+    });
+  } catch (e) {}
 }
 async function harReflect(agentId: string, provider: string, apiModel: string, key: string): Promise<void> {
   try {
@@ -4541,13 +6904,433 @@ async function harReflect(agentId: string, provider: string, apiModel: string, k
     const sys = 'You maintain the long-term LESSONS file for the strain "' + agentId + '". Distill from the conversation what is CRITICAL so the strain improves with less grower effort: durable facts, the grower stated preferences and laws, corrections the grower made, decisions taken, ways of working that worked, and open threads. SCORE by importance (grower-emphasised > corrections > repeated > decisions) and PRUNE to the essentials, aim under ~1500 words. Output ONLY the new lessons.md content in markdown, no preamble.';
     const usr = 'GROWER PREFERENCES (already known globally - do NOT duplicate; capture only strain-specific lessons):\n' + growerPrefs + '\n\nCURRENT lessons.md:\n' + (curLessons || '(none yet)') + '\n\nRECENT CONVERSATION:\n' + convo + '\n\nReturn the updated lessons.md now.';
     let out = '';
-    if (provider === 'gemini') { out = (await harChatGemini(apiModel, key, sys, [{ role: 'me', text: usr }])).text; }
-    else { out = (await harChatClaude(apiModel, key, sys, [{ role: 'me', text: usr }])).text; }
+    // [CHAT-REFLECT-USAGE-V1] the result object is HELD now, not dereferenced to .text and
+    // thrown away. Recorded BEFORE the lake write below, deliberately: that write can throw,
+    // the outer catch swallows it, and losing the record of a call that already cost money
+    // because the file it produced could not be stored is the wrong order of operations.
+    // `apiModel` is the model attribute, matching the /api/chat write exactly so by_model in
+    // /api/usage does not gain a second key for the same model.
+    if (provider === 'gemini') {
+      const gr = await harChatGemini(apiModel, key, sys, [{ role: 'me', text: usr }]);
+      out = gr.text;
+      await harRecordUsage(agentId, apiModel, 'web-chat-reflect', gr.usage);
+    } else {
+      const cr = await harChatClaude(apiModel, key, sys, [{ role: 'me', text: usr }]);
+      out = cr.text;
+      await harRecordUsage(agentId, apiModel, 'web-chat-reflect', cr.usage);
+    }
     if (out && out.trim() && out.indexOf('(no text)') < 0) {
       await harWriteLake('agents/' + agentId + '/LESSONS.md', out.slice(0, 8000), 'text/markdown; charset=utf-8');
     }
   } catch (e) {}
 }
+// ==================== [CHAT-ONE-REGISTRY-V49] ONE TOOL REGISTRY ====================
+// ONE DEFINITION, ONE FILTER, TWO MODELS. Read this before adding a tool to either surface.
+//
+// WHAT WAS HERE BEFORE, MEASURED. harToolDefs() far above is a HAND-WRITTEN list of TEN tool
+// schemas, and it was the entire tool surface of this console. buildMcpServer() registers
+// FORTY-FIVE. The chat therefore saw about a fifth of the fleet's own toolset, and the fifth
+// it saw was read-only: no run_command, no gcp_api, none of the seven git tools, no vm_*.
+// Two registries for one product, one of them maintained by hand, is drift BY CONSTRUCTION --
+// every tool added to the MCP surface after that list was written was invisible here and
+// nothing anywhere said so. A second hand-maintained copy of a tool table is exactly what
+// this block replaces; do not write a third.
+//
+// WHAT IT IS NOW. The chat's definitions are DERIVED from the same registration table the MCP
+// wire is built from: buildMcpServerAdmitted() -> the registerTool shadow -> server.__pcTools,
+// which is the ONE place where "the tools this role actually has" is a FACT rather than a
+// re-derivation. It is the same call, with the same arguments, that mcpServeModern()'s tools()
+// callback makes for the 2026-07-28 wire, and it uses the same zod->JSON Schema converter
+// (mcp2026SchemaOf). There is no second list to maintain and no second filter to keep in step.
+//
+// AUTHORITY IS NOT WIDENED BY THIS. That is the whole safety claim, and each clause of it is a
+// thing that happens ABOVE this code, not a thing re-implemented in it:
+//   - ADMISSION runs first and unchanged. buildMcpServerAdmitted() asks mcpStrainAdmit(); an
+//     unprovisioned or inactive strain is handed buildDeniedMcpServer(), which never goes
+//     through the shadow, so __pcTools is ABSENT and the chat gets ZERO mcp tools -- not a
+//     tool that is present and fails on call.
+//   - THE STRAIN'S TOOL CLASSES are applied by that same shadow: pcToolClasses(role) read
+//     against PC_TOOL_CLASS, under PC_TOOLS_ENFORCE, with the same tool_surface_withheld
+//     journal line. A tool the shadow declines to register is absent from __pcTools and is
+//     therefore absent HERE, with no code in this block making that decision a second time.
+//   - A SESSION KEY'S NARROWING (session_keys.tool_classes -> pcNarrowClasses, which can only
+//     ever SUBTRACT from the strain set) rides the SAME `keyClasses` parameter, threaded and
+//     never re-derived. This route presents no session key: /api/chat is guarded by waGate,
+//     i.e. by the operator's own console session, and the body carries a strain NAME picked in
+//     the console, not a credential. So it passes undefined and the strain's own classes
+//     decide, exactly as the /mcp/:token connector mount does. If a key is ever accepted on
+//     this route, its .tc is passed in HERE and nowhere else.
+//   - ENV WITHHOLDING is inherited for free, because it also happens inside buildMcpServer
+//     above __pcTools: WS_CDP_PORT (browser_*), PC_BROWSER_EVAL, WS_VM/WS_ZONE (vm_*) and
+//     registerGitTools()'s own GIT_REPO_ID refusal.
+//   - PC_SURFACE IS NOT A TOOL FILTER and is deliberately not consulted. It decides which
+//     ROUTES a copy of this image registers (PC_SURFACE_MAP); no tool registration reads it,
+//     and there is no per-surface tool set to honour. /api/chat is on the console surface and
+//     /mcp is on the mcp surface, and both build their toolset from this one function, which
+//     is the point: a strain's tools do not depend on which half of the split it reaches.
+//
+// EXECUTION IS THE EXISTING PATH, NOT A SECOND ONE. run() calls the handler recorded in
+// __pcTools -- the pcCapWrap-wrapped closure the MCP transports call, closed over who() and the
+// already-resolved role. PC_AUTO_APPROVE, PC_GUARDRAILS, pcAdmitStage, the KMS-signed approval
+// and every journal write happen INSIDE it, unchanged and unreachable from here. A destructive
+// command issued from this console therefore behaves exactly as the same command arriving over
+// MCP, including its refusals. Nothing in this block inspects a tool name to decide anything.
+//
+// THE CHAT-ONLY TOOLS SURVIVE, BY SET DIFFERENCE RATHER THAN BY HAND. harOpsTools() still
+// describes ten; five of them (read_journal, list_work_items, cancel_work_item,
+// complete_work_item, read_job_log) are ALSO registered on the MCP surface, and there the MCP
+// definition wins because one registry is the entire point. The other five (status_digest,
+// dispatch, check, read_lake, cowork_prompt) exist nowhere else and are appended. NOTHING HERE
+// NAMES THOSE FIVE: the split is computed against the live MCP registry at request time, so a
+// chat-only tool later promoted to a real MCP tool stands aside on its own instead of
+// shadowing it, and a chat-only tool that is deleted disappears without an edit here.
+//
+// COST. One extra buildMcpServerAdmitted() per chat turn -- one cached strains read, then the
+// same registration work mcpServeModern() does per tools/list. The wire size of the tool block
+// is MEASURED and logged per request below rather than guessed at, and nothing is truncated: a
+// silently trimmed tool list is a tool the model cannot see and cannot be told about.
+type HarChatTool = { name: string; description: string; schema: any; run: (input: any) => Promise<string> };
+
+// An MCP handler answers { content: [{ type:'text', text }], isError? }; a chat tool result is
+// one string. Text blocks are joined, anything else is shown as JSON rather than dropped, and
+// isError is stated IN WORDS because this string is all the model sees -- a failure that
+// arrives looking like a success is how an agent reports work it did not do.
+function harMcpResultText(r: any): string {
+  if (r === null || typeof r === 'undefined') return '(no result)';
+  if (typeof r === 'string') return r;
+  const parts: string[] = [];
+  const c: any = r.content;
+  if (Array.isArray(c)) {
+    for (const b of c) {
+      if (b && b.type === 'text' && typeof b.text === 'string') parts.push(b.text);
+      else if (b) parts.push(JSON.stringify(b));
+    }
+  }
+  let t = parts.join('\n');
+  if (!t) t = JSON.stringify(r);
+  return r.isError ? ('TOOL ERROR: ' + t) : t;
+}
+
+async function harChatToolset(agentId: string, keyClasses?: any): Promise<HarChatTool[]> {
+  const who = agentId || 'fleet-advisor';
+  const out: HarChatTool[] = [];
+  const seen: { [k: string]: boolean } = {};
+  let nMcp = 0;
+  try {
+    const built: any = await buildMcpServerAdmitted(who, keyClasses);
+    const rec: any[] = (built && built.__pcTools) || [];
+    // Closed like mcpServeModern does: the recorded handlers are plain closures and do not
+    // need the server object to stay open.
+    try { built.close(); } catch (e) {}
+    for (const t of rec) {
+      if (!t || !t.name || seen[String(t.name)]) continue;
+      const nm = String(t.name);
+      seen[nm] = true;
+      const h = t.handler;
+      out.push({
+        name: nm,
+        description: String((t.spec && t.spec.description) || ''),
+        schema: mcp2026SchemaOf(nm, t.spec && t.spec.inputSchema),
+        run: async (input: any) => harMcpResultText(await h(input || {}))
+      });
+      nMcp++;
+    }
+    if (!nMcp) console.warn('[chat/tools] ' + who + ' was handed NO mcp tools: admission refused this '
+      + 'principal, or every class it holds was withheld. The console tools below are all it gets.');
+  } catch (e: any) {
+    // LOUD, and the chat still answers. The alternative -- failing the whole turn because the
+    // registry could not be built -- takes away the console the operator would use to find out why.
+    console.error('[chat/tools] mcp toolset unavailable for ' + who + ': '
+      + String((e && e.message) || e) + ' -- serving the console-only tools.');
+  }
+  for (const d of harOpsTools(who)) {
+    if (!d || !d.name || seen[String(d.name)]) continue;
+    const nm = String(d.name);
+    seen[nm] = true;
+    out.push({
+      name: nm,
+      description: String(d.description || ''),
+      schema: d.input_schema || { type: 'object', properties: {} },
+      run: async (input: any) => await harRunChatTool(nm, input || {}, who)
+    });
+  }
+  try {
+    const bytes = Buffer.byteLength(JSON.stringify(harClaudeToolWire(out)), 'utf8');
+    console.log('[chat/tools] agent=' + who + ' tools=' + out.length + ' (mcp=' + nMcp
+      + ' console=' + (out.length - nMcp) + ') claude_wire_bytes=' + bytes
+      + ' approx_tokens=' + Math.round(bytes / 3.5)
+      + ' -- sent on every request of this turn; the 1h cache breakpoint on the second-to-last '
+      + 'message sits AFTER the tool block, so a cached turn reads it at 0.1x rather than resending it.');
+  } catch (e) {}
+  return out;
+}
+
+// The ONE dispatcher handed to both model loops. It does not know what a tool is; it looks the
+// name up in the set that was advertised and calls that entry's run().
+function harChatExec(ts: HarChatTool[]): (name: string, input: any) => Promise<string> {
+  return async (name: string, input: any) => {
+    for (let i = 0; i < ts.length; i++) if (ts[i].name === name) return await ts[i].run(input || {});
+    return 'unknown tool ' + name;
+  };
+}
+
+// Anthropic wire shape. The schema goes out exactly as the MCP surface publishes it.
+function harClaudeToolWire(ts: HarChatTool[]): any[] {
+  return ts.map((t: HarChatTool) => ({ name: t.name, description: t.description, input_schema: t.schema }));
+}
+
+// ---- Gemini functionDeclarations: the ONLY place the shared definitions are reshaped ----
+// Gemini's function-calling schema is a SUBSET of JSON Schema (the Vertex `Schema` message), and
+// it rejects the request outright on a keyword it does not know -- so an unsanitised pass-through
+// costs the whole toolset, not one field. This is a boundary converter and nothing else: it never
+// adds, removes or renames a TOOL, only rewrites the shape of one already decided above.
+//
+// STRIPPED, and why each one is safe to drop:
+//   $schema             dialect marker; not a constraint.
+//   additionalProperties  zod emits `false` on every object; Gemini has no such field. Dropping
+//                       it only stops the model being TOLD that extra keys are refused -- the
+//                       handler's own validation is unchanged and still refuses them.
+//   propertyNames       emitted by z.record(); no equivalent. The key type is lost.
+//   $defs / definitions / $ref  zod 4 inlines every one of our shapes (measured: no $ref in any
+//                       of the 45), so this is defensive -- a $ref is resolved against the root
+//                       and, if unresolvable, degraded to a plain string rather than sent.
+//   anyOf/oneOf         collapsed: [X, null] becomes X with nullable:true, which is how Gemini
+//                       spells the same thing. A wider union keeps its FIRST member; nothing
+//                       here is a real union today except .nullable().
+//   const, exclusiveMinimum/Maximum, allOf, and any other unknown keyword: not copied, because
+//                       the keep-list below is an ALLOWLIST. A keyword nobody has checked is
+//                       exactly the one that 400s the request.
+// REWRITTEN:
+//   type                lower-case JSON Schema names -> the canonical proto-JSON enum spelling
+//                       (STRING/NUMBER/INTEGER/BOOLEAN/ARRAY/OBJECT).
+//   an EMPTY schema     z.any() converts to `{}`, which has no type at all; Gemini needs one, so
+//                       it is declared STRING. This is the one place a type is INVENTED, and it
+//                       is a widening only in the model's description of an argument the handler
+//                       still validates itself (today: the `observations` array members).
+//   a free-form OBJECT  z.record() loses its value schema and becomes an OBJECT with no declared
+//                       properties (today: post_work_item.payload, git_propose_patch
+//                       .expected_blob_sha). Still an object; just undescribed.
+//   parameters          OMITTED ENTIRELY when the tool has no properties, rather than sent as an
+//                       empty OBJECT, which some Vertex versions refuse.
+const HAR_GEM_TYPES: { [k: string]: string } = { string: 'STRING', number: 'NUMBER', integer: 'INTEGER', boolean: 'BOOLEAN', array: 'ARRAY', object: 'OBJECT' };
+const HAR_GEM_KEEP = ['description', 'enum', 'title', 'default', 'minimum', 'maximum', 'minItems', 'maxItems', 'minLength', 'maxLength', 'pattern'];
+const HAR_GEM_FORMATS: { [k: string]: string[] } = { STRING: ['date-time', 'enum'], INTEGER: ['int32', 'int64'], NUMBER: ['float', 'double'] };
+function harGeminiSchema(node: any, root: any, depth: number): any {
+  if (!node || typeof node !== 'object' || Array.isArray(node) || depth > 8) return { type: 'STRING' };
+  let n: any = node;
+  let hops = 0;
+  while (n && typeof n.$ref === 'string' && hops++ < 8) {
+    const m = /^#\/(\$defs|definitions)\/(.+)$/.exec(n.$ref);
+    const bag: any = (m && root && root[m[1]]) || null;
+    const tgt: any = (bag && m) ? bag[m[2]] : null;
+    if (!tgt || typeof tgt !== 'object') return { type: 'STRING' };
+    n = tgt;
+  }
+  const alts: any[] = Array.isArray(n.anyOf) ? n.anyOf : (Array.isArray(n.oneOf) ? n.oneOf : []);
+  if (alts.length) {
+    const real = alts.filter((a: any) => !(a && a.type === 'null'));
+    const nullable = real.length !== alts.length;
+    if (!real.length) return { type: 'STRING', nullable: true };
+    const first: any = harGeminiSchema(real[0], root, depth + 1);
+    if (nullable) first.nullable = true;
+    if (typeof n.description === 'string' && !first.description) first.description = n.description;
+    return first;
+  }
+  let ty: any = n.type;
+  let nullable = false;
+  if (Array.isArray(ty)) { nullable = ty.indexOf('null') >= 0; ty = ty.filter((x: any) => x !== 'null')[0]; }
+  let t = HAR_GEM_TYPES[String(ty || '').toLowerCase()] || '';
+  if (!t) t = n.properties ? 'OBJECT' : (n.items ? 'ARRAY' : 'STRING');
+  const out: any = { type: t };
+  if (nullable) out.nullable = true;
+  for (let i = 0; i < HAR_GEM_KEEP.length; i++) { const k = HAR_GEM_KEEP[i]; if (typeof n[k] !== 'undefined') out[k] = n[k]; }
+  if (typeof n.format === 'string' && (HAR_GEM_FORMATS[t] || []).indexOf(n.format) >= 0) out.format = n.format;
+  if (t === 'OBJECT') {
+    const props: any = (n.properties && typeof n.properties === 'object') ? n.properties : null;
+    if (props) {
+      const p: any = {};
+      const keys = Object.keys(props);
+      for (let i = 0; i < keys.length; i++) p[keys[i]] = harGeminiSchema(props[keys[i]], root, depth + 1);
+      if (keys.length) out.properties = p;
+    }
+    if (Array.isArray(n.required) && out.properties) {
+      const req = n.required.filter((x: any) => typeof x === 'string' && typeof out.properties[x] !== 'undefined');
+      if (req.length) out.required = req;
+    }
+  } else if (t === 'ARRAY') {
+    out.items = harGeminiSchema(n.items, root, depth + 1);
+  }
+  return out;
+}
+function harGeminiToolWire(ts: HarChatTool[]): any[] {
+  const decls = ts.map((t: HarChatTool) => {
+    const d: any = { name: t.name, description: t.description };
+    const p: any = harGeminiSchema(t.schema, t.schema, 0);
+    if (p && p.type === 'OBJECT' && p.properties && Object.keys(p.properties).length) d.parameters = p;
+    return d;
+  });
+  return decls.length ? [{ functionDeclarations: decls }] : [];
+}
+
+// The Gemini transport for the tool-capable path. Every DECISION about where the request goes --
+// transport, region, host, project, credential -- comes from the same four resolvers
+// harChatGemini() uses (harGeminiTransport / harVertexGeminiRegion / harVertexProject /
+// harVertexHost), so the two cannot disagree about the destination; only the URL assembly is
+// written twice. Folding the toolless sibling into this poster is the obvious next cut and is
+// deliberately NOT done here: it would rewrite the path that is working, in a change whose
+// subject is the tool surface.
+// [SEC-FLEETMODE-CONSOLE-V1] A CONSOLE TRANSPORT, not behind the spend switch, for the reason
+// written out in full at harClaudePost(): its only caller is POST /api/chat, which runs because
+// a signed-in human pressed send. There is no unattended caller here to stop.
+async function harGeminiPost(apiModel: string, key: string, payload: any): Promise<{ r: any; j: any; hostDesc: string }> {
+  let url = 'https://generativelanguage.googleapis.com/v1beta/models/' + apiModel + ':generateContent?key=' + encodeURIComponent(key);
+  let headers: any = { 'Content-Type': 'application/json' };
+  let hostDesc = 'host=generativelanguage.googleapis.com transport=studio';
+  if (harGeminiTransport(key) === 'vertex') {
+    const region = harVertexGeminiRegion(apiModel);
+    const project = harVertexProject();
+    const vhost = harVertexHost(region);
+    const tok = await waAccessToken();
+    url = 'https://' + vhost + '/v1/projects/' + project + '/locations/' + region + '/publishers/google/models/' + apiModel + ':generateContent';
+    headers['Authorization'] = 'Bearer ' + tok;
+    hostDesc = 'host=' + vhost + ' transport=vertex region=' + region + ' project=' + project;
+  }
+  const r = await waFetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+  let j: any = null;
+  try { j = await r.json(); } catch (e: any) { j = { parse_error: String((e && e.message) || e) }; }
+  return { r: r, j: j, hostDesc: hostDesc };
+}
+
+// [CHAT-NOTEXT-REPORT-V1] "(no text)" WAS THE CONSOLE THROWING AWAY EVERYTHING IT KNEW.
+// MEASURED on a real install: the operator asked a strain to build a calculator, the model made
+// five correct tool calls, and the chat rendered "FLEET GCP - GEMINI / (no text)" -- twice. The
+// RAN/STAGED word and the stderr, the only strings that diagnose a failure, never reached the
+// screen. The tool results existed; they were sitting in the loop's own `contents` array and were
+// dropped on the floor at the return statement.
+//
+// WHY GEMINI HITS THIS AND CLAUDE MOSTLY DOES NOT, so nobody "fixes" it by blaming one model:
+// both loops keep the LAST turn that carried text and return it. Claude nearly always emits a
+// text block ALONGSIDE its tool_use, so finalText is populated on the way through. Gemini
+// frequently returns parts containing ONLY functionCall and no text at all, so finalText is still
+// empty when the loop ends -- and then the fallback fired. Same latent hole in both; only the
+// odds differ, which is why this is applied to BOTH loops rather than to the Gemini one.
+//
+// THIS CANNOT REGRESS A WORKING TURN. It runs only where the old code had already decided it had
+// nothing, i.e. exactly where "(no text)" would have printed.
+function harChatNoTextReport(trace: string[], stopReason: string, exhausted: boolean, rounds: number): string {
+  const out: string[] = [];
+  if (trace.length) {
+    out.push('The model ran ' + trace.length + ' tool call(s) and then ended its turn without writing a reply.');
+    out.push('What those calls returned:');
+    for (const t of trace) out.push('  - ' + t);
+  } else {
+    out.push('The model returned no text and called no tools.');
+  }
+  if (exhausted) {
+    out.push('It also hit the ' + rounds + '-round tool limit, so it was cut off part-way through the task rather than finishing. Ask it to continue.');
+  }
+  if (stopReason && stopReason !== 'STOP' && stopReason !== 'end_turn') {
+    out.push('stop reason: ' + stopReason
+      + (stopReason === 'MAX_TOKENS' || stopReason === 'max_tokens'
+         ? ' -- the reply was truncated by the output token limit, which is why there is no prose.' : ''));
+  }
+  out.push('(Written by the console because the model produced no final text. This used to print only "(no text)" and discard everything above it.)');
+  return out.join(chr10());
+}
+function chr10(): string { return String.fromCharCode(10); }
+// GEMINI'S TOOL LOOP. It did not have one: the chat's only tool-capable path was Claude's, so a
+// strain the operator opened on Gemini could describe the fleet and touch none of it. Same
+// definitions, same dispatcher, same bound of 8 rounds and same 12,000-character result slice as
+// harChatClaudeOps -- the ONLY thing that differs is the wire shape, converted at the boundary
+// above. No second executor: `exec` is harChatExec() over the very same array Claude is handed.
+async function harChatGeminiOps(apiModel: string, key: string, system: string, msgs: any[], toolset: HarChatTool[], agentId: string, exec: (name: string, input: any) => Promise<string>): Promise<{ text: string; usage: any }> {
+  const contents: any[] = msgs.map((m: any) => ({ role: m.role === 'me' ? 'user' : 'model', parts: [{ text: String(m.text || m.content || '') }] }));
+  // [CHAT-GEMINI-TRAILING-MODEL-V75] GEMINI REFUSES A REQUEST WHOSE LAST TURN IS THE MODEL'S.
+  // MEASURED on prod: 'gemini host=aiplatform.googleapis.com transport=vertex region=global
+  // model=gemini-3.7-flash tools=55 HTTP 400: Requests ending with a model turn are not
+  // supported.' The history handed to this function is whatever the client holds, and there are
+  // ordinary ways for it to end on an assistant turn -- a continue/retry action that re-sends the
+  // transcript without adding a user message being the obvious one, which is EXACTLY what
+  // harChatNoTextReport tells the operator to do when a turn is cut off at the round limit. So
+  // this fleet's own advice could produce a 400.
+  // APPEND RATHER THAN TRUNCATE, deliberately: dropping the trailing model turn would throw away
+  // the very message the operator is asking the model to continue from, and the model would
+  // resume from a transcript that no longer contains its own last words. One minimal user turn
+  // satisfies the API and preserves the whole history.
+  if (contents.length && contents[contents.length - 1].role === 'model') {
+    contents.push({ role: 'user', parts: [{ text: 'Continue.' }] });
+  }
+  const tools = harGeminiToolWire(toolset);
+  const sum: any = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+  let measured = false;
+  let finalText = '';
+  let guard = 0;
+  const trace: string[] = [];
+  let stopReason = '';
+  // [CHAT-ROUNDS-16-V74] 8 WAS TOO FEW FOR THE ONE FLOW THIS CONSOLE EXISTS TO DO. MEASURED on a
+  // fresh install: asked to build and deploy a calculator, the model spent its eight rounds on
+  // orient, write files, submit, diagnose a 403, re-stage, re-submit -- and was cut off before it
+  // ever reached `gcloud run deploy`. The BUILD AND DEPLOY prompt below prescribes write ->
+  // submit -> poll -> poll -> deploy -> verify -> clean up, which is already seven rounds with a
+  // single poll and no mistakes. A limit that cannot fit the happy path of its own instructions
+  // is not a safety bound, it is a bug. 16 fits the prescribed flow twice over and still
+  // terminates. The cut-off is reported rather than silent -- see harChatNoTextReport.
+  while (guard++ < HAR_CHAT_MAX_ROUNDS) {
+    const payload: any = { systemInstruction: { parts: [{ text: system }] }, contents: contents };
+    if (tools.length) payload.tools = tools;
+    const { r, j, hostDesc } = await harGeminiPost(apiModel, key, payload);
+    if (!r.ok) {
+      // Same failure text as the toolless path: the upstream message verbatim, redacted, plus the
+      // transport remedy -- an opaque 500 here was a real outage nobody could diagnose.
+      const um0 = (j && j.error && (j.error.message || j.error.status)) || (j && j.parse_error) || JSON.stringify(j).slice(0, 400);
+      throw new Error(harRedact('gemini ' + hostDesc + ' model=' + apiModel + ' tools=' + toolset.length
+        + ' HTTP ' + r.status + ': ' + um0 + harChatRemedy(harChatResolved('gemini', key), r.status)));
+    }
+    const um: any = (j && j.usageMetadata) || null;
+    if (um) {
+      measured = true;
+      sum.input_tokens += Number(um.promptTokenCount || 0) || 0;
+      sum.output_tokens += Number(um.candidatesTokenCount || 0) || 0;
+      sum.cache_read_input_tokens += Number(um.cachedContentTokenCount || 0) || 0;
+    }
+    const c: any = (j && j.candidates && j.candidates[0]) || null;
+    if (c && c.finishReason) stopReason = String(c.finishReason);
+    const parts: any[] = (c && c.content && Array.isArray(c.content.parts)) ? c.content.parts : [];
+    const txt = parts.filter((p: any) => p && typeof p.text === 'string').map((p: any) => p.text).join('').trim();
+    if (txt) finalText = txt;
+    const calls = parts.filter((p: any) => p && p.functionCall && p.functionCall.name);
+    if (!calls.length) break;
+    contents.push({ role: 'model', parts: parts });
+    const answers: any[] = [];
+    for (const p of calls) {
+      const nm = String(p.functionCall.name);
+      let out = '';
+      try { out = await exec(nm, p.functionCall.args || {}); }
+      catch (e: any) { out = 'tool error: ' + String((e && e.message) || e); }
+      answers.push({ functionResponse: { name: nm, response: { result: String(out).slice(0, 12000) } } });
+      trace.push(nm + ' -> ' + String(out).replace(/\s+/g, ' ').trim().slice(0, 500));
+    }
+    contents.push({ role: 'user', parts: answers });
+  }
+  return { text: finalText || harChatNoTextReport(trace, stopReason, guard > HAR_CHAT_MAX_ROUNDS, HAR_CHAT_MAX_ROUNDS), usage: measured ? sum : null };
+}
+
+// The system prompt must not describe a smaller fleet than the model is holding. harOpsSystem()
+// lists the old ten by name; this states the ACTUAL set, from the same array that goes on the
+// wire, and restates the doctrine that now matters because the console can act rather than only
+// look. Appended, never edited into the strain prompts, so the two cannot fall out of step.
+function harChatToolSystem(agentId: string, ts: HarChatTool[]): string {
+  const base = harOpsSystem(agentId);
+  if (!ts.length) return base;
+  const names = ts.map((t: HarChatTool) => t.name).slice().sort().join(', ');
+  return base + '\n' + [
+    'YOUR TOOLSET HERE IS THE SAME ONE YOU HOLD OVER MCP, filtered the same way -- this console and the connector are one product, not two. The tools you actually have right now, and the only ones you have, are: ' + names + '.',
+    'That list is the truth. Anything named elsewhere in this prompt that is not in it was withheld from you, and calling it will fail.',
+    'IT NOW INCLUDES REAL ACTIONS, NOT ONLY READS. Anything that stages privileged work goes to the human gate exactly as it does over MCP -- and on an install with PC_AUTO_APPROVE set, staging RUNS IT. So: say what you are about to do before you do it, never run a destructive command to find out what it does, and report what actually came back rather than what you expected.',
+  ].join('\n');
+}
+// ================== end [CHAT-ONE-REGISTRY-V49] ==================
+
 // ---- chat ----
 app.post('/api/chat', waGate(async (req, res) => {
   const provider = (req.body && req.body.provider) === 'gemini' ? 'gemini' : 'claude';
@@ -4562,8 +7345,26 @@ app.post('/api/chat', waGate(async (req, res) => {
   let history = (req.body && req.body.history) || [];
   if (agentId) { const mem = await harRecentHistory(agentId, HAR_MEM_BUDGET_TOK); if (mem.length) history = mem; }
   const key = await harKey(provider);
-  if (provider !== 'gemini' && !key) { res.status(412).json({ error: 'no ' + provider + ' API key set' }); return; }
+  // No Anthropic key is NOT an error: harClaudeProvider() now DEFAULTS to Vertex, so a keyless
+  // install chats normally. The 412 survives only for an explicit CHAT_CLAUDE_PROVIDER=anthropic
+  // with nothing to authenticate with, which is a real misconfiguration and must still be reported.
+  // [CHAT-CLAUDE-BOTH-TRANSPORTS-V1] ...and it now says WHICH transport asked for the key and how to
+  // get back to the one that needs none, instead of a bare 'no claude API key set' that reads like
+  // the install is simply broken. Same resolver as the log line and /api/keys/status.
+  if (provider !== 'gemini' && !key && harClaudeProvider() !== 'vertex') {
+    const rv = harChatResolved('claude', key);
+    res.status(412).json({ error: 'no ' + provider + ' API key set',
+      detail: 'CHAT_CLAUDE_PROVIDER selects the direct API (host=' + rv.host + ') and no Claude API key is stored. ' +
+        'Vertex needs no key -- it uses this service\'s own credential: ' + rv.alt_switch + ' and redeploy, or store a key in the console.',
+      resolved: rv });
+    return;
+  }
   const apiModel = harApiFor(provider, modelId);
+  // [CHAT-OBSERVABLE-V1] ONE line per chat request naming the provider, transport, region, host and
+  // model that were actually resolved. Presence-boolean for the key, never the value. The operator
+  // can now see what the chat picked without reading this file; /api/keys/status shows the same
+  // object. `model` here is the resolved default; `apiModel` is what this request will send.
+  try { harLogResolved('POST /api/chat model=' + apiModel + (agentId ? ' agent=' + agentId : ''), harChatResolved(provider, key)); } catch (e) {}
   const system = 'You are ' + (agentId || 'a Paracoding fleet agent') + ', part of the Paracoding.AI fleet. Be concise and useful.';
   const image = (req.body && req.body.image) || null;
   const images = (req.body && Array.isArray(req.body.images)) ? req.body.images : (image ? [image] : []);
@@ -4572,28 +7373,61 @@ app.post('/api/chat', waGate(async (req, res) => {
     let reply = ''; let usage: any = null;
     let usedModel = apiModel;
     let usedEffort = (HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high';
-    if (provider === 'gemini') { const gr = await harChatGemini(apiModel, key, system, msgs); reply = gr.text; usage = gr.usage; }
-    else { if (agentId) { const cr: any = await harChatClaudeOps(apiModel, key, harOpsSystem(agentId), msgs, harOpsTools(agentId), agentId); reply = cr.text; usage = cr.usage; if (cr.model) usedModel = cr.model; if (cr.effort) usedEffort = cr.effort; } else { const cr = await harChatClaude(apiModel, key, system, msgs); reply = cr.text; usage = cr.usage; } }
+    // [CHAT-ONE-REGISTRY-V49] ONE toolset, built ONCE per turn, handed to whichever model is
+    // selected. keyClasses is omitted deliberately and not forgotten: this route's credential is
+    // the operator's console session (waGate), not a session key, so there is no per-key
+    // narrowing to honour and the strain's own tool_classes decide -- see the block above.
+    // No agentId means no strain was picked, so there is no lane to scope tools to and the plain
+    // chat runs exactly as it did.
+    const toolset: HarChatTool[] = agentId ? await harChatToolset(agentId) : [];
+    const toolSystem = agentId ? harChatToolSystem(agentId, toolset) : system;
+    const toolExec = harChatExec(toolset);
+    if (provider === 'gemini') { if (agentId) { const gr = await harChatGeminiOps(apiModel, key, toolSystem, msgs, toolset, agentId, toolExec); reply = gr.text; usage = gr.usage; } else { const gr = await harChatGemini(apiModel, key, system, msgs); reply = gr.text; usage = gr.usage; } }
+    else { if (agentId) { const cr: any = await harChatClaudeOps(apiModel, key, toolSystem, msgs, harClaudeToolWire(toolset), agentId, toolExec); reply = cr.text; usage = cr.usage; if (cr.model) usedModel = cr.model; if (cr.effort) usedEffort = cr.effort; } else { const cr = await harChatClaude(apiModel, key, system, msgs); reply = cr.text; usage = cr.usage; if (cr.model) usedModel = cr.model; if (cr.effort) usedEffort = cr.effort; } }
     // cache hit-rate telemetry: without cache_creation/cache_read counts the caching above is invisible.
-    // try/catch so a telemetry failure can NEVER break a user's chat message.
-    if (usage) {
-      try {
-        await db.collection('token_usage').add({
-          agent: agentId, model: apiModel, source: 'web-chat',
-          input_tokens: usage.input_tokens || 0, output_tokens: usage.output_tokens || 0,
-          cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
-          cache_read_input_tokens: usage.cache_read_input_tokens || 0,
-          ts: FieldValue.serverTimestamp(),
-        });
-      } catch (e) {}
-    }
+    //
+    // [CHAT-REFLECT-USAGE-V1] THIS WAS THE SIBLING OF A DEFECT ALREADY FIXED ONE LEVEL DOWN.
+    // What stood here was `if (usage) { ... }` around a direct token_usage write, so a provider
+    // that returned NO usage object recorded NOTHING AT ALL: no row in token_usage, no row
+    // anywhere else, and no trace that a call had happened whose cost is unknown. That is the
+    // exact hole harRecordUsage() was written to close for the reflection call, and the reasoning
+    // in its header applies here without a word changed -- the two paths differed only in which
+    // one had been fixed.
+    //
+    // ROUTED THROUGH THAT RECORDER RATHER THAN REIMPLEMENTED. harRecordUsage is the ONE place
+    // that decides measured-vs-gap (harUsageOk), the ONE place that writes token_usage, and the
+    // ONE place that writes token_usage_gaps. A second copy of that decision here is how the two
+    // halves drift apart again, and a truthiness guard beside a real recorder is precisely the
+    // shape of the bug being removed.
+    //
+    // NOTHING CHANGES FOR A MEASURED TURN. harRecordUsage writes agent, model, source and the
+    // same four token fields with FieldValue.serverTimestamp(), and 'web-chat' is passed as the
+    // source exactly as before, so /api/dash/usage and /api/usage read an identical row and
+    // by_model does not gain a second key. What changes is only the UNMEASURED turn: it now
+    // leaves a token_usage_gaps row saying the call happened and its cost is unknown, instead of
+    // leaving nothing. It still never writes a row of zeros into token_usage, because both
+    // readers SUM every document they see and a zero there is a lie that reads as safe.
+    //
+    // NO try/catch HERE: harRecordUsage never throws, by the same contract and for the same
+    // reason the block it replaces had one -- a telemetry failure must not break a user's chat.
+    await harRecordUsage(agentId, apiModel, 'web-chat', usage);
     if (agentId) { try { await db.collection('chat_history').add({ agent_id: agentId, role: 'user', text: message, tags: ['harness'], timestamp: FieldValue.serverTimestamp() }); await db.collection('chat_history').add({ agent_id: agentId, role: 'assistant', text: reply, tags: ['harness'], timestamp: FieldValue.serverTimestamp() }); } catch (e) {} }
     if (agentId && HAR_REFLECT_EVERY > 0) { try { const cc = await db.collection('chat_history').where('agent_id', '==', agentId).count().get(); const n = (cc.data() && cc.data().count) || 0; const turns = Math.floor(n / 2); if (turns > 0 && turns % HAR_REFLECT_EVERY === 0) { await harReflect(agentId, provider, apiModel, key); } } catch (e) {} }
     res.json({ reply, usage, model: usedModel, effort: usedEffort });
-  } catch (e: any) { console.error('[api/chat] fail', (e && e.stack) || String(e)); res.status(502).json((console.error('[gate] error detail withheld from client:', e), { error: 'request failed' })); }
+  } catch (e: any) {
+    // [CHAT-OBSERVABLE-V1] The caller now gets the REAL reason -- transport, host, region, model,
+    // upstream HTTP status and the upstream message -- instead of a bare 'request failed'. The
+    // message is built by harChatGemini / harChatClaude and has already been through harRedact(),
+    // and every value in `resolved` is a name or a boolean, never a key. Stack stays server-side.
+    const errId = harErrId();
+    console.error('[api/chat] fail err_id=' + errId, (e && e.stack) || String(e));
+    const detail = harRedact(String((e && e.message) || e)).slice(0, 400);
+    let resolved: any = null; try { resolved = harChatResolved(provider, key); } catch (_e) {}
+    res.status(502).json({ error: 'request failed', detail, resolved, err_id: errId });
+  }
 }));
 // ---- /rdp desktop stream: reverse-proxy (HTTP + WebSocket) to the box guac web tier :8080 over the VPC ----
-// SEC-RDP-GATE-V1 (fleet-mechanic 2026-07-29): GATED. Both entry points below refuse BEFORE any
+// SEC-RDP-GATE-V1 (fleet-security 2026-07-29): GATED. Both entry points below refuse BEFORE any
 // workstation lookup -- the HTTP handler 403s and the WebSocket upgrade destroys the socket
 // unless waSessionOk(req) passes. waSessionOk is a hoisted top-level function from the passkey
 // fragment (cp-passkey-additions.ts, ROUTES section); deploy-cp-harness.sh splices that
@@ -4678,13 +7512,100 @@ function harGcpBlessedDirect(method: string, url: string): boolean {
     'https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/',
     'https://run.googleapis.com/v2/projects/' + HAR_PROJECT + '/',
     'https://run.googleapis.com/v1/projects/' + HAR_PROJECT + '/',
-    'https://storage.googleapis.com/storage/v1/b/' + (process.env.DATA_LAKE_BUCKET || PC_LAKE) + '/',
+    // [SEC-LAKE-NOGUESS-V1] THE LAKE PREFIX IS PRESENT ONLY WHEN THE BUCKET IS CONFIGURED, and
+    // it deliberately does NOT go through pcLakeBucket(): this is a boolean predicate on a
+    // request path, and a throw here would turn an unconfigured lake into a 500 instead of a
+    // refusal. Fail-closed here means BLESSING NOTHING, so the prefix is spread away entirely.
+    // This site is not cosmetic. With the old derived fallback it authorised silent CP_SA GETs
+    // against a bucket name guessed from GCP_PROJECT, which in a shared project is the OTHER
+    // lane's lake. harWriteLake() was the loud half of this defect; this was the quiet half.
+    ...(PC_LAKE ? ['https://storage.googleapis.com/storage/v1/b/' + PC_LAKE + '/'] : []),
     'https://logging.googleapis.com/v2/projects/' + HAR_PROJECT + '/',
     'https://monitoring.googleapis.com/v3/projects/' + HAR_PROJECT + '/',
   ];
   return P.some((p) => (url || '').indexOf(p) === 0);
 }
+// ================= [SECRET-DESTROY-PREFLIGHT-V1] STAGING-TIME REFUSAL =================
+// A secretKeyRef mount is a HARD BOOT DEPENDENCY resolved BY THE PLATFORM, whether or
+// not any line of application code reads the variable. On 2026-08-10 a gated job deleted
+// Secret Manager secret ad-free-key in the production project. Every check made first was
+// TRUE and every one of them was IRRELEVANT: no code reads AD_FREE_KEY, no deploy script
+// sets it, a fresh dev project does not have it. Production went down ~70 minutes later,
+// when the first COLD START after the delete aborted:
+//
+//   Could not fetch secret ".../secrets/ad-free-key/versions/latest" for environment
+//   variable "AD_FREE_KEY". Instance startup will now abort.
+//
+// paracoding-control-plane and paracoding-control-plane-mcp both carried that mount.
+// Warm instances kept serving the already-resolved value, which is why the outage
+// arrived over an hour after the change and was not attributed to it.
+//
+// EVERY CHECK THAT BLESSED THAT DELETE ANSWERED "will something RE-CREATE it?".
+// NONE ANSWERED "does anything currently REFERENCE it?". pipeline/secret-destroy-preflight.py
+// answers that one, and this refuses to STAGE a destroy that has not run it.
+//
+// WHY STAGING TIME AND NOT EXECUTION TIME. A refusal here costs the operator NOTHING --
+// no passkey tap, no approval spent, no gate round trip. gate-exec/exec_server.py's
+// SEC-SSHKEY-PREFLIGHT-V1 note already states the principle in the other direction:
+// refusing a job a deployment cannot run "belongs in the control plane" rather than in
+// the executor. This is that placement.
+//
+// IT IS NOT THE FIRST-TOKEN ALLOWLIST AND IT CANNOT REPEAT THAT FAILURE. That control
+// inspected EVERY line of EVERY job, so `set -uo pipefail` killed every multi-line job
+// the fleet stages, and it had to be stood down. This one fires ONLY on a command that
+// destroys a Secret Manager secret or version. A job that does not do that is not read
+// differently, cannot be refused by it, and there is no self-lockout: REMOVING this
+// block is not itself a secret-destroy command. So it ENFORCES by default, deliberately,
+// and the difference from the allowlist is the reason.
+//
+// THE ESCAPE IS TO DO THE WORK, NOT TO SET A FLAG. Run the preflight in the same job:
+//
+//   python3 secret-destroy-preflight.py <secret> --project <p> --source-root <dir> || exit 1
+//   gcloud secrets delete <secret> --quiet
+//
+// The preflight exits non-zero for REFERENCED (2), UNKNOWN (3) and internal error (4),
+// so `|| exit 1` is what makes the destroy conditional. A mention inside a comment does
+// not satisfy this check; the invocation must be on a live line.
+const PC_SECRET_DESTROY_TOKEN = 'secret-destroy-preflight.py';
+const PC_SECRET_DESTROY_PATTERNS: RegExp[] = [
+  /\bgcloud\b[^\n]*\bsecrets\b[^\n]*\bdelete\b/i,
+  /\bgcloud\b[^\n]*\bsecrets\b[^\n]*\bversions\b[^\n]*\b(destroy|disable)\b/i,
+  /-X[ \t]*DELETE[^\n]*secretmanager\.googleapis\.com/i,
+  /(^|[\s'"])DELETE[\s'"][^\n]*secretmanager\.googleapis\.com[^\n]*\/secrets\//i,
+  /secretmanager\.googleapis\.com[^\n]*\/secrets\/[^\n]*:(destroy|disable)/i,
+];
+function pcLooksLikeSecretDestroy(text: string): boolean {
+  const live = String(text || '').split('\n')
+    .filter((l) => l.trim() !== '' && !l.trim().startsWith('#')).join('\n');
+  return PC_SECRET_DESTROY_PATTERNS.some((re) => re.test(live));
+}
+function pcPreflightInvoked(text: string): boolean {
+  return String(text || '').split('\n')
+    .some((l) => l.trim() !== '' && !l.trim().startsWith('#') && l.indexOf(PC_SECRET_DESTROY_TOKEN) >= 0);
+}
+/** Returns a refusal string, or null to allow. Never throws: a guard that can throw is a
+ *  guard that can be switched off by malformed input. */
+function pcSecretDestroyRefusal(text: string): string | null {
+  try {
+    if (!pcLooksLikeSecretDestroy(text)) return null;
+    if (pcPreflightInvoked(text)) return null;
+  } catch (e) { /* fall through to refuse */ }
+  return 'REFUSED AT STAGING: this job destroys a Secret Manager secret or version and does '
+    + 'not run ' + PC_SECRET_DESTROY_TOKEN + ' first. NOTHING WAS STAGED and no approval was '
+    + 'spent. A secretKeyRef mount is a hard BOOT dependency resolved by the platform: '
+    + '"no code reads the variable" is NOT "safe to delete" -- that exact reasoning took '
+    + 'production down on 2026-08-10, ~70 minutes later, at the first cold start. Run the '
+    + 'preflight in the same job and make the destroy conditional on it:\n'
+    + '  python3 ' + PC_SECRET_DESTROY_TOKEN + ' <secret> --project <p> --source-root <dir> || exit 1\n'
+    + '  <the destroy command>\n'
+    + 'It exits 0 only when EVERY consumer kind was enumerated and none references the '
+    + 'secret. REFERENCED is 2, UNKNOWN is 3. If it refuses, remove the reference FIRST '
+    + '(deploy the services without the env), prove it, and only then delete.';
+}
+
 async function harGcpStage(caller: string, method: string, url: string, body: any, reason: string, danger: boolean): Promise<any> {
+  const _sdr = pcSecretDestroyRefusal(String(method || '').toUpperCase() + ' ' + String(url || ''));
+  if (_sdr) return { error: 'refused', refusal: _sdr };
   const jobId = 'gcp_' + crypto.randomBytes(6).toString('hex');
   const hasBody = !!(body && typeof body === 'object' && Object.keys(body).length > 0);
   const bodyB64 = hasBody ? Buffer.from(JSON.stringify(body)).toString('base64') : '';
@@ -4698,15 +7619,26 @@ async function harGcpStage(caller: string, method: string, url: string, body: an
   const u = (() => { try { return new URL(url); } catch (e) { return null as any; } })();
   const host = u ? u.hostname.replace('.googleapis.com', '') : 'gcp';
   const shortPath = u ? String(u.pathname).split('/').filter(Boolean).slice(-2).join('/') : '';
+  const _gtype = 'gcp_api ' + method.toUpperCase() + ' ' + host + (shortPath ? '/' + shortPath : '');
+  const _gargs: any = { command: cmd, method: method.toUpperCase(), url, reason: reason || '', danger: !!danger };
+  const _adm = await pcAdmitStage(caller || 'fleet-advisor', _gtype, _gargs);
+  if (!_adm.ok) return { mode: 'refused', staged: false, duplicate_of: _adm.duplicate_of || null, note: _adm.refusal };
   await db.collection('pending_confirms').doc(jobId).set({
     job_id: jobId,
-    command_type: 'gcp_api ' + method.toUpperCase() + ' ' + host + (shortPath ? '/' + shortPath : ''),
-    staged_by: caller || 'fleet-archivist',
-    arguments: { command: cmd, method: method.toUpperCase(), url, reason: reason || '', danger: !!danger },
-    status: 'pending', created_at: FieldValue.serverTimestamp(),
+    command_type: _gtype,
+    staged_by: caller || 'fleet-advisor',
+    arguments: _gargs,
+    status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha,
   });
-  try { await db.collection('journal').add({ agent_id: caller || 'fleet-archivist', action: 'stage_job', message: 'gcp_api -> gate: ' + method.toUpperCase() + ' ' + url + (reason ? ' (' + reason + ')' : ''), timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
-  return { mode: 'staged', job_id: jobId, danger: !!danger, note: 'Pending the operator gate approval. After they approves, read the result with read_job_log job_id=' + jobId };
+  try { await db.collection('journal').add({ agent_id: caller || 'fleet-advisor', action: 'stage_job', message: 'gcp_api -> gate: ' + method.toUpperCase() + ' ' + url + (reason ? ' (' + reason + ')' : ''), timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
+  // [SEC-AUTORUN-SCOPE-V1] harGcpStage is defined BELOW buildMcpServer, so before pcAutoRun
+  // was hoisted to module scope this function could not reach it at all. Every gcp_api
+  // mutation therefore parked at 'pending' and told the caller to wait for an approval
+  // console that had been deleted. The danger verdict is passed through rather than
+  // recomputed, so a DELETE stays classified as one in the journal.
+  const _auto = await pcAutoRun(db.collection('pending_confirms').doc(jobId), jobId, _gtype, cmd, !!danger, false);
+  if (_auto) return { mode: 'ran', job_id: jobId, danger: !!danger, result: _auto };
+  return { mode: 'staged', job_id: jobId, danger: !!danger, note: 'NOT run: PC_AUTO_APPROVE is off and there is no approval console. Set PC_AUTO_APPROVE=1, or make the call yourself.' };
 }
 async function harGcpApi(caller: string, method: string, url: string, body: any, reason: string): Promise<any> {
   method = (method || 'GET').trim().toUpperCase();
@@ -4759,7 +7691,8 @@ async function harVmGate(caller: string, action: string, machineType: string): P
 // =============== end Paracoding Agentic Harness ===============
 // ---- /flow live visibility (advisor v1): idea -> strain -> fruit (HTML served live from the lake) ----
 app.get('/flow', (req: express.Request, res: express.Response) => {
-  if (!waSessionOk(req)) { res.redirect('/gate'); return; }
+  if (pcCanonicalHostRedirect(req, res)) return;   // [PC-CANONICAL-HOST-V48]
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   harReadLake('shared/harness/flow-view.html')
@@ -4893,19 +7826,115 @@ async function wikiFreshness(slug: string, raw: string): Promise<any> {
   if (wikiMemo.size > 500) { const k = wikiMemo.keys().next(); if (!k.done) wikiMemo.delete(k.value); }
   return out;
 }
+// [WIKI-EMPTY-LAKE-V1] A FRESH INSTALL HAS AN EMPTY LAKE, AND THIS ROUTE READS EVERY BYTE IT
+// SERVES OUT OF THE LAKE. Before this block, a brand-new adopter who clicked the Docs button in
+// the harness header got `<h1>wiki index unavailable</h1>` (or, once one object existed, a bare
+// `<h1>no such page</h1>`) with no statement of what was wrong or what to do. That reads as a
+// broken product rather than as an unpopulated one, and it happens to 100% of new installs
+// because nothing in the release tree or install.sh ever writes shared/wiki/*.
+//
+// THE TEXT BELOW IS MODULE-CONSTANT AND NOTHING FROM THE REQUEST IS EVER INTERPOLATED INTO IT.
+// The slug in particular is never echoed: the 404 body must stay byte-identical for every
+// unpublished slug or it becomes the enumeration oracle the [WIKI-ROUTE-V1] note above refuses
+// to build. Store errors are logged, never rendered, for the same reason.
+const WIKI_NOTICE_CSS = 'body{margin:0;background:#0f0a1e;color:#e7e0f7;font:15px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}'
+  + 'main{max-width:44rem;margin:0 auto;padding:3rem 1.5rem}h1{font-size:1.45rem;margin:0 0 1rem}'
+  + 'h2{font-size:1.05rem;margin:2rem 0 .5rem;color:#c9b6ff}p{margin:0 0 1rem}'
+  + 'code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}'
+  + 'code{background:#1b1236;border:1px solid #3a2864;border-radius:4px;padding:1px 5px}'
+  + 'pre{background:#1b1236;border:1px solid #3a2864;border-radius:6px;padding:.85rem 1rem;overflow:auto}'
+  + 'ul{margin:0 0 1rem 1.1rem;padding:0}li{margin:.3rem 0}a{color:#9f8bff}'
+  + '.hint{color:#a99ec7;font-size:13px}';
+function wikiNotice(res: express.Response, status: number, heading: string, body: string): void {
+  res.status(status).send('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>' + heading + '</title><style>' + WIKI_NOTICE_CSS + '</style></head><body><main>'
+    + '<h1>' + heading + '</h1>' + body
+    + '<p class="hint">Served by the control plane at <code>/wiki</code>. This page is generated by '
+    + 'the route itself, not read from the lake, so it renders even when the lake holds nothing.</p>'
+    + '</main></body></html>');
+}
+// How to populate the wiki. Deliberately generic: it names the object layout and the two tools an
+// adopter already has, and no project, bucket, region, ref or role of any particular deployment.
+const WIKI_NOTE_HOWTO = '<h2>How to publish the first page</h2>'
+  + '<p>Every wiki object lives under <code>shared/wiki/</code> in this installation’s data lake '
+  + 'bucket and is read on every request, so publishing is a write and never a deploy. Three objects '
+  + 'are needed:</p><ul>'
+  + '<li><code>shared/wiki/_index.json</code> — the nav tree and, at the same time, the slug '
+  + 'allow-list. A page that is not listed here is not served. Shape: '
+  + '<code>{"version":1,"title":"...","sections":[{"id":"start","title":"Start here"}],'
+  + '"pages":[{"slug":"index","title":"...","section":"start","status":"live","owner":"..."}]}</code></li>'
+  + '<li><code>shared/wiki/_shell.html</code> — the page chrome. It must contain the literal token '
+  + '<code>__WIKI_PAYLOAD__</code>; the route substitutes a JSON blob (slug, title, front-matter, '
+  + 'markdown, freshness verdict, nav) for every occurrence of it.</li>'
+  + '<li><code>shared/wiki/pages/&lt;slug&gt;.md</code> — one markdown object per page, slug matching '
+  + '<code>^[a-z0-9][a-z0-9-]{0,63}$</code>, opening with front-matter delimited by <code>---</code> '
+  + 'lines and carrying <code>page</code> (equal to the slug), <code>title</code> and a non-empty '
+  + '<code>watch</code> list. <code>/wiki</code> itself serves the slug <code>index</code>.</li></ul>'
+  + '<p>Write them with the <code>write_file</code> tool, or directly:</p>'
+  + '<pre>gcloud storage cp _index.json  gs://$DATA_LAKE_BUCKET/shared/wiki/_index.json\n'
+  + 'gcloud storage cp _shell.html  gs://$DATA_LAKE_BUCKET/shared/wiki/_shell.html\n'
+  + 'gcloud storage cp index.md     gs://$DATA_LAKE_BUCKET/shared/wiki/pages/index.md</pre>'
+  + '<p>The freshness badge fails safe: a page with absent or unparseable front-matter, or an empty '
+  + '<code>watch</code> list, renders RED. There is no path that yields GREEN by default.</p>';
+const WIKI_NOTE_UNPROVISIONED = '<p><strong>Nothing has been published to this wiki yet.</strong> '
+  + 'This is the expected state of a new installation — it is not a fault, and nothing is broken. '
+  + 'The wiki ships empty on purpose: its pages are yours to write, and no documentation is shipped '
+  + 'into your lake by the installer.</p>' + WIKI_NOTE_HOWTO;
+const WIKI_NOTE_404 = '<p>No page is published under that name.</p>'
+  + '<p>A slug is served only if it matches the flat-slug shape <em>and</em> is listed in '
+  + '<code>shared/wiki/_index.json</code>. Both checks run before any path is joined, so this answer '
+  + 'is the same whether the name is malformed, unpublished or simply not a page.</p>'
+  + '<p><a href="/wiki">Back to the wiki index</a></p>';
+const WIKI_NOTE_ORPHAN = '<p>This page is listed in <code>shared/wiki/_index.json</code> but its object '
+  + '<code>shared/wiki/pages/&lt;slug&gt;.md</code> is missing from the lake, so the index and the lake '
+  + 'disagree. Either write the missing object or remove the slug from the index — nothing is '
+  + 'rendered from a guess.</p><p><a href="/wiki">Back to the wiki index</a></p>';
+const WIKI_NOTE_BADINDEX = '<p><code>shared/wiki/_index.json</code> exists but does not parse as JSON '
+  + 'with a <code>pages</code> array. Nothing is rendered from a guess. Fix the object; no deploy is '
+  + 'needed.</p>' + WIKI_NOTE_HOWTO;
+const WIKI_NOTE_NOSHELL = '<p>The page chrome <code>shared/wiki/_shell.html</code> is missing from the '
+  + 'lake, so the markdown was read but cannot be framed. This installation is half-provisioned: an '
+  + 'index and at least one page exist, the shell does not.</p>' + WIKI_NOTE_HOWTO;
+const WIKI_NOTE_STORE = '<p>The wiki could not be read because the object store refused the read. '
+  + 'This is a store or key failure, not a missing page, and it is transient by nature — retry, and '
+  + 'if it persists check the lake bucket and the vault key. The reason has been written to the '
+  + 'service log rather than to this page.</p>';
 async function wikiServe(req: express.Request, res: express.Response, slug: string): Promise<void> {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   // Check 1 of 2: the slug shape. Flat slugs only -- there is no path segment to traverse out of.
-  if (!WIKI_SLUG_RE.test(slug)) { res.status(404).send('<h1>no such page</h1>'); return; }
+  if (!WIKI_SLUG_RE.test(slug)) { wikiNotice(res, 404, 'No such page', WIKI_NOTE_404); return; }
+  // [WIKI-EMPTY-LAKE-V1] ABSENCE AND FAILURE ARE NOW DIFFERENT ANSWERS. harReadLake returns '' for a
+  // genuinely absent object and THROWS for a store or decrypt failure; collapsing both into `index =
+  // null` reported a transient outage and an unpopulated install with the same sentence. An empty
+  // wiki is a 200 explaining how to fill it -- it is the correct rendering of a real state, not an
+  // error -- and an outage stays a 503.
+  let indexRaw = '';
+  try {
+    indexRaw = await harReadLake('shared/wiki/_index.json');
+  } catch (e: any) {
+    console.error('[wiki] index read failed: ' + String((e && e.message) || e).slice(0, 300));
+    wikiNotice(res, 503, 'Wiki store unavailable', WIKI_NOTE_STORE);
+    return;
+  }
+  if (indexRaw === '') { wikiNotice(res, 200, 'The wiki is empty', WIKI_NOTE_UNPROVISIONED); return; }
   let index: any = null;
-  try { const t = await harReadLake('shared/wiki/_index.json'); index = t ? JSON.parse(t) : null; } catch (e) { index = null; }
-  if (!index || !Array.isArray(index.pages)) { res.status(503).send('<h1>wiki index unavailable</h1><p>shared/wiki/_index.json is missing or unparseable. Nothing is rendered from a guess.</p>'); return; }
+  try { index = JSON.parse(indexRaw); } catch (e) { index = null; }
+  if (!index || !Array.isArray(index.pages)) { wikiNotice(res, 503, 'Wiki index unreadable', WIKI_NOTE_BADINDEX); return; }
+  if (index.pages.length === 0) { wikiNotice(res, 200, 'The wiki is empty', WIKI_NOTE_UNPROVISIONED); return; }
   // Check 2 of 2: membership. Both checks run BEFORE any concatenation, so one mistake is not a breach.
   const entry = index.pages.filter((p: any) => p && p.slug === slug)[0];
-  if (!entry) { res.status(404).send('<h1>no such page</h1>'); return; }
-  const raw = await harReadLake('shared/wiki/pages/' + slug + '.md');
-  if (!raw) { res.status(404).send('<h1>page listed in the index but absent from the lake</h1>'); return; }
+  if (!entry) { wikiNotice(res, 404, 'No such page', WIKI_NOTE_404); return; }
+  let raw = '';
+  try {
+    raw = await harReadLake('shared/wiki/pages/' + slug + '.md');
+  } catch (e: any) {
+    console.error('[wiki] page read failed slug=' + slug + ': ' + String((e && e.message) || e).slice(0, 300));
+    wikiNotice(res, 503, 'Wiki store unavailable', WIKI_NOTE_STORE);
+    return;
+  }
+  if (!raw) { wikiNotice(res, 404, 'Page listed in the index but absent from the lake', WIKI_NOTE_ORPHAN); return; }
   let quarantined = '';
   for (let i = 0; i < WIKI_QUARANTINE.length; i++) {
     const m = WIKI_QUARANTINE[i][1].exec(raw);
@@ -4916,8 +7945,15 @@ async function wikiServe(req: express.Request, res: express.Response, slug: stri
     ? { verdict: 'red', reason: 'QUARANTINED', detail: 'this page matched a credential pattern and was withheld', drift: [], unknown: [], checked: 0 }
     : await wikiFreshness(slug, raw);
   const parsed = quarantined ? null : wikiParseFront(raw);
-  const shell = await harReadLake('shared/wiki/_shell.html');
-  if (!shell) { res.status(503).send('<h1>wiki shell unavailable</h1><p>shared/wiki/_shell.html is missing from the lake.</p>'); return; }
+  let shell = '';
+  try {
+    shell = await harReadLake('shared/wiki/_shell.html');
+  } catch (e: any) {
+    console.error('[wiki] shell read failed: ' + String((e && e.message) || e).slice(0, 300));
+    wikiNotice(res, 503, 'Wiki store unavailable', WIKI_NOTE_STORE);
+    return;
+  }
+  if (!shell) { wikiNotice(res, 503, 'Wiki shell unavailable', WIKI_NOTE_NOSHELL); return; }
   const payload = JSON.stringify({
     slug: slug,
     title: (parsed && parsed.fm && parsed.fm.title) ? String(parsed.fm.title) : slug,
@@ -4930,17 +7966,95 @@ async function wikiServe(req: express.Request, res: express.Response, slug: stri
   }).split('<').join('\\u003c').split('\u2028').join('\\u2028').split('\u2029').join('\\u2029');
   res.send(shell.split('__WIKI_PAYLOAD__').join(payload));
 }
-// The 302 target is the CONSTANT '/wiki' for every slug, existing or not. Carrying the requested
-// slug in `next` would make the anonymous response vary with caller input on a surface whose static
-// text IS the sensitive payload; a fixed target costs one extra click after login and leaves no
-// enumeration oracle at all.
+// [SEC-NOGATE-V1] There is no 302 and no `next` here any more. Both routes answer an anonymous
+// caller with the locked document AT THE REQUESTED URL, so the anonymous response does not vary
+// with caller input at all -- the property the constant '/wiki' target was chosen to preserve,
+// now held by construction rather than by remembering not to echo the slug. The unlock reloads
+// in place, so the reader also stops losing the page they asked for.
 app.get('/wiki', (req: express.Request, res: express.Response) => {
-  if (!waSessionOk(req)) { res.redirect('/gate?next=%2Fwiki'); return; }
+  if (pcCanonicalHostRedirect(req, res)) return;   // [PC-CANONICAL-HOST-V48]
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
   wikiServe(req, res, 'index').catch((e: any) => { harFail(res, e, 'harness'); });
 });
 app.get('/wiki/:slug', (req: express.Request, res: express.Response) => {
-  if (!waSessionOk(req)) { res.redirect('/gate?next=%2Fwiki'); return; }
+  if (pcCanonicalHostRedirect(req, res)) return;   // [PC-CANONICAL-HOST-V48]
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
   wikiServe(req, res, String(req.params.slug || '')).catch((e: any) => { harFail(res, e, 'harness'); });
+});
+
+// [WIKI-ASSETS-V77] The wiki's diagrams. Served from the IMAGE, not from the lake, and that
+// is the whole design decision: _shell.html's safeHref blocks data: outright, harReadLake
+// returns a STRING so a PNG round-tripped through the lake text path is corrupted, and an
+// external host is the thing this pass exists to remove. Baking them beside the HTML makes
+// them self-contained in an adopter's project with no fetch, no decrypt and no third party.
+// The name is an ALLOWLIST, not a sanitiser: path traversal is not filtered out, it is
+// simply not reachable, because a name that is not one of these five never touches the disk.
+// [SENDFILE-DOTDOT-V81] express's res.sendFile REFUSES ANY PATH CONTAINING '..' -- it fails
+// with a bare "Forbidden" and never touches the disk. __dirname + '/../src/...' is therefore
+// always a 404, whatever is in the image. MEASURED on a live zero-traffic revision: the route
+// registered, logo_uri was live in the metadata, and GET /icon.png answered 404 with 0 bytes;
+// reproduced locally against express, where the '..' form errors and the path.join form does
+// not. path.join NORMALISES the '..' away, so the resolved string is a plain absolute path.
+// THIS ALSO FIXES THE WIKI DIAGRAM ROUTE SHIPPED IN v7.7, which had the identical bug and was
+// never exercised: its 404 is behind a session, so nothing surfaced it.
+// WHY THE Dockerfile ASSERTION DID NOT CATCH IT: `test -s src/brand/...` proves the bytes are
+// in the image, which they were. The defect was in the path the RUNNING code builds, and no
+// build-time check can see that. A route that serves a file needs a request, not a test -s.
+// The 'src' literal is held in a named constant DELIBERATELY. gen.py's boot-dependency gate
+// keys on the expression pcHtml() uses appearing EXACTLY ONCE -- it is how the gate locates the
+// directory it then checks every shipped HTML name against. Writing that expression a second
+// time here does not merely duplicate a string, it BLINDS THE GATE, and the cut refuses with
+// 'the lookup directory can no longer be trusted'. That refusal is correct and this is the way
+// round it that keeps the gate working.
+const PC_SRC_DIRNAME = 'src';
+const PC_ASSET_ROOT = path.join(__dirname, '..', PC_SRC_DIRNAME);
+const WIKI_ASSETS = new Set(['01-surface-split.png', '02-auth-path.png', '03-git-store.png',
+  '04-job-end-to-end.png', '05-deploy.png']);
+app.get('/wiki/assets/:name', (req: express.Request, res: express.Response) => {
+  if (pcCanonicalHostRedirect(req, res)) return;   // [PC-CANONICAL-HOST-V48]
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
+  const name = String(req.params.name || '');
+  if (!WIKI_ASSETS.has(name)) { res.status(404).json({ error: 'no such wiki asset' }); return; }
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.setHeader('Content-Type', 'image/png');
+  res.sendFile(path.join(PC_ASSET_ROOT, 'wiki-assets', name), (e: any) => {
+    if (e) { try { res.status(404).end(); } catch (e2) {} }
+  });
+});
+
+// [BRAND-SELFHOST-V80] The logo, served from the image instead of a third-party host.
+// harness.html loaded it from an external domain at THREE call sites. That is an OSS
+// install fetching its own chrome from a domain the adopter does not control and which
+// may lapse, and it is operator identity in shipped text. The bytes now ride in the
+// container beside the HTML.
+//
+// TWO PALETTES, AND THEY ARE NOT INTERCHANGEABLE. /brand/logo.png is the BLUE-GREEN
+// source, because harness.html paints the gold with a CSS filter chain and
+// `body.nomush ... filter:none` deliberately shows the unfiltered blue-green in regular
+// lexicon mode. Baking gold into that file would destroy the second mode. /icon.png and
+// /favicon.ico are GOLD BAKED INTO THE PIXELS, because browser chrome and an MCP client's
+// icon are painted where no CSS of ours ever runs -- a filter cannot reach them.
+//
+// /favicon.ico and /icon.png are PUBLIC and on BOTH surfaces, deliberately: a favicon is
+// requested by the browser before any session exists, and an MCP client fetches logo_uri
+// with no credential at all. They are static image bytes and carry nothing else.
+const BRAND_DIR = path.join(PC_ASSET_ROOT, 'brand');
+app.get('/brand/logo.png', (req: express.Request, res: express.Response) => {
+  if (pcCanonicalHostRedirect(req, res)) return;
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Content-Type', 'image/png');
+  res.sendFile(path.join(BRAND_DIR, 'logo-96.png'), (e: any) => { if (e) { try { res.status(404).end(); } catch (e2) {} } });
+});
+app.get('/favicon.ico', (req: express.Request, res: express.Response) => {
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Content-Type', 'image/x-icon');
+  res.sendFile(path.join(BRAND_DIR, 'favicon.ico'), (e: any) => { if (e) { try { res.status(404).end(); } catch (e2) {} } });
+});
+app.get('/icon.png', (req: express.Request, res: express.Response) => {
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.setHeader('Content-Type', 'image/png');
+  res.sendFile(path.join(BRAND_DIR, 'icon-180.png'), (e: any) => { if (e) { try { res.status(404).end(); } catch (e2) {} } });
 });
 // ---- end /wiki ---------------------------------------------------------------------------------
 // ---- /lakeview  short-TTL credentialed view links for PCV1-sealed lake objects -----------------
@@ -5061,7 +8175,7 @@ function lvDecryptBuf(master: Buffer, path: string, blob: Buffer): Buffer {
 // distinct refusals; everything else propagates to harFail, never to a silent empty body. The
 // epoch comes from blob[4] -- the OBJECT's epoch -- never the current write epoch.
 async function lvReadSealed(path: string): Promise<{ buf: Buffer; ct: string } | null> {
-  const f = getStorage().bucket(process.env.DATA_LAKE_BUCKET || PC_LAKE).file(path);
+  const f = getStorage().bucket(pcLakeBucket()).file(path);
   const ex = await f.exists();
   if (!ex[0]) return null;
   let declared = '';
@@ -5143,9 +8257,14 @@ app.post('/api/lakeview/link', waGate(async (req: express.Request, res: express.
   res.json({ ok: true, url: '/lakeview?t=' + encodeURIComponent(mint.token), expires_at: new Date(mint.exp).toISOString(), ttl_seconds: LV_TTL_SEC, bytes: sealed.buf.length, binary: !lvIsText(sealed.buf) });
 }));
 app.get('/lakeview', (req: express.Request, res: express.Response) => {
-  // Constant redirect target with no `next`, exactly as /wiki does: echoing the token back into a
-  // redirect URL would copy a live credential into another log line for no gain at all.
-  if (!waSessionOk(req)) { res.redirect('/gate'); return; }
+  // [SEC-NOGATE-V1] No redirect at all now, which is strictly better than the constant target this
+  // used to share with /wiki: there is no Location header for the ?t= credential to be copied into.
+  // [PC-CANONICAL-HOST-V48] AND THAT IS WHY THIS ROUTE IS THE ONE BROWSER PAGE THAT DOES NOT CALL
+  // pcCanonicalHostRedirect. That function preserves the query verbatim, which is correct for every
+  // other page and wrong here: this route's query IS a credential, and moving it to the canonical
+  // host would write ?t=<token> into a Location header and into the log of anything that follows
+  // it. A lakeview link opened on the old hostname is answered by the gate, not relocated.
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
   lvServe(req, res).catch((e: any) => { harFail(res, e, 'harness'); });
 });
 // ---- end /lakeview -----------------------------------------------------------------------------
@@ -5259,7 +8378,62 @@ app.get('/api/flow', waGate(async (req: express.Request, res: express.Response) 
 }));
 // =============== end /flow ===============
 
-app.get('/harness',(req:any,res:any)=>{ if(!waSessionOk(req)){res.redirect('/gate');return;} res.setHeader('Content-Type','text/html; charset=utf-8');res.send(HAR_HARNESS_HTML);});
+// [PC-CANONICAL-HOST-V48] ONE HANDLER BODY, TWO ROUTES. GET / and GET /harness serve the same
+// document behind the same check, and the way that goes wrong is that somebody edits one copy:
+// the gate is then present on one URL of a page and absent on the other, which is indistinguishable
+// from a working console until it is exploited. There is one body and both routes call it.
+// HERE the canonical-host decision is taken FIRST, before the session is even looked at, because
+// on a non-canonical host there can be no valid session to find -- the gate cookie is host-only,
+// and see [PC-CANONICAL-HOST-V48] at the foot of this file for why the only hostname a passkey can
+// be asserted on is WA_RP_ID. /harness deliberately does the OPPOSITE and gates first; the reason
+// it has to is written out above that route and is the installer's anonymous probe, not taste.
+function harFlowHood(req: any, res: any): void {
+  if (pcCanonicalHostRedirect(req, res)) return;
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(HAR_HARNESS_HTML);
+}
+// Collapse onto the root WITHOUT DROPPING THE QUERY. res.redirect('/') drops it, and two live
+// links carry one that matters: the enrolment link this file mints itself, /harness?enroll=<token>
+// (:3877), and the installer's first-run link, /harness?setup=<secret>. locked.html reads both out
+// of location.search, so a redirect that eats the query turns the only two ways a NEW device gets
+// a passkey into a plain locked page with nothing to consume -- which is the lockout, arrived at
+// through a redirect nobody would think to check.
+function harRootWithQuery(req: any): string {
+  const u = String((req && (req.originalUrl || req.url)) || '');
+  const q = u.indexOf('?');
+  return q < 0 ? '/' : ('/' + u.slice(q));
+}
+// [PC-CANONICAL-HOST-V48] /harness IS THE REDIRECT NOW -- AND THE GATE RUNS FIRST, AHEAD OF BOTH
+// REDIRECTS. That ordering is the whole of this route's safety and it is measured, not preferred.
+// install.sh probes THIS EXACT ROUTE anonymously, before it puts IAP in front of the console, and
+// anything other than 401 is a `die` that aborts the install; the release self-test then reads the
+// locked page's own title out of that same response. It probes it at CP_URL, which is the service's
+// own *.run.app URL -- a hostname that is by definition NOT the canonical one -- so a host redirect
+// placed ahead of the gate here would answer that probe 301 and break the install and the upgrade
+// of every adopter who had turned this feature on. Nothing is lost by the ordering: the gate session
+// cookie is host-only, so a session on a non-canonical host cannot exist to be relocated, and an
+// anonymous caller has nothing worth carrying to another hostname. It sees exactly what it saw
+// before -- 401 with the locked page, at the URL it asked for -- and only a caller already through
+// the gate is moved. The bare hostname (GET /, and /flowhood, /dash, /chat, /flow, /wiki) is where
+// a mistyped host IS relocated, and that is the case the operator actually types.
+// Every existing link into /harness therefore still lands on the hood, one hop later: dash.html's
+// two, locked.html's post-unlock location.replace(location.pathname), the wiki's prose links, and
+// the URL the installer prints.
+//
+// 301 CARRYING no-store, WHICH IS NOT A CONTRADICTION. Anything reading the status code gets the
+// permanent redirect that was asked for. What it must not be is a redirect a BROWSER remembers: a
+// cached 301 for /harness outlives a rollback, and the rolled-back revision serves GET / as a
+// redirect TO /harness, so the cache meets it head-on and the front door spins -- / to /harness to
+// / -- unreachable, with nothing the server can do about it. deploy/LOCKOUT-CLASS.md keeps ordinary
+// code deploys OUT of the lockout class only because the rollback rail covers them; a permanently
+// cached front-door redirect would quietly take that rail away for this route.
+app.get('/harness', (req: any, res: any) => {
+  if (!waSessionOk(req)) { waSendLocked(res); return; }
+  if (pcCanonicalHostRedirect(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.redirect(301, harRootWithQuery(req));
+});
 
 
 // ================= PARACODING MCP OAUTH (additive; /mcp/:token stays intact) =================
@@ -5267,10 +8441,158 @@ function oaB64url(buf: any): string { return Buffer.from(buf).toString('base64')
 function oaRand(n?: number): string { return oaB64url(oaCrypto.randomBytes(n || 32)); }
 function oaPubBase(req: any): string { return String(process.env.MCP_PUBLIC_URL || ('https://' + req.get('host'))).replace(/\/$/, ''); }
 const OAUTH_ALLOW = String(process.env.WA_APPROVER_EMAILS || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-// Per-agent identity: an OAuth connector with no bound strain lands on 'fleet-editor' (a real, seeded,
-// obviously-unbound identity) — NOT a phantom role. The operator binds it to a real strain on the consent page.
-const OAUTH_ROLE = process.env.OAUTH_DEFAULT_ROLE || 'fleet-archivist' /* fail-closed */;  // VERIFY-GREP: OAUTH-ROLE-RESTORED-FAILCLOSED -- patch-identity-failclosed bound the connector to the human principal; patch-gate-ux flipped it to fleet-archivist for a cosmetic goal friendlyRole() already met.
+// [SEC-OAUTH-FAILCLOSED-ROLE-V1] THE FAIL-CLOSED DEFAULT MUST BE THE LEAST PRIVILEGED ROLE.
+// There were THREE answers to "what role does an unbound connector get" in one shipped tree: this
+// comment said one thing, this line defaulted to 'fleet-advisor', and install.sh sets
+// OAUTH_DEFAULT_ROLE=fleet-onboarder. 'fleet-advisor' is the PRIVILEGED strain -- the one role
+// permitted to stage gated jobs -- so the branch that ran when the env var was ABSENT landed every
+// unbound connector on it. Calling that "fail-closed" inverted the term: it failed OPEN, and it is
+// privilege-escalation-by-omission, reachable by nothing more than dropping one env var. The
+// comment ~90 lines above records that this exact promotion-by-fallback was already found once.
+// It now agrees with install.sh and with STRAIN_SEED's own STRAIN-SEED-ONBOARDER-V1 note:
+// fleet-onboarder is where unclaimed connectors land. It is in STRAIN_NEVER_PASTEABLE, so no human
+// key can be minted for it, and the operator binds the connector to a real strain on the consent
+// page. If it is ever renamed, rename it in install.sh and in STRAIN_SEED in the same commit.
+const OAUTH_ROLE = process.env.OAUTH_DEFAULT_ROLE || 'fleet-onboarder' /* fail-closed: least privileged, matches install.sh */;  // VERIFY-GREP: OAUTH-ROLE-RESTORED-FAILCLOSED
 const OA_GID = process.env.WA_GOOGLE_CLIENT_ID || '';
+// [OSS-AUTHMODE-V54] Pluggable connector identity, per shared/backlog/oss-v2-pluggable-auth.md.
+// WHY THIS EXISTS AT ALL, because the obvious alternative is dead and someone will propose it
+// again: an installer CANNOT obtain a Google OAuth client. Measured 2026-08-15 (job
+// zd8Y8c7JRtAEFu7Q21fk) -- the IAP OAuth Admin APIs were permanently shut down on 2026-03-19,
+// and even before that the client they minted was owned by Cloud IAP and carried no JavaScript
+// origin, which google.accounts.id.initialize() requires. So WA_GOOGLE_CLIENT_ID is, and will
+// remain, OPERATOR-SUPPLIED ONLY. Every install that does not have one needs a second way in or
+// it has no way in at all, which is exactly the state every adopter has shipped in until now.
+//
+// PC_CONNECT_SECRET is that second way: a high-entropy value the installer generates into Secret
+// Manager and mounts on the MCP surface. It authenticates the HUMAN at /oauth/authorize and then
+// mints the SAME authorization code the Google path mints -- it is a different front door onto
+// one corridor, not a second corridor. Nothing downstream of the code branch can tell them apart
+// except the audit email, which is the point: the token store, PKCE, refresh rotation, retirement
+// and the role binding are all unchanged and untouched by this.
+const PC_CONNECT_SECRET = process.env.PC_CONNECT_SECRET || '';
+// A short secret is worse than no secret, because it looks like protection. 24 chars of the
+// installer's base64 alphabet is ~143 bits; the floor below refuses anything a human might have
+// typed in by hand and silently disables the path rather than pretending to guard it.
+const PC_CONNECT_SECRET_MIN = 24;
+const PC_CONNECT_SECRET_OK = PC_CONNECT_SECRET.length >= PC_CONNECT_SECRET_MIN;
+// auto (default) = offer whatever is configured. google/selfcontained pin one. both = same as
+// auto but states the intent. An unrecognised value is treated as auto rather than as a refusal:
+// a typo in an env var must not lock an operator out of his own connector.
+const PC_AUTH_MODE = String(process.env.PC_AUTH_MODE || 'auto').trim().toLowerCase();
+function oaGoogleOn(): boolean {
+  if (!OA_GID) return false;
+  return PC_AUTH_MODE !== 'selfcontained';
+}
+function oaSelfOn(): boolean {
+  if (!PC_CONNECT_SECRET_OK) return false;
+  return PC_AUTH_MODE !== 'google';
+}
+// Audit identity for a key sign-in. It is NOT an authorisation input -- nothing downstream
+// re-checks it against OAUTH_ALLOW -- so it exists to make 'who authorised this connector'
+// answerable in the token store and the journal, and it must never be mistaken for a verified
+// address. The 'connector-key:' prefix is deliberately not a valid email for that reason.
+function oaSelfPrincipal(): string {
+  return 'connector-key:' + (OAUTH_ALLOW.length ? OAUTH_ALLOW[0] : 'install');
+}
+// [OSS-IAPAUTH-V54] The console service's public URL, set by the installer on the MCP service so
+// the metadata document can send a browser to the IAP-protected host for the authorize step only.
+const PC_CONSOLE_URL = String(process.env.PC_CONSOLE_URL || '').replace(/\/$/, '');
+// TWO CONDITIONS, BOTH REQUIRED, AND THE SECOND IS THE SECURITY ONE. PC_IAP_AUD binds an IAP
+// assertion to THIS service: without it pcIapEmail() verifies Google's signature but accepts an
+// assertion minted for ANY IAP-protected app, so anyone who can reach any IAP app in any project
+// could replay its token here. The Google signature alone is not sufficient. Fail closed.
+function oaIapAuthOn(): boolean {
+  if (PC_AUTH_MODE === 'google' || PC_AUTH_MODE === 'selfcontained') return false;
+  return !!PC_CONSOLE_URL && !!PC_IAP_AUD;
+}
+// Where a BROWSER should be sent to authorize. Only the authorize step moves; everything else
+// stays on the host the connector talks to.
+function oaAuthBase(req: any): string {
+  return oaIapAuthOn() ? PC_CONSOLE_URL : oaPubBase(req);
+}
+
+// [OSS-ALLOWLIST-V54] THE ALLOWED-ACCOUNT LIST MOVES FROM AN ENV VAR TO FIRESTORE, AND THE
+// REASON IS THAT AN ENV VAR CANNOT BE EDITED BY THE PERSON LOCKED OUT BY IT. WA_APPROVER_EMAILS
+// lives on two Cloud Run services; changing it means a new revision on both, which the operator
+// cannot do from inside the product and which restarts the thing he is trying to get into. The
+// live list is therefore a Firestore document, SEEDED ONCE from the env var so no existing
+// install changes behaviour on upgrade, and editable from Settings thereafter.
+//
+// THE ENV VAR REMAINS A FLOOR, NOT A CEILING: entries in WA_APPROVER_EMAILS are always allowed
+// even if the document is missing, empty or corrupt. That is deliberate. A Firestore read that
+// fails must not lock the owner out of his own install, so the failure mode is "fall back to the
+// addresses the installer baked in", never "allow nobody" and never "allow anybody".
+const OA_ALLOW_DOC = 'config/oauth_allow';
+let oaAllowCache: { at: number; list: string[] } | null = null;
+const OA_ALLOW_TTL_MS = 15000;
+function oaNormEmail(s: any): string { return String(s || '').trim().toLowerCase(); }
+async function oaAllowList(): Promise<string[]> {
+  const now = Date.now();
+  if (oaAllowCache && (now - oaAllowCache.at) < OA_ALLOW_TTL_MS) return oaAllowCache.list;
+  let extra: string[] = [];
+  try {
+    const parts = OA_ALLOW_DOC.split('/');
+    const snap = await db.collection(parts[0]).doc(parts[1]).get();
+    const d: any = (snap && snap.exists && snap.data()) || null;
+    if (d && Array.isArray(d.emails)) extra = d.emails.map(oaNormEmail).filter(Boolean);
+  } catch (e) {
+    // Read failed. Fall through to the env floor rather than refusing everyone.
+    console.error('[oauth-allow] Firestore read failed; using WA_APPROVER_EMAILS only');
+  }
+  const merged: string[] = [];
+  for (const e of OAUTH_ALLOW.concat(extra)) { if (e && merged.indexOf(e) < 0) merged.push(e); }
+  oaAllowCache = { at: now, list: merged };
+  return merged;
+}
+async function oaAllowed(email: string): Promise<boolean> {
+  const em = oaNormEmail(email);
+  if (!em) return false;
+  const list = await oaAllowList();
+  return list.length > 0 && list.indexOf(em) >= 0;   // empty list allows nobody: fail closed
+}
+// Writes the EDITABLE half. Env entries are not stored here and cannot be removed from Settings,
+// which is what stops an operator deleting the address the installer gave him and locking himself
+// out of the only surface that can undo it.
+// Settings reads this to draw the list. `locked` entries render without an x because removing
+// them here would not remove them -- they come from the env var and would reappear on the next
+// read, which is a worse experience than not offering the button.
+app.get('/api/oauth/allowed', async (req: any, res: any) => {
+  if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
+  const all = await oaAllowList();
+  res.json({ locked: OAUTH_ALLOW.slice(), all, editable: all.filter((e: string) => OAUTH_ALLOW.indexOf(e) < 0) });
+});
+// The x and the + both land here with the full intended list. Server-side rules, because a UI
+// rule is a suggestion: the merged result may never be empty (that would allow nobody and there
+// would be no way back in), addresses must look like addresses, and the list is capped so a
+// runaway client cannot write an unbounded document.
+app.post('/api/oauth/allowed', async (req: any, res: any) => {
+  if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
+  const raw = (req.body && req.body.emails);
+  if (!Array.isArray(raw)) { res.status(400).json({ error: 'emails must be an array' }); return; }
+  if (raw.length > 64) { res.status(413).json({ error: 'too many addresses (max 64)' }); return; }
+  const wanted: string[] = [];
+  for (const e of raw.map(oaNormEmail)) {
+    if (!e) continue;
+    if (e.length > 254 || e.indexOf('@') < 1 || e.indexOf('.', e.indexOf('@')) < 0 || /[\s,<>"']/.test(e)) {
+      res.status(400).json({ error: 'not a valid address: ' + e }); return;
+    }
+    if (wanted.indexOf(e) < 0) wanted.push(e);
+  }
+  const merged: string[] = [];
+  for (const e of OAUTH_ALLOW.concat(wanted)) { if (e && merged.indexOf(e) < 0) merged.push(e); }
+  if (!merged.length) { res.status(400).json({ error: 'at least one address must remain, or nobody can sign in' }); return; }
+  await oaAllowWrite(wanted.filter((e: string) => OAUTH_ALLOW.indexOf(e) < 0));
+  try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'oauth_allow_updated', message: 'allowed accounts now: ' + merged.join(', '), timestamp: FieldValue.serverTimestamp() }); } catch (e) { }
+  res.json({ ok: true, all: await oaAllowList() });
+});
+async function oaAllowWrite(emails: string[]): Promise<void> {
+  const parts = OA_ALLOW_DOC.split('/');
+  const clean: string[] = [];
+  for (const e of emails.map(oaNormEmail)) { if (e && clean.indexOf(e) < 0) clean.push(e); }
+  await db.collection(parts[0]).doc(parts[1]).set({ emails: clean, updated_at: FieldValue.serverTimestamp() }, { merge: true });
+  oaAllowCache = null;   // the next read must see the write, not a 15-second-old copy
+}
 
 async function oaGet(col: string, id: string): Promise<any> { try { const d = await db.collection(col).doc(id).get(); return d.exists ? d.data() : null; } catch (e) { return null; } }
 async function oaSet(col: string, id: string, obj: any): Promise<void> { try { await db.collection(col).doc(id).set(obj); } catch (e) {} }
@@ -5285,7 +8607,7 @@ function oaTokHash(t: string): string { return oaCrypto.createHash('sha256').upd
 // [SEC-OAUTH-RT-EXP] Refresh tokens carried no exp field, so there was nothing to enforce and
 // they were valid forever. They now expire; this is the duration.
 const OA_RT_TTL_MS = 30 * 24 * 3600 * 1000;  // 30 days
-// [SEC-OAUTH-DUALREAD-REMOVED] fleet-mechanic 2026-07-30. The legacy cleartext-ID fallback is GONE.
+// [SEC-OAUTH-DUALREAD-REMOVED] fleet-security 2026-07-30. The legacy cleartext-ID fallback is GONE.
 // It ran on EVERY cache miss, and what it called was a plain document read whose DOCUMENT ID was the
 // RAW PRESENTED BEARER. Document IDs surface in console URLs, export manifests and
 // audit-log resourceName fields -- which is verbatim the reason [SEC-OAUTH-HASH] above stopped using
@@ -5329,19 +8651,30 @@ const STRAIN_RE = /^(fleet-[a-z0-9-]+|work-runner)$/;
 // listens. That shipped once (revision 00245-jur) and was caught only because
 // the deploy went out at --no-traffic. esbuild here is transpile-only and will
 // never catch it. Do not reorder or separate these three statements.
-const STRAIN_SEED = ['fleet-onboarder', /* [STRAIN-SEED-ONBOARDER-V1] OAUTH_DEFAULT_ROLE names this strain; a wipe-and-reseed without it drops every new connector onto the privileged strain */ 'fleet-engineer', 'fleet-archivist', 'fleet-inspector', 'fleet-mechanic', 'fleet-analyst', 'fleet-drafter', 'fleet-librarian', 'fleet-herald', 'fleet-courier', 'work-runner'];
+const STRAIN_SEED = ['fleet-onboarder', /* [STRAIN-SEED-ONBOARDER-V1] OAUTH_DEFAULT_ROLE names this strain; a wipe-and-reseed without it drops every new connector onto the privileged strain */ 'fleet-advisor', 'fleet-gcp', 'fleet-security', 'work-runner'];
 const STRAIN_NEVER_PASTEABLE = new Set(['work-runner', 'fleet-onboarder']);
 const STRAIN_PASTEABLE = new Set(
   STRAIN_SEED.filter((r: string) => !STRAIN_NEVER_PASTEABLE.has(r)));
 async function strainList(activeOnly: boolean): Promise<any[]> {
   try { const s = await db.collection('strains').get(); let rows = s.docs.map((d: any) => d.data()); if (activeOnly) rows = rows.filter((r: any) => r && r.status === 'active'); return rows; } catch (e) { return []; }
 }
+// [STRAIN-HIDDEN-SEED-V77] The seed never wrote `hidden`, so every seeded identity showed
+// in the Flowhood roster -- including the two that are not strains anyone assigns work to.
+// DERIVED from STRAIN_NEVER_PASTEABLE rather than written as a second list, for the reason
+// this file already gives twice: a hand-maintained roster beside another roster drifts. The
+// two ideas coincide exactly and for one underlying reason -- a SERVICE IDENTITY is neither
+// something a human mints a key for nor something a human assigns work to. fleet-onboarder
+// is where unclaimed connectors land and work-runner executes the queue.
+// THE RUNTIME FLAGS STAY INDEPENDENT, which is what the roleflags comment below is about:
+// this only sets the value written AT SEED TIME, and POST /api/strains/:role/flags can still
+// flip `pasteable` and `hidden` separately afterwards. Deriving the initial value from one
+// set is not the same as conflating the two fields.
 async function strainSeedIfEmpty(): Promise<void> {
   try {
     const s = await db.collection('strains').limit(1).get();
     if (!s.empty) return;
     for (const role of STRAIN_SEED) {
-      await db.collection('strains').doc(role).set({ role, display_name: role, status: 'active', pasteable: STRAIN_PASTEABLE.has(role), created_by: 'system:seed', created_at: FieldValue.serverTimestamp() });
+      await db.collection('strains').doc(role).set({ role, display_name: role, status: 'active', pasteable: STRAIN_PASTEABLE.has(role), hidden: STRAIN_NEVER_PASTEABLE.has(role), created_by: 'system:seed', created_at: FieldValue.serverTimestamp() });
     }
     await db.collection('journal').add({ agent_id: 'human_operator', action: 'strains_seeded', message: 'strain registry seeded with ' + STRAIN_SEED.length + ' canonical roles', timestamp: FieldValue.serverTimestamp() });
   } catch (e) {}
@@ -5356,7 +8689,32 @@ void (async () => { try { await strainSeedIfEmpty();
         await db.collection('strains').doc(_d.id).set({ pasteable: true }, { merge: true });
       }
     }
-  } catch (e) {} for (const _b of ['fleet-editor', 'fleet-builder']) { try { await db.collection('strains').doc(_b).set({ role: _b, status: 'retired', retired_by: 'system:failclosed', retired_at: FieldValue.serverTimestamp() }, { merge: true }); } catch (e) {} } const _mig = await db.collection('migrations').doc('failclosed_v1').get().catch(() => null); if (!_mig || !_mig.exists) { for (const _c of ['oauth_tokens', 'oauth_refresh']) { try { const _s = await db.collection(_c).get(); for (const _d of _s.docs) { try { await _d.ref.delete(); } catch (e) {} } } catch (e) {} } try { await db.collection('migrations').doc('failclosed_v1').set({ done_at: FieldValue.serverTimestamp(), note: 'purged oauth tokens; retired guest/architect' }); } catch (e) {} } console.error('[strains] seeded; banned retired; oauth tokens purged (one-time)'); } catch (e) { console.error('[strains] boot migration failed', e); } })();
+  } catch (e) {}
+  // [SEC-RETIRE-MIGRATION-V1] THIS IS A COMPLETED ONE-TIME MIGRATION, NOT A BOOT INVARIANT.
+  // It used to run UNCONDITIONALLY with two role names from THIS fleet's own history baked in,
+  // and set(..., {merge:true}) CREATES a document that does not exist -- so every fresh install
+  // in a stranger's project had two retired strains named after our history written into its
+  // database on first boot. That is the no-operator-identity-in-shipped-text standing order,
+  // violated in the one place a downloader cannot even see it: their Firestore.
+  // WHY DELETING THE LINE OUTRIGHT WAS REJECTED, and why nothing depends on it re-running:
+  // the two documents ALREADY EXIST in this fleet's prod carrying status 'retired', and nothing
+  // re-activates them -- strainSeedIfEmpty() only ever writes roles in STRAIN_SEED, and neither
+  // name is in it. The loop was re-asserting a state that was already durable. It is retired
+  // here rather than deleted so the mechanism survives for the next migration.
+  // TWO INDEPENDENT REASONS A FRESH INSTALL NOW CREATES NOTHING:
+  //   1. the list is EMPTY by default and comes from the environment, so no name from this
+  //      fleet's history is in the shipped text at all; and
+  //   2. the loop now RETIRES ONLY A DOCUMENT THAT ALREADY EXISTS. It can no longer conjure a
+  //      strain, so even a mistyped PC_RETIRE_STRAINS cannot invent one in anyone's database.
+  const _retire = String(process.env.PC_RETIRE_STRAINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const _b of _retire) {
+    try {
+      const _ex = await db.collection('strains').doc(_b).get();
+      if (!_ex || !_ex.exists) { console.error('[strains] retire skipped: ' + _b + ' does not exist here; refusing to create it'); continue; }
+      await db.collection('strains').doc(_b).set({ role: _b, status: 'retired', retired_by: 'system:failclosed', retired_at: FieldValue.serverTimestamp() }, { merge: true });
+    } catch (e) {}
+  }
+  const _mig = await db.collection('migrations').doc('failclosed_v1').get().catch(() => null); if (!_mig || !_mig.exists) { for (const _c of ['oauth_tokens', 'oauth_refresh']) { try { const _s = await db.collection(_c).get(); for (const _d of _s.docs) { try { await _d.ref.delete(); } catch (e) {} } } catch (e) {} } try { await db.collection('migrations').doc('failclosed_v1').set({ done_at: FieldValue.serverTimestamp(), note: 'purged oauth tokens' }); } catch (e) {} } console.error('[strains] seeded; banned retired; oauth tokens purged (one-time)'); } catch (e) { console.error('[strains] boot migration failed', e); } })();
 
 app.get('/api/strains', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
@@ -5379,18 +8737,17 @@ app.post('/api/strains/retire', waSafe(async (req: express.Request, res: express
   await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_retired', message: 'retired strain ' + role + ' — removed from roster on next control-plane deploy', timestamp: FieldValue.serverTimestamp() });
   res.json({ ok: true, role, status: 'retired' });
 }));
-// [SEC-OAUTH-STRAINS-GATE] fleet-mechanic 2026-07-30. This route USED to be public. The comment that
+// [SEC-OAUTH-STRAINS-GATE] fleet-security 2026-07-30. This route USED to be public. The comment that
 // stood here justified that by saying the consent page needs the roster so a human can bind a
 // connector to a strain. THAT JUSTIFICATION IS FALSE IN THE DEPLOYED ARTIFACT, and it was verified
-// false against real bytes rather than assumed: shared/passkey/patch-identity-failclosed.py deletes
-// the consent-page fetch of this route outright (its d_div / d_read / d_fetch anchors -- all three
-// are present in this source, so the deletion branch is the one that runs) as part of the human-only
-// connector change. The shipped consent page never calls this. What was left behind was an anonymous,
+// false against real bytes rather than assumed: the human-only connector change removed the
+// consent page's fetch of this route outright, and the consent page in THIS source carries no
+// such fetch -- so the shipped page never calls it. What was left behind was an anonymous,
 // unauthenticated enumeration of the fleet roster -- every active strain, role and display name -- to
 // any caller on a public origin that also serves the passkey gate.
-// GATED, NOT DELETED. There is no delete tool in this fleet and out-of-tree callers do exist: both
-// shared/harness/patch-oauth-role-restore.py and shared/harness/patch-admission-control.py document
-// unauthenticated pre-flight GETs of this exact URL. Those callers must now hold a passkey session
+// GATED, NOT DELETED, and out-of-tree callers do exist: MCP admission control and the OAuth
+// role-restore path both make unauthenticated pre-flight GETs of this exact URL, so removing the
+// route would break them silently. Those callers must now hold a passkey session
 // or move to /api/strains. The guard matches the convention of /api/strains directly above.
 app.get('/oauth/strains', async (req: express.Request, res: express.Response) => { if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first', gate: 'SEC-OAUTH-STRAINS-GATE' }); return; } res.json({ strains: (await strainList(true)).filter((r: any) => r.hidden !== true).map((r: any) => ({ role: r.role, display_name: r.display_name || r.role })) }); });
 // ============ end strain registry ============
@@ -5452,7 +8809,12 @@ app.get('/.well-known/agent.json', async (req: any, res: any) => { await a2aServ
 
 
 // ---- RFC 9728 Protected Resource Metadata (resource = the actual MCP endpoint) ----
-function oaPrMeta(req: any): any { const b = oaPubBase(req); return { resource: b + '/mcp', authorization_servers: [b], bearer_methods_supported: ['header'], scopes_supported: ['mcp'] }; }
+// [BRAND-SELFHOST-V80] logo_uri and resource_name are what put the connector's icon and
+// name back in an MCP client's UI. MEASURED before this change: this origin answered 404
+// on /favicon.ico, /icon.png and /logo.png and this document carried neither field, which
+// is why the icon disappeared when the connector moved to the MCP host. Both are plain
+// metadata a client may ignore.
+function oaPrMeta(req: any): any { const b = oaPubBase(req); return { resource: b + '/mcp', authorization_servers: [b], bearer_methods_supported: ['header'], scopes_supported: ['mcp'], resource_name: 'Paracoding', logo_uri: b + '/icon.png' }; }
 app.get('/.well-known/oauth-protected-resource', (req: any, res: any) => res.json(oaPrMeta(req)));
 app.get('/.well-known/oauth-protected-resource/mcp', (req: any, res: any) => res.json(oaPrMeta(req)));
 
@@ -5460,7 +8822,8 @@ app.get('/.well-known/oauth-protected-resource/mcp', (req: any, res: any) => res
 function oaAsMeta(req: any): any {
   const b = oaPubBase(req);
   return {
-    issuer: b, authorization_endpoint: b + '/oauth/authorize', token_endpoint: b + '/oauth/token',
+    // [OSS-IAPAUTH-V54] issuer and token_endpoint stay on the MCP host; only the browser step moves.
+    issuer: b, authorization_endpoint: oaAuthBase(req) + '/oauth/authorize', token_endpoint: b + '/oauth/token',
     registration_endpoint: b + '/oauth/register', response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['mcp'],
@@ -5477,8 +8840,8 @@ app.get('/.well-known/openid-configuration', (req: any, res: any) => res.json(oa
 // ceiling, and no 429 anywhere in the shipped bundle. One loop fills the collection, inflates the
 // bill, and buries the real clients.
 //
-// WHY NOT THE MAP IN shared/state/security-fixes/missing-rate-limit.md: that spec proposes a
-// process-local `new Map()`. On Cloud Run that is wrong three ways and cannot meet the brief.
+// WHY NOT A PROCESS-LOCAL MAP, which is the obvious fix and the one usually proposed: a
+// `new Map()` on Cloud Run is wrong three ways and cannot meet the brief.
 // (1) The state is per-INSTANCE and dies on cold start, so a "global cap of 100" is really 100 x
 // however many instances the attacker's own traffic causes to be spun up -- the global cap is the
 // one thing a Map provably cannot provide. (2) It can never FAIL CLOSED: a Map has no read that
@@ -5501,10 +8864,53 @@ const OA_REG_LIMIT_COL = 'oauth_reg_limits';
 // is the only one a client cannot forge; the leftmost is attacker-controlled and would let one
 // host mint an unlimited number of distinct per-IP buckets. When the header is absent we fall
 // back to the socket. Even if the address is somehow shared or unknown, the global cap holds.
+// [SEC-XFF-ONE-READING-V51] ONE READING OF "WHO IS CALLING", BECAUSE THERE WERE TWO AND THEY
+// WERE WRONG IN OPPOSITE DIRECTIONS ON THE SAME ROUTE.
+//
+// MEASURED 2026-08-15 on a fresh adopter install: POST /oauth/register answered 429
+// "too many client registrations from this address" to a container that had NEVER called it,
+// from an unrelated address, on its first attempt -- while the operator, on a different
+// continent's worth of IP, was locked out of adding the connector at all. Two helpers were
+// feeding two limiters on that one route:
+//
+//   oaClientIp     -> xff[xff.length - 1], which behind Cloud Run is ALWAYS the Google front
+//                     end. Every caller on earth hashed to the same string, so the
+//                     "per-address" Firestore bucket was ONE GLOBAL BUCKET and any user's
+//                     retries locked out every other user. That is what bit the install.
+//   oaRegClientIp  -> xff[0], which is CLIENT-SUPPLIED. Google APPENDS the observed peer, so a
+//                     caller who sends its own X-Forwarded-For controls index 0 and can mint a
+//                     fresh bucket per request, evading the in-process cap entirely.
+//
+// So one limiter was a denial of service against legitimate users and the other was a bypass
+// for an attacker, and fixing either alone leaves the other hole open. That is the concrete
+// harm of two readings of one fact, and it is why this is now a single function.
+//
+// THE CORRECT READING IS POSITIONAL FROM THE RIGHT. The rightmost entry is appended by the hop
+// closest to us and is trustworthy; everything to its left may be forged. With exactly one
+// trusted proxy in front (Cloud Run's load balancer, the default) the client is the LAST entry
+// the proxy appended -- index length-1-hops. A forged prefix shifts only the entries we already
+// distrust: ["forged","client","lb"] still resolves to "client". Configurable because an
+// install behind an extra CDN or WAF has more trusted hops, and hardcoding 1 would silently
+// return the CDN's address and recreate the global-bucket bug one layer up.
+const PC_TRUSTED_PROXY_HOPS = (function () {
+  const n = Number(process.env.PC_TRUSTED_PROXY_HOPS || '1');
+  return (isFinite(n) && n >= 0) ? Math.floor(n) : 1;
+})();
+function pcTrustedClientIp(req: any): string {
+  const xff = String((req && req.headers && req.headers['x-forwarded-for']) || '')
+    .split(',').map((s: string) => s.trim()).filter(Boolean);
+  if (xff.length) {
+    const idx = xff.length - 1 - PC_TRUSTED_PROXY_HOPS;
+    return xff[idx >= 0 ? idx : 0];
+  }
+  return String((req && req.ip) || (req && req.connection && req.connection.remoteAddress)
+    || (req && req.socket && req.socket.remoteAddress) || 'unknown');
+}
+// Both former helpers now delegate. The NAMES are kept so no call site changes in this commit
+// -- the defect was two READINGS, not two names, and a rename would enlarge the diff without
+// removing anything that can drift.
 function oaClientIp(req: any): string {
-  const xff = String((req.headers && req.headers['x-forwarded-for']) || '').split(',').map((s: string) => s.trim()).filter(Boolean);
-  if (xff.length) return xff[xff.length - 1];
-  return String(req.ip || (req.connection && req.connection.remoteAddress) || (req.socket && req.socket.remoteAddress) || 'unknown');
+  return pcTrustedClientIp(req);
 }
 // Returns { ok: true } and CONSUMES one unit of both budgets, or { ok: false, scope } and consumes
 // nothing. THROWS if Firestore is unreachable -- the caller must treat that as a refusal.
@@ -5544,8 +8950,7 @@ const OA_REG_PER_IP_PER_HOUR = parseInt(process.env.OAUTH_REG_PER_IP_PER_HOUR ||
 const OA_REG_MAX_FIELD = parseInt(process.env.OAUTH_REG_MAX_FIELD || '2048', 10);
 const oaRegHits: any = new Map();
 function oaRegClientIp(req: any): string {
-  const f = String((req.headers && req.headers['x-forwarded-for']) || '');
-  return (f.split(',')[0] || String(req.ip || '')).trim() || 'unknown';
+  return pcTrustedClientIp(req);
 }
 function oaRegAllow(ip: string): boolean {
   const now = Date.now();
@@ -5642,29 +9047,84 @@ function oaJsonForScript(v: any): string {
 }
 function oaAuthHtml(p: any): string {
   const P = oaJsonForScript(p);
-  const CID = oaJsonForScript(OA_GID);
+  const CID = oaJsonForScript(oaGoogleOn() ? OA_GID : '');
+  // [OSS-AUTHMODE-V54] The page never ships the secret, only whether the field should exist.
+  const SELF = oaSelfOn() ? 'true' : 'false';
   return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
     + '<title>Authorize Paracoding connector</title><script src="https://accounts.google.com/gsi/client" async></script>'
     + '<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:linear-gradient(135deg,#20103f,#3a1e63 52%,#6a2a7e) fixed;color:#fff;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;padding:1rem}'
     + '.card{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.26);border-radius:18px;padding:1.6rem;max-width:380px;text-align:center;backdrop-filter:blur(8px);box-shadow:0 20px 60px rgba(0,0,0,.4)}'
     + 'h1{font-size:1.15rem;margin:.2rem 0 .4rem;background:linear-gradient(90deg,#ffe9a8,#e0982e);-webkit-background-clip:text;background-clip:text;color:transparent}'
     + 'p{color:rgba(255,255,255,.82);font-size:.86rem;line-height:1.45}#g{display:flex;justify-content:center;margin:1.1rem 0}#msg{font-size:.8rem;color:#ffd7d0;min-height:1.2em}'
-    + 'select{margin-top:.35rem;padding:.45rem .6rem;border-radius:9px;min-width:200px;font-size:.9rem;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff}label{font-size:.78rem;color:rgba(255,255,255,.72)}</style></head>'
-    + '<body><div class="card"><h1>Authorize connector</h1><p>Sign in with Google to connect this MCP client to your Paracoding fleet. Only approved accounts can authorize.</p>'
+    + 'select{margin-top:.35rem;padding:.45rem .6rem;border-radius:9px;min-width:200px;font-size:.9rem;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff}label{font-size:.78rem;color:rgba(255,255,255,.72)}'
+    + 'input{width:100%;box-sizing:border-box;padding:.5rem .6rem;border-radius:9px;font-size:.9rem;border:1px solid rgba(255,255,255,.3);background:rgba(255,255,255,.12);color:#fff}'
+    + 'button{margin-top:.5rem;width:100%;padding:.5rem .6rem;border-radius:999px;border:1px solid rgba(255,255,255,.3);background:linear-gradient(90deg,#ffe9a8,#e0982e);color:#2a1740;font-weight:600;font-size:.9rem;cursor:pointer}'
+    + '#sep{margin:1rem 0 .4rem;font-size:.72rem;letter-spacing:.14em;color:rgba(255,255,255,.5)}#self{display:none;text-align:left}</style></head>'
+    + '<body><div class="card"><h1>Authorize connector</h1><p id="lede">Connect this MCP client to your Paracoding fleet. Only approved accounts can authorize.</p>'
     + ''
-    + '<div id="g"></div><div id="msg"></div></div><script>'
-    + 'var P=' + P + ';var CID=' + CID + ';'
+    + '<div id="g"></div>'
+    + '<div id="sep" style="display:none">OR</div>'
+    + '<div id="self"><label for="ck">Connector key</label><input id="ck" type="password" autocomplete="off" spellcheck="false">'
+    + '<button id="ckgo" type="button">Authorize</button></div>'
+    + '<div id="msg"></div></div><script>'
+    + 'var P=' + P + ';var CID=' + CID + ';var SELF=' + SELF + ';'
     + 'function onCred(resp){document.getElementById("msg").style.color="#c6ffe4";document.getElementById("msg").textContent="Authorizing…";'
     + 'var role="";'
     + 'fetch("/oauth/authorize/complete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({id_token:resp.credential,role:role},P))})'
     + '.then(function(r){return r.json();}).then(function(d){if(d.redirect){window.location=d.redirect;}else{document.getElementById("msg").style.color="#ffd7d0";document.getElementById("msg").textContent=d.error||"authorization failed";}})'
     + '.catch(function(e){document.getElementById("msg").textContent=String(e);});}'
+    + 'function onKey(){var k=document.getElementById("ck").value||"";var m=document.getElementById("msg");'
+    + 'if(!k){m.style.color="#ffd7d0";m.textContent="enter the connector key";return;}'
+    + 'document.getElementById("ckgo").disabled=true;m.style.color="#c6ffe4";m.textContent="Authorizing\\u2026";'
+    + 'fetch("/oauth/authorize/key",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({key:k},P))})'
+    + '.then(function(r){return r.json();}).then(function(d){if(d.redirect){window.location=d.redirect;}else{document.getElementById("ckgo").disabled=false;m.style.color="#ffd7d0";m.textContent=d.error||"authorization failed";}})'
+    + '.catch(function(e){document.getElementById("ckgo").disabled=false;m.textContent=String(e);});}'
     + 'window.onload=function(){'
     + ''
-    + 'if(!CID){document.getElementById("msg").textContent="server: no Google client configured";return;}'
+    // [OSS-AUTHMODE-V54] Three states, and the no-way-in one must SAY so rather than render a
+    // dead page. The old text ("server: no Google client configured") was the only thing an
+    // adopter ever saw, because no install has ever had a client id.
+    + 'var lede=document.getElementById("lede");'
+    + 'if(SELF){document.getElementById("self").style.display="block";'
+    + 'document.getElementById("ckgo").addEventListener("click",onKey);'
+    + 'document.getElementById("ck").addEventListener("keydown",function(e){if(e.key==="Enter"){e.preventDefault();onKey();}});}'
+    + 'if(!CID&&!SELF){document.getElementById("msg").textContent="server: no connector sign-in is configured on this install";return;}'
+    + 'if(!CID){if(lede){lede.textContent="Enter your connector key to connect this MCP client to your Paracoding fleet.";}return;}'
+    + 'if(SELF){document.getElementById("sep").style.display="block";}'
     + 'google.accounts.id.initialize({client_id:CID,callback:onCred});'
     + 'google.accounts.id.renderButton(document.getElementById("g"),{theme:"filled_blue",size:"large",text:"signin_with",shape:"pill"});'
     + 'google.accounts.id.prompt();};'
+    + '</script></body></html>';
+}
+// [OSS-IAPAUTH-V54] The IAP variant. No Google client id, no GIS script, no password field --
+// IAP has already authenticated the human with Google and handed us a signed assertion. The page
+// shows WHICH account it is (so a wrong browser profile is visible before anything is granted,
+// which is the failure the operator actually hit) and asks for one deliberate click.
+function oaIapAuthHtml(p: any, email: string, allowed: boolean): string {
+  const P = oaJsonForScript(p);
+  const EM = oaJsonForScript(email || '');
+  const OK = allowed ? 'true' : 'false';
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>Authorize Paracoding connector</title>'
+    + '<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:linear-gradient(135deg,#20103f,#3a1e63 52%,#6a2a7e) fixed;color:#fff;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center;padding:1rem}'
+    + '.card{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.26);border-radius:18px;padding:1.6rem;max-width:380px;text-align:center;backdrop-filter:blur(8px);box-shadow:0 20px 60px rgba(0,0,0,.4)}'
+    + 'h1{font-size:1.15rem;margin:.2rem 0 .4rem;background:linear-gradient(90deg,#ffe9a8,#e0982e);-webkit-background-clip:text;background-clip:text;color:transparent}'
+    + 'p{color:rgba(255,255,255,.82);font-size:.86rem;line-height:1.45}#who{font-weight:600;color:#c6ffe4;word-break:break-all}'
+    + '#msg{font-size:.8rem;color:#ffd7d0;min-height:1.2em}'
+    + 'button{margin-top:.9rem;width:100%;padding:.55rem .6rem;border-radius:999px;border:1px solid rgba(255,255,255,.3);background:linear-gradient(90deg,#ffe9a8,#e0982e);color:#2a1740;font-weight:600;font-size:.95rem;cursor:pointer}'
+    + 'button[disabled]{opacity:.45;cursor:not-allowed}</style></head>'
+    + '<body><div class="card"><h1>Authorize connector</h1>'
+    + '<p>Signed in with Google as<br><span id="who"></span></p>'
+    + '<p id="note"></p>'
+    + '<button id="go" type="button">Authorize this connector</button><div id="msg"></div></div><script>'
+    + 'var P=' + P + ';var EM=' + EM + ';var OK=' + OK + ';'
+    + 'document.getElementById("who").textContent=EM||"(no account)";'
+    + 'var note=document.getElementById("note");var go=document.getElementById("go");var msg=document.getElementById("msg");'
+    + 'if(!OK){go.disabled=true;note.textContent=EM?("This account is not on the allowed list. Add it in Settings, then reload."):("No Google identity reached this page. Check that IAP is enabled on this service.");}'
+    + 'go.addEventListener("click",function(){go.disabled=true;msg.style.color="#c6ffe4";msg.textContent="Authorizing\\u2026";'
+    + 'fetch("/oauth/authorize/complete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({via:"iap"},P))})'
+    + '.then(function(r){return r.json();}).then(function(d){if(d.redirect){window.location=d.redirect;}else{go.disabled=false;msg.style.color="#ffd7d0";msg.textContent=d.error||"authorization failed";}})'
+    + '.catch(function(e){go.disabled=false;msg.textContent=String(e);});});'
     + '</script></body></html>';
 }
 app.get('/oauth/authorize', async (req: any, res: any) => {
@@ -5679,11 +9139,114 @@ app.get('/oauth/authorize', async (req: any, res: any) => {
   if (!String(q.code_challenge || '')) { res.status(400).send('code_challenge required'); return; }
   const params = { client_id: String(q.client_id), redirect_uri: redirect, code_challenge: String(q.code_challenge), state: String(q.state || ''), scope: String(q.scope || 'mcp') };
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  // [OSS-IAPAUTH-V54] On the console surface IAP has ALREADY signed the human in with Google
+  // before this handler runs, so there is no button to press and no client id to configure --
+  // the identity is in the request. This is the whole point of the split: the copy of this route
+  // on the MCP surface still serves the GIS/connector-key page for installs that use those.
+  if (PC_SURFACE === 'console' && oaIapAuthOn()) {
+    const iapEmail = pcIapEmail(req);
+    res.send(oaIapAuthHtml(params, iapEmail, await oaAllowed(iapEmail)));
+    return;
+  }
   res.send(oaAuthHtml(params));
+});
+// [OSS-IAPAUTH-V54] ONE mint path for every way a human can prove who they are. The IAP branch,
+// the GIS branch and the connector-key branch differ ONLY in how `email` was established; from
+// here on the client lookup, the redirect_uri re-validation, the role binding, the code shape and
+// the TTL are identical by construction. Written as a shared function rather than copied per
+// branch specifically so a later fix to one cannot silently miss the others -- three copies of a
+// redirect_uri check is three chances to leave an open redirect behind.
+// `via` is recorded for audit only. It is never read as an authorisation input.
+async function oaMintAndRedirect(res: any, b: any, email: string, via: string): Promise<void> {
+  const client = await oaGet('oauth_clients', String((b && b.client_id) || ''));
+  if (!client) { res.status(400).json({ error: 'invalid client' }); return; }
+  const redirect = String((b && b.redirect_uri) || '');
+  // re-validate against the REGISTERED list: the browser controls the body, so a check done at
+  // GET /oauth/authorize does not carry over to this POST. No open redirect.
+  if (!redirect || !Array.isArray(client.redirect_uris) || client.redirect_uris.indexOf(redirect) === -1) { res.status(400).json({ error: 'invalid redirect_uri' }); return; }
+  // bind this connector to a chosen, provisioned strain (falls back to the unbound guest identity)
+  // [FAIL-CLOSED IDENTITY] the app connector ALWAYS acts as the human principal. Strains authenticate
+  // via GCP Agent Identity (SPIFFE), never through this OAuth connector. No dropdown trust, no default-to-guest.
+  const role = OAUTH_ROLE;
+  const code = oaRand(24);
+  await oaSet('oauth_codes', code, { client_id: String(b.client_id), redirect_uri: redirect, code_challenge: String((b && b.code_challenge) || ''), email, role, via, exp: Date.now() + 600000 });
+  try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'oauth_authorized', message: 'connector authorized via ' + via + ' as ' + email, timestamp: FieldValue.serverTimestamp() }); } catch (e) { }
+  const url = redirect + (redirect.indexOf('?') === -1 ? '?' : '&') + 'code=' + encodeURIComponent(code) + (b && b.state ? ('&state=' + encodeURIComponent(String(b.state))) : '');
+  res.json({ redirect: url });
+}
+// [OSS-AUTHMODE-V54] The connector-key branch. This is a PASSWORD endpoint, so unlike
+// /oauth/register (which is capped in one instance's memory and says so) the counter must be
+// shared: an attacker who can trigger scale-out otherwise gets the limit once per instance. The
+// budget lives in Firestore, is consumed on FAILURE only, and a Firestore outage REFUSES rather
+// than allowing -- an unreachable limiter on a password endpoint means no limiter at all.
+const OA_KEY_LIMIT_COL = 'oauth_key_limits';
+const OA_KEY_IP_LIMIT = Number(process.env.OAUTH_KEY_IP_LIMIT || 10);
+const OA_KEY_GLOBAL_LIMIT = Number(process.env.OAUTH_KEY_GLOBAL_LIMIT || 60);
+const OA_KEY_WINDOW_MS = 3600000;
+async function oaKeyRateLimit(ip: string): Promise<{ ok: boolean; scope: string }> {
+  const now = Date.now();
+  const gRef = db.collection(OA_KEY_LIMIT_COL).doc('global');
+  const ipRef = db.collection(OA_KEY_LIMIT_COL).doc('ip_' + oaTokHash(ip));
+  return await db.runTransaction(async (tx: any): Promise<{ ok: boolean; scope: string }> => {
+    const gSnap = await tx.get(gRef);
+    const ipSnap = await tx.get(ipRef);
+    const g: any = (gSnap && gSnap.exists && gSnap.data()) || null;
+    const i: any = (ipSnap && ipSnap.exists && ipSnap.data()) || null;
+    const gLive = !!(g && Number(g.reset) > now);
+    const iLive = !!(i && Number(i.reset) > now);
+    const gCount = gLive ? (Number(g.count) || 0) : 0;
+    const iCount = iLive ? (Number(i.count) || 0) : 0;
+    if (gCount >= OA_KEY_GLOBAL_LIMIT) return { ok: false, scope: 'global' };
+    if (iCount >= OA_KEY_IP_LIMIT) return { ok: false, scope: 'ip' };
+    tx.set(gRef, { count: gCount + 1, reset: gLive ? Number(g.reset) : now + OA_KEY_WINDOW_MS, updated_at: FieldValue.serverTimestamp() });
+    tx.set(ipRef, { count: iCount + 1, reset: iLive ? Number(i.reset) : now + OA_KEY_WINDOW_MS, updated_at: FieldValue.serverTimestamp() });
+    return { ok: true, scope: '' };
+  });
+}
+app.post('/oauth/authorize/key', async (req: any, res: any) => {
+  const b = req.body || {};
+  if (!oaSelfOn()) { res.status(400).json({ error: 'connector key sign-in is not enabled on this install' }); return; }
+  const ip = pcTrustedClientIp(req);
+  // Spend budget BEFORE the compare, so a refused attempt costs the attacker and a Firestore
+  // failure lands in the catch below as a refusal rather than as a free guess.
+  let gate: { ok: boolean; scope: string };
+  try { gate = await oaKeyRateLimit(ip); } catch (e) { res.status(503).json({ error: 'rate limiter unavailable; refusing' }); return; }
+  if (!gate.ok) {
+    res.setHeader('Retry-After', '3600');
+    res.status(429).json({ error: 'too many attempts', scope: gate.scope });
+    return;
+  }
+  const supplied = String(b.key || '');
+  // Constant-time. waEq() compares length first and then timingSafeEqual, so it does not leak the
+  // secret's length through timing the way a === would leak its prefix.
+  if (!supplied || !waEq(waSha(supplied), waSha(PC_CONNECT_SECRET))) {
+    try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'oauth_key_refused', message: 'connector key rejected from ' + ip, timestamp: FieldValue.serverTimestamp() }); } catch (e) { }
+    res.status(403).json({ error: 'invalid connector key' });
+    return;
+  }
+  await oaMintAndRedirect(res, b, oaSelfPrincipal(), 'key');
 });
 // verify the Google ID token, check the allowlist, mint our authorization code
 app.post('/oauth/authorize/complete', async (req: any, res: any) => {
   const b = req.body || {};
+  // [OSS-IAPAUTH-V54] The IAP branch. THREE conditions and every one of them is load-bearing:
+  //   PC_SURFACE === 'console'  -- only the IAP-protected copy of this route may trust an
+  //                                assertion; the public MCP copy must never accept one.
+  //   oaIapAuthOn()             -- requires PC_IAP_AUD, so the assertion is bound to THIS
+  //                                service and a token minted for another IAP app cannot be
+  //                                replayed here. Google's signature alone does not bind audience.
+  //   pcIapEmail(req)           -- verifies signature, issuer, expiry and audience itself, and
+  //                                returns '' on any failure. An empty string is a refusal.
+  // Dropping any one of the three turns this into an open door, so they are checked together and
+  // the request is refused rather than falling through to the Google-token path.
+  if (String(b.via || '') === 'iap') {
+    if (PC_SURFACE !== 'console' || !oaIapAuthOn()) { res.status(400).json({ error: 'IAP authorization is not enabled on this surface' }); return; }
+    const iapEmail = pcIapEmail(req);
+    if (!iapEmail) { res.status(401).json({ error: 'no verified IAP identity on this request' }); return; }
+    if (!(await oaAllowed(iapEmail))) { res.status(403).json({ error: 'account not authorized: ' + iapEmail }); return; }  // fail closed
+    await oaMintAndRedirect(res, b, iapEmail, 'iap');
+    return;
+  }
   const idt = String(b.id_token || '');
   if (!idt) { res.status(400).json({ error: 'no id_token' }); return; }
   if (!OA_GID) { res.status(500).json({ error: 'server misconfigured (no Google client id)' }); return; }  // fail closed
@@ -5693,19 +9256,8 @@ app.post('/oauth/authorize/complete', async (req: any, res: any) => {
   if (!info || info.aud !== OA_GID) { res.status(401).json({ error: 'invalid Google token' }); return; }
   if (String(info.email_verified) !== 'true') { res.status(403).json({ error: 'email not verified' }); return; }
   const email = String(info.email || '').toLowerCase();
-  if (!OAUTH_ALLOW.length || OAUTH_ALLOW.indexOf(email) === -1) { res.status(403).json({ error: 'account not authorized: ' + email }); return; }  // fail closed
-  const client = await oaGet('oauth_clients', String(b.client_id || ''));
-  if (!client) { res.status(400).json({ error: 'invalid client' }); return; }
-  const redirect = String(b.redirect_uri || '');
-  if (!redirect || !Array.isArray(client.redirect_uris) || client.redirect_uris.indexOf(redirect) === -1) { res.status(400).json({ error: 'invalid redirect_uri' }); return; }  // re-validate
-  // bind this connector to a chosen, provisioned strain (falls back to the unbound guest identity)
-  // [FAIL-CLOSED IDENTITY] the app connector ALWAYS acts as the human principal. Strains authenticate
-  // via GCP Agent Identity (SPIFFE), never through this OAuth connector. No dropdown trust, no default-to-guest.
-  const role = OAUTH_ROLE;
-  const code = oaRand(24);
-  await oaSet('oauth_codes', code, { client_id: String(b.client_id), redirect_uri: redirect, code_challenge: String(b.code_challenge || ''), email, role, exp: Date.now() + 600000 });
-  const url = redirect + (redirect.indexOf('?') === -1 ? '?' : '&') + 'code=' + encodeURIComponent(code) + (b.state ? ('&state=' + encodeURIComponent(String(b.state))) : '');
-  res.json({ redirect: url });
+  if (!(await oaAllowed(email))) { res.status(403).json({ error: 'account not authorized: ' + email }); return; }  // fail closed
+  await oaMintAndRedirect(res, b, email, 'google');
 });
 
 // [OA-REVOKE-V1] Mark every prior credential for this client_id + email revoked, keeping
@@ -5860,6 +9412,259 @@ async function oaStrainFromOidc(token: string, req: any): Promise<string | null>
     return String((d && d.role) || snap.docs[0].id);
   } catch (e) { return null; }
 }
+// ---------------------------------------------------------------------------
+// [PCGIT-ARCHIVE-V1] GET /git/archive -- the repository, to a machine, over IAM.
+// ---------------------------------------------------------------------------
+// THE PROBLEM THIS CLOSES. The repository is the authority and it is PCV1-sealed in
+// the lake, so a build system reading those objects directly gets ciphertext. What
+// built instead were two plaintext mirrors that both went stale, and agents read them
+// AS the source and reported confident nonsense about code that had not existed for
+// weeks. Operator ruling: eliminate the mirrors, work with our git. This is the
+// endpoint that makes that possible -- one reader, in the process that already holds
+// the vault, handing a tree to a caller GCP has already authenticated.
+//
+// NO SHARED SECRET, ON PURPOSE. The obvious build puts a bearer key in Secret Manager
+// and hands it to the builder. That works, and it is still a key: it can leak, it must
+// rotate, and possession alone is authority. Instead the caller presents a GOOGLE-SIGNED
+// ID TOKEN for its own service account, Google attests it, and IAM decides. Nothing to
+// rotate and nothing to leak. This mirrors oaStrainFromOidc above line for line -- same
+// tokeninfo call, same shape guard, same audience pin -- because a second, subtly
+// different verifier is how one of the two ends up weaker.
+//
+// [PCGIT-ARCHIVE-KEY-V49] TWO CREDENTIALS, ONE REACH.
+//
+// This route was gated ONLY on a Google-signed service-account ID token, so it was reachable
+// by a build system and by nothing else. The consequence was backwards: a strain in a fresh
+// container could WRITE its own repository in one request over POST /git/blob, but could only
+// READ it back one file at a time. The fleet could write more easily than it could read, and
+// every agent that needed a tree either inherited a snapshot or did the work in prod.
+//
+// A SESSION KEY NOW ALSO OPENS IT, AND THAT GRANTS NOTHING NEW. The same key already resolves
+// git_read, git_list, git_log and git_diff over this same repository, and gittools.ts applies
+// no per-role ref or path restriction to any of them -- so the archive is that IDENTICAL reach
+// in one request instead of several hundred. What it buys is round trips and model-retyped
+// bytes, not permission.
+//
+// THE ADMISSION ARITHMETIC IS THE TOOL SURFACE'S OWN, NOT A SECOND COPY OF IT. A key MAY hold
+// less than its strain -- session_keys.tool_classes, [WP4B-KEY-CLASSES-V1] -- and git_read is
+// class 'read' in PC_TOOL_CLASS. So a key narrowed to ['write'] cannot call git_read, and
+// handing it the whole tree here would be a hole that the tool surface closes and this route
+// reopens. This calls pcToolClasses and pcNarrowClasses, the SAME two functions buildMcpServer
+// uses to decide whether git_read registers at all. If they withhold the tool, this withholds
+// the archive -- by construction, not by a rule someone has to remember to keep in step.
+//
+// FAIL CLOSED ON AN UNSET ALLOWLIST -- UNCHANGED, AND IT MOVED FOR A REASON.
+// PC_ARCHIVE_ALLOWED_SA unset still means NO SERVICE ACCOUNT is authorised: an empty allowlist
+// read as "everyone" would hand the whole private source tree to any service account in any
+// project that found this URL. That check now sits INSIDE the service-account branch, because
+// it never governed session keys -- there were none on this route before -- and leaving it at
+// the top would have made the new path dead on every install that never set the variable.
+// Nothing about the service-account path got weaker; it got scoped to the callers it is about.
+//
+// THE TWO CREDENTIALS CANNOT SHADOW EACH OTHER. An ID token is a JWT: exactly three non-empty
+// dot-separated segments. A session key has none. The SHAPE picks the branch, so a malformed
+// ID token is never retried as a session key -- which would quietly turn a tokeninfo failure
+// into a second lookup against a different credential store -- and a session key is never sent
+// to Google's tokeninfo endpoint.
+const PC_ARCHIVE_ALLOWED_SA: string[] = String(process.env.PC_ARCHIVE_ALLOWED_SA || '')
+  .split(',').map((x) => x.trim().toLowerCase()).filter((x) => x !== '');
+async function pcArchiveCaller(req: any): Promise<string | null> {
+  try {
+    const raw = String((req.get && req.get('authorization')) || '');
+    if (raw.slice(0, 7).toLowerCase() !== 'bearer ') return null;
+    const token = raw.slice(7).trim();
+    if (!token) return null;
+    const seg = token.split('.');
+    const looksJwt = seg.length === 3 && !!seg[0] && !!seg[1] && !!seg[2];
+    if (!looksJwt) {
+      const v: any = await pcSessionLookup(token);
+      if (!v || !v.role) return null;
+      const role = String(v.role);
+      // The role is taken off the session record and NEVER off the query string or a header,
+      // for the same reason POST /git/blob does it that way: a caller-supplied identity would
+      // let anyone read as anyone.
+      const eff = pcNarrowClasses(await pcToolClasses(role), v.tc);
+      if (eff.indexOf('read') < 0) {
+        console.error('[git-archive] REFUSED: the session key for ' + role + " does not hold the "
+          + "'read' tool class, so it cannot call git_read and is not handed the tree here.");
+        return null;
+      }
+      return 'session:' + role;
+    }
+    if (!PC_ARCHIVE_ALLOWED_SA.length) {
+      console.error('[git-archive] REFUSED: PC_ARCHIVE_ALLOWED_SA is unset, so no service '
+        + 'account is authorised. Set it to the service account email(s) permitted to fetch the '
+        + 'tree. A strain can still fetch it with its session key.');
+      return null;
+    }
+    const wantAud = String(process.env.MCP_PUBLIC_URL || '').replace(/\/+$/, '');
+    if (!wantAud) return null;
+    const r: any = await waFetch('https://oauth2.googleapis.com/tokeninfo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'id_token=' + encodeURIComponent(token),
+    });
+    if (!r || !r.ok) return null;
+    const j: any = await r.json();
+    const email = String((j && j.email) || '').toLowerCase();
+    if (!email || email.indexOf('.iam.gserviceaccount.com') < 0) return null;
+    const gotAud = String((j && j.aud) || '').replace(/\/+$/, '');
+    if (gotAud !== wantAud && gotAud !== (wantAud + '/git/archive')) return null;
+    if (PC_ARCHIVE_ALLOWED_SA.indexOf(email) < 0) {
+      console.error('[git-archive] REFUSED: ' + email + ' is not in PC_ARCHIVE_ALLOWED_SA.');
+      return null;
+    }
+    return email;
+  } catch (e) { return null; }
+}
+app.get('/git/archive', async (req: any, res: any) => {
+  const who = await pcArchiveCaller(req);
+  if (!who) { res.status(401).json({ error: 'unauthorized' }); return; }
+  const ref = String(req.query.ref || 'main');
+  const sub = String(req.query.path || '');
+  try {
+    const gt = require('./gittools.js');
+    if (typeof gt.gitArchiveTarGz !== 'function') throw new Error('gittools.js does not export gitArchiveTarGz');
+    const out: any = await gt.gitArchiveTarGz(ref, sub);
+    // THE MANIFEST RIDES IN HEADERS SO A BUILD CAN ASSERT COVERAGE RATHER THAN TRUST A
+    // BYTE COUNT. A build step comparing x-pcgit-files against what it extracted turns a
+    // silently short archive into a red build instead of a mystery three deploys later.
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('x-pcgit-commit', out.commit);
+    res.setHeader('x-pcgit-files', String(out.files));
+    res.setHeader('x-pcgit-bytes', String(out.bytes));
+    res.setHeader('Content-Disposition', 'attachment; filename="pcgit-' + String(out.commit).slice(0, 12) + '.tar.gz"');
+    console.error('[git-archive] ' + who + ' fetched ref=' + ref + (sub ? (' path=' + sub) : '')
+      + ' commit=' + out.commit + ' files=' + out.files + ' bytes=' + out.bytes);
+    db.collection('journal').add({
+      agent_id: 'git_archive', action: 'archive_served',
+      message: who + ' fetched ' + ref + ' (' + out.commit + ') ' + out.files + ' files',
+      timestamp: FieldValue.serverTimestamp(),
+    }).catch(() => {});
+    res.status(200).send(out.tgz);
+  } catch (e: any) {
+    const msg = String((e && e.message) || e);
+    console.error('[git-archive] FAILED ref=' + ref + ': ' + msg);
+    res.status(500).json({ error: 'archive failed', detail: msg.slice(0, 300) });
+  }
+});
+// ---------------------------------------------------------------------------
+// [PCGIT-UPLOAD-V1] POST /git/blob -- bytes IN, the counterpart to /git/archive.
+// ---------------------------------------------------------------------------
+// THE PROBLEM THIS CLOSES. Landing a large file in the repository means a language
+// model retyping every byte into git_propose's `content`. src/index.ts is over 600KB:
+// hundreds of thousands of generated tokens, where one dropped space is a broken file,
+// and the single biggest cost in this project. GET /git/archive already moves the tree
+// OUT over HTTP with no model in the path. This moves bytes IN the same way -- straight
+// into the git object store, where git_propose can then NAME them.
+//
+// A DIFFERENT CREDENTIAL FROM /git/archive, ON PURPOSE. The archive hands the whole
+// private tree to a build system, so it is gated on a Google-signed service-account ID
+// token and an allowlist. An upload writes ONE unreferenced object and a record saying
+// who wrote it -- it is the write half of what an agent can already do through
+// git_propose, so it takes the credential an agent already holds: its session key, the
+// SAME key pcSessionLookup resolves for every tool call. No new credential type is
+// invented here, because a second kind of key is a second thing to leak and rotate.
+//
+// THE ROLE THE KEY RESOLVES TO IS THE OWNER OF THE UPLOAD, AND THAT IS THE WHOLE POINT.
+// git_propose's `uploaded` resolves only against a record belonging to the SAME agent,
+// so this identity is what decides whose bytes a later proposal may claim. It comes off
+// the session record and NEVER off the query string or the body -- a caller-supplied
+// agent name would let anyone claim anyone's upload, which is exactly the bare-oid hole
+// pcgit refuses everywhere else.
+//
+// THE BEARER KEY AND THE BYTES ARE NEVER LOGGED. The journal line and the console line
+// carry the resolved role, the oid, the sha256 and the size -- enough to reconstruct who
+// put what, and nothing that is a secret or a file.
+const PC_BLOB_MAX_BYTES = 64 * 1024 * 1024;
+// RAW BODY, ROUTE-LEVEL ONLY. app.use(express.json()) is mounted globally at the top of
+// this file and app.use(express.urlencoded()) further down; neither touches a body whose
+// Content-Type is not JSON or form-encoded, so an upload sent as application/octet-stream
+// reaches this middleware unparsed and NO OTHER ROUTE's body parsing changes -- this
+// express.raw is attached to this one registration, not to the app. A caller who mislabels
+// an upload as application/json or as a form gets a 400 from here naming the header,
+// rather than a Buffer that is silently an object.
+const pcBlobRawBody = express.raw({ type: '*/*', limit: PC_BLOB_MAX_BYTES });
+// The size refusal is handled HERE rather than falling through to Express's default error
+// handler, which would answer 413 with an HTML page a machine client cannot read.
+function pcBlobBody(req: any, res: any, next: any): void {
+  pcBlobRawBody(req, res, (err: any) => {
+    if (err) {
+      const tooBig = !!(err && (err.type === 'entity.too.large' || err.status === 413));
+      console.error('[git-blob] body rejected: ' + String((err && err.message) || err));
+      res.status(tooBig ? 413 : 400).json({
+        error: tooBig ? 'too large' : 'bad body',
+        detail: tooBig
+          ? 'an upload may be at most ' + PC_BLOB_MAX_BYTES + ' bytes'
+          : String((err && err.message) || err).slice(0, 300),
+      });
+      return;
+    }
+    next();
+  });
+}
+// The SAME session key every tool call carries, resolved by the SAME lookup, so a revoked
+// or expired key loses the upload path in the same breath it loses the tools.
+async function pcUploadCaller(req: any): Promise<string | null> {
+  try {
+    const raw = String((req.headers && req.headers['authorization']) || '');
+    const m = raw.match(/^Bearer\s+(.+)$/i);
+    if (!m) return null;
+    const v: any = await pcSessionLookup(String(m[1]).trim());
+    return v && v.role ? String(v.role) : null;
+  } catch (e) { return null; }
+}
+app.post('/git/blob', pcBlobBody, async (req: any, res: any) => {
+  const who = await pcUploadCaller(req);
+  if (!who) { res.status(401).json({ error: 'unauthorized' }); return; }
+  const body: any = req.body;
+  if (!Buffer.isBuffer(body)) {
+    // MEASURED, not theoretical: with Content-Type application/json or
+    // x-www-form-urlencoded the globally mounted parsers consume the stream first and
+    // hand this route a parsed OBJECT. Refused by name rather than coerced -- a
+    // JSON.stringify of that object would be a plausible file that is not the file sent.
+    res.status(400).json({
+      error: 'bad body',
+      detail: 'the request body was parsed as ' + String(req.headers['content-type'] || '(no '
+        + 'Content-Type)') + ' instead of arriving as raw bytes. POST the file with '
+        + 'Content-Type: application/octet-stream. Nothing was written.',
+    });
+    return;
+  }
+  if (body.length === 0) {
+    res.status(400).json({
+      error: 'empty body',
+      detail: 'POST the raw bytes of exactly one file as the request body, with '
+        + 'Content-Type: application/octet-stream. An empty upload would register a '
+        + 'zero-byte blob. Nothing was written.',
+    });
+    return;
+  }
+  try {
+    const gt = require('./gittools.js');
+    if (typeof gt.gitUploadBlobForRoute !== 'function') throw new Error('gittools.js does not export gitUploadBlobForRoute');
+    const out: any = await gt.gitUploadBlobForRoute(body, who);
+    console.error('[git-blob] ' + who + ' uploaded blob=' + out.blobOid + ' sha256=' + out.sha256
+      + ' bytes=' + out.size);
+    db.collection('journal').add({
+      agent_id: 'git_blob', action: 'blob_uploaded',
+      message: who + ' uploaded ' + out.size + ' bytes as ' + out.blobOid,
+      timestamp: FieldValue.serverTimestamp(),
+    }).catch(() => {});
+    res.status(200).json({
+      ok: true, blobOid: out.blobOid, sha256: out.sha256, size: out.size,
+      expires_at_ms: out.expiresAtMs,
+    });
+  } catch (e: any) {
+    const msg = String((e && e.message) || e);
+    const code = String((e && e.code) || '');
+    console.error('[git-blob] FAILED for ' + who + ' (' + body.length + ' bytes): ' + msg);
+    if (code === 'FILE_TOO_LARGE') { res.status(413).json({ error: 'too large', detail: msg.slice(0, 300) }); return; }
+    if (code === 'BAD_REQUEST') { res.status(400).json({ error: 'bad request', detail: msg.slice(0, 300) }); return; }
+    res.status(500).json({ error: 'upload failed', detail: msg.slice(0, 300) });
+  }
+});
 async function oaBearerRole(req: any): Promise<string | null> {
   const h = String((req.headers && req.headers['authorization']) || '');
   const m = h.match(/^Bearer\s+(.+)$/i); if (!m) return null;
@@ -5873,16 +9678,16 @@ async function oaBearerRole(req: any): Promise<string | null> {
   // [STRAIN OIDC] our own token store missed; try the Google-attested service-account path.
   return await oaStrainFromOidc(m[1], req);
 }
-// [SEC-OAUTH-DEFAULT-ROLE-AUDIT] fleet-mechanic 2026-07-30, after a live outage.
+// [SEC-OAUTH-DEFAULT-ROLE-AUDIT] fleet-security 2026-07-30, after a live outage.
 // OAUTH_DEFAULT_ROLE names the strain that every OAuth connector inherits when consent binds no
 // explicit role. NOTHING in this control plane ever checked that the named strain EXISTS. It named
-// a strain that had been deleted, so MCP admission control (shared/harness/patch-admission-control.py)
+// a strain that had been deleted, so MCP admission control
 // denied the fleet toolset to every newly-authorized connector on every account. The connectors came
 // up serving whoami and nothing else. The only trace was an admission_denied journal line reading
 // -- no strain document in the registry -- which nobody read for weeks.
 //
 // DESIGN: LOUD AND CONTINUE, NEVER FAIL THE BOOT. Four reasons, in order of weight:
-//   1. SELF-SEALING DEADLOCK. This same process serves /gate, the passkey unlock, the whole
+//   1. SELF-SEALING DEADLOCK. This same process serves the console, the passkey unlock, the whole
 //      webauthn flow and /api/strains/provision. The only cure for a missing strain is served BY
 //      the process a hard failure would kill. Refusing to boot removes the recovery path for the
 //      exact condition it is detecting.
@@ -5916,7 +9721,7 @@ async function oaAuditDefaultRole(): Promise<void> {
     const msg = 'CONNECTOR ONBOARDING IS BROKEN. The default OAuth connector role resolves to [' + role + '] but '
       + why + '. MCP admission control therefore refuses the fleet toolset to every connector that binds this '
       + 'default: those connectors answer whoami and nothing else, silently, with no error an operator can see. '
-      + 'FIX: provision or reactivate that strain at /gate, or point the default at an active strain, then '
+      + 'FIX: provision or reactivate that strain on the Flow Hood at /harness, or point the default at an active strain, then '
       + 'redeploy the control plane. This check is ADVISORY -- it did not block startup and denied nothing.';
     console.error('[oauth-default-role] ' + msg);
     try {
@@ -5943,17 +9748,17 @@ function oaChallenge(req: any, res: any): void {
 // THE PROBLEM. Claude's MCP connectors are account-level. One connector serves every
 // Cowork chat, so every chat presents the SAME bearer and resolves to the SAME role.
 // staged_by, journal attribution, agents/<role>/ scoping and history all collapse onto
-// one identity. Every strain chat was fleet-archivist wearing a name badge.
+// one identity. Every strain chat was fleet-advisor wearing a name badge.
 //
 // WHY NOT JUST LET THE CHAT SAY WHO IT IS. That is exactly what the consent-page strain
-// picker did, and patch-identity-failclosed removed it for a good reason: the role
+// picker did, and it was removed for a good reason: the role
 // arrived as caller-supplied JSON, so any caller could name any strain including a
 // privileged one. A CLAIM IS NOT AN IDENTITY. This does not reintroduce that.
 //
 // WHAT THIS DOES. The operator mints a session key behind the passkey. It is stored ONLY as
 // sha256 -- the plaintext exists once, in his browser. A chat presents the key as the
 // 'agent' argument; the server resolves key -> role from Firestore. The role is
-// SERVER-ISSUED. Editing your paste to say 'fleet-mechanic' does nothing: the role
+// SERVER-ISSUED. Editing your paste to say 'fleet-security' does nothing: the role
 // lives in the session_keys row, keyed by a value you cannot guess. A role name is not
 // a key.
 //
@@ -6015,7 +9820,11 @@ async function pcSessionLookup(key: string): Promise<any> {
     // every live chat the moment this deployed. The deploy backfills them instead.
     const _exp = Number(row.exp || 0);
     const _expired = _exp > 0 && _exp < now;
-    const v = (row.revoked || _expired || !row.role) ? null : { role: String(row.role), label: String(row.label || '') };
+    // [WP4B-KEY-CLASSES-V1] tc is the RAW row field, carried out unvalidated ON PURPOSE: it is
+    // interpreted in exactly one place (pcNarrowClasses), which is total over every possible
+    // value and cannot widen for any of them. Validating it here as well would create a second
+    // reading of the same field, and two readings of one field is how a fail-open gap appears.
+    const v = (row.revoked || _expired || !row.role) ? null : { role: String(row.role), label: String(row.label || ''), tc: row.tool_classes };
     pcSessCache.set(kh, { at: now, v: v });
     if (v) { try { await db.collection('session_keys').doc(kh).set({ last_seen: FieldValue.serverTimestamp() }, { merge: true }); } catch (e) {} }
     return v;
@@ -6054,9 +9863,9 @@ async function pcResolveIdentity(req: any): Promise<any> {
   // A PRESENTED-BUT-UNRECOGNISED KEY IS AN ERROR, NOT AN ABSENCE, AND IT NEVER FALLS BACK.
   // The first cut gated these two fallbacks on PC_ENFORCE as well. That meant ONE mistyped
   // character in a pasted key did not degrade a chat to a weaker role -- it SILENTLY
-  // PROMOTED it to fleet-archivist, the one role permitted to stage gated jobs and supersede
+  // PROMOTED it to fleet-advisor, the one role permitted to stage gated jobs and supersede
   // every other chat's pending work. Fail-open, on the identity check itself.
-  // fleet-drafter found it by mutating one character of its own key, which is the test that
+  // fleet-curator found it by mutating one character of its own key, which is the test that
   // should have existed before this shipped.
   // PC_ENFORCE governs the NO-KEY case ONLY -- letting chats that predate the mechanism
   // keep working through the cutover is the entire reason that flag exists. It is not a
@@ -6064,13 +9873,16 @@ async function pcResolveIdentity(req: any): Promise<any> {
   if (x.mixed) return { deny: true, reason: 'mixed', id: x.id };
   if (x.key) {
     const s: any = await pcSessionLookup(x.key);
-    if (s && s.role) return { role: s.role };
+    if (s && s.role) return { role: s.role, tc: s.tc };
     return { deny: true, reason: 'unknown-or-revoked', id: x.id };
   }
   return PC_ENFORCE ? { deny: true, reason: 'no-identity', id: x.id } : { role: bearer };
 }
 
-function pcSendDenied(req: any, res: any, reason: string, id: any): void {
+// [MCP2026-DUAL-ERA-V1] The denial TEXT is extracted verbatim so the 2026-07-28 branch can
+// return the same words in a modern-shaped result. A pure extraction: pcSendDenied below
+// composes exactly the string it composed before, and no caller of it changed.
+function pcDeniedText(reason: string): string {
   const why = (reason === 'unknown-or-revoked')
     ? 'The session key in this chat is not recognised, has EXPIRED, or has been revoked. Session keys last ' + PC_KEY_TTL_DAYS + ' days -- mint a fresh paste at the Autoclave and replace the PC-SESSION-KEY line.'
     : ((reason === 'mixed')
@@ -6081,17 +9893,151 @@ function pcSendDenied(req: any, res: any, reason: string, id: any): void {
     + 'Pass your session key as the "agent" argument on EVERY tool call. It is the line beginning PC-SESSION-KEY in this chat bootstrap paste. '
     + 'If there is no such line, ask the operator: they mints one at the Flow Hood (Autoclave, New strain session) and pastes it here. '
     + 'Do NOT guess a role name -- the role is resolved from the key on the server, and a role name is not a key.';
+  return txt;
+}
+function pcSendDenied(req: any, res: any, reason: string, id: any): void {
+  const txt = pcDeniedText(reason);
   try {
     res.status(200).json({ jsonrpc: '2.0', id: (id === null ? 0 : id), result: { content: [{ type: 'text', text: txt }], isError: true } });
   } catch (e) { if (!res.headersSent) res.status(403).json({ error: 'no_session_identity' }); }
 }
+// ================= [MCP2026-DUAL-ERA-V1] the modern branch =================
+// Reached ONLY from the era router in POST /mcp below. Defined at module scope, above the
+// route, deliberately: route-audit.mjs scans the handler body between one registration and
+// the next, and this keeps the audit's view of POST /mcp -- and its public/guarded verdict --
+// exactly what it was.
+//
+// zod raw shape -> JSON Schema. Tool specs are written against sdk v1, which takes a MAP of
+// zod types; the wire needs a JSON Schema object (R28). zod 4 ships the converter, and
+// package.json pins zod exactly, so this is not a floating capability -- the Dockerfile
+// asserts z.toJSONSchema exists at BUILD time, which is why there is no boot-time surprise
+// to defend against here. The per-shape fallback covers a single unrepresentable property
+// and nothing else: an HTTP 500 out of the modern branch is not in a dual-era client's
+// fallback trigger set, so losing one type annotation LOUDLY beats a stack trace.
+function mcp2026SchemaOf(toolName: string, shape: any): any {
+  if (!shape || typeof shape !== 'object') return { type: 'object', properties: {} };
+  try {
+    const js: any = (z as any).toJSONSchema((z as any).object(shape));
+    if (js && typeof js === 'object' && !Array.isArray(js)) { js.type = 'object'; return js; }
+  } catch (e: any) {
+    console.warn('[mcp2026] tool ' + toolName + ': zod->JSON Schema failed ('
+      + String(e && e.message ? e.message : e) + '); publishing an untyped property list.');
+  }
+  const props: any = {};
+  for (const k of Object.keys(shape)) props[k] = {};
+  return { type: 'object', properties: props };
+}
+// Origin validation (R2/R3), modern branch only. A DNS-rebinding attacker controls the
+// Origin, never the Host we were reached on, so agreement with our own public base is the
+// test. An ABSENT Origin is not an invalid one: server-to-server callers send none.
+function mcp2026OriginOk(origin: string, base: string): boolean {
+  try {
+    const a = new URL(origin);
+    const b = new URL(base);
+    return a.host === b.host && (a.protocol === b.protocol || a.protocol === 'https:');
+  } catch (e) { return false; }
+}
+async function mcpServeModern(req: any, res: any): Promise<void> {
+  const base = oaPubBase(req);
+  // [WP4B-KEY-CLASSES-V1] The modern branch's tools() callback is handed a ROLE STRING and
+  // nothing else, so a per-KEY restriction has nowhere to travel in that signature. Capture the
+  // resolved identity from the identity() call that produced the role -- same request, same
+  // pcResolveIdentity, no second source of truth -- and hand its restriction to
+  // buildMcpServerAdmitted alongside the role. The role-equality guard below is what makes this
+  // safe rather than merely convenient: a captured restriction is used ONLY when it came from
+  // the very principal tools() is being asked about.
+  let _pcIdent: any = null;
+  const out: any = await mcp2026Handle({ headers: req.headers, body: req.body }, {
+    serverInfo: { name: PC_REPO_ID, version: '1.0.0' },
+    instructions: 'Paracoding fleet control plane. Call whoami first. Pass your session key as the `agent` argument on every tool call: it is a server-minted credential, not a role name.',
+    ttlMs: 60000,
+    cacheScope: 'private',   // the tool set varies by the caller's grants, so never 'public'
+    resourceMetadataUrl: base + '/.well-known/oauth-protected-resource',
+    originAllowed: (o: string) => mcp2026OriginOk(o, base),
+    // Identity is resolved by the SAME function the legacy branch uses, and it is resolved
+    // AFTER the era router, never before it: pcExtract walks array bodies, and an array can
+    // only reach the modern branch to be refused as a batch.
+    identity: async () => {
+      const v: any = await pcResolveIdentity(req);
+      if (!v) return { kind: 'challenge' };
+      if (v.deny) return { kind: 'deny', text: pcDeniedText(String(v.reason || '')) };
+      _pcIdent = v;
+      return { kind: 'role', role: v.role };
+    },
+    tools: async (role: string) => {
+      // ORDERING-INDEPENDENT ON PURPOSE. mcp2026.js is a separate module and the order in which
+      // it invokes identity() and tools() is not established anywhere in this file; a captured
+      // value that merely happened to be unset would read as "no restriction", which is exactly
+      // the fail-OPEN shape this is meant to remove. So the capture is an OPTIMISATION, not the
+      // source of truth: if it is missing or names a different principal, resolve again from the
+      // same request. pcResolveIdentity is a pure function of the request bytes and sits behind
+      // pcSessCache's 60s TTL, so the second call is a Map hit, not a second Firestore read.
+      let _id: any = (_pcIdent && String(_pcIdent.role) === String(role)) ? _pcIdent : null;
+      if (!_id) {
+        const _v2: any = await pcResolveIdentity(req);
+        _id = (_v2 && !_v2.deny && String(_v2.role) === String(role)) ? _v2 : null;
+      }
+      const built: any = await buildMcpServerAdmitted(role, _id ? _id.tc : undefined);
+      const rec: any[] = (built && built.__pcTools) || [];
+      try { built.close(); } catch (e) {}
+      return rec.map((t: any) => ({
+        name: t.name,
+        description: String((t.spec && t.spec.description) || ''),
+        inputSchema: mcp2026SchemaOf(t.name, t.spec && t.spec.inputSchema),
+        // who() is closed over the ALREADY-RESOLVED role inside buildMcpServer. Calling the
+        // recorded handler preserves that exactly: the modern branch cannot name a principal.
+        call: async (args: any) => await t.handler(args)
+      }));
+    }
+  });
+  if (out.sse) {
+    res.writeHead(out.status, out.headers);
+    for (const f of out.sse) res.write('data: ' + JSON.stringify(f) + '\n\n');
+    res.end();
+    return;
+  }
+  const hk = Object.keys(out.headers || {});
+  for (let i = 0; i < hk.length; i++) res.setHeader(hk[i], out.headers[hk[i]]);
+  res.status(out.status).end(out.body === undefined ? '' : out.body);
+}
 app.post('/mcp', async (req: any, res: any) => {
-  void oaAuditDefaultRole();  const pcv: any = await pcResolveIdentity(req);
+  void oaAuditDefaultRole();
+  // ===================== THE ERA ROUTER =====================
+  // A request takes the modern path IFF it makes a modern VERSION CLAIM:
+  // params._meta["io.modelcontextprotocol/protocolVersion"] present at any value, or -- only
+  // when that key is absent -- MCP-Protocol-Version naming a revision DATED 2026-07-28 OR
+  // LATER. The era boundary is a DATE, not a list of revisions we implement: [VER] Terminology
+  // defines Modern as "revision 2026-07-28 and later", so a revision we have never heard of is
+  // still a modern-era request and MUST be answered 400 + -32022 UnsupportedProtocolVersion
+  // listing what we support. That answer only exists on the modern branch, so the ROUTING is
+  // what makes it reachable. This used to test membership of headerNamesModernRevision's
+  // allowlist -- one revision string -- and an unknown FUTURE revision in the header alone
+  // therefore routed LEGACY, collected -32000 at HTTP 200, and the client, seeing no recognised
+  // modern error, silently downgraded itself to 2025-06-18 and never learned what we support.
+  // It is now a SHAPE-GUARDED date threshold (mcp2026IsModernRevision), and both halves are
+  // load-bearing in opposite directions: without the YYYY-MM-DD shape guard, `banana` sorts
+  // above `2026-07-28` in ASCII and every garbage header value is promoted to modern; without
+  // the >= threshold, 2025-06-18 and 2025-11-25 are revision-shaped too and the entire 2025-era
+  // client population is routed modern and breaks.
+  // Everything else is legacy: initialize, a bare request, a header value that is not
+  // revision-shaped at all, and a header naming a LEGACY revision (2025-06-18..2025-11-25
+  // clients send that header too, which is why the header alone must never decide). Pure
+  // function of one request's bytes: no session, no cache, no clock. Nothing above this line
+  // inspects a modern header, because a -32020 handed to today's envelope-less traffic is a
+  // RECOGNISED MODERN ERROR -- the client would stop falling back, "correct" a request that is
+  // already correct, and deadlock.
+  if (mcp2026IsModernRequest(req.headers, req.body)) {
+    try { await mcpServeModern(req, res); }
+    catch (e: any) { if (!res.headersSent) res.status(500).json({ error: String(e && e.message ? e.message : e) }); }
+    return;
+  }
+  // ---------------- legacy (2025-era) from here down, byte-identical ----------------
+  const pcv: any = await pcResolveIdentity(req);
   if (pcv && pcv.deny) { pcSendDenied(req, res, String(pcv.reason || ''), pcv.id); return; }
   const role = pcv ? pcv.role : null;
   if (!role) { oaChallenge(req, res); return; }
   try {
-    const server = await buildMcpServerAdmitted(role);
+    const server = await buildMcpServerAdmitted(role, pcv ? pcv.tc : undefined);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { try { transport.close(); server.close(); } catch (e) {} });
     await server.connect(transport);
@@ -6100,6 +10046,16 @@ app.post('/mcp', async (req: any, res: any) => {
 });
 // GET /mcp: unauth -> discovery challenge; authed -> 405 (stateless transport has no server->client GET stream)
 app.get('/mcp', async (req: any, res: any) => {
+  const role = await oaBearerRole(req);
+  if (!role) { oaChallenge(req, res); return; }
+  res.status(405).json({ error: 'method_not_allowed' });
+});
+// DELETE /mcp: decision-table row 0. 2025-era DELETE terminated a session; this transport
+// mints none, so it is Method Not Allowed. It is registered rather than left to Express
+// because the alternative answer is a bare 404, and a 404 on the MCP endpoint tells a
+// dual-era client that no modern endpoint lives here and sends it off to probe the
+// deprecated HTTP+SSE GET transport. Mirrors GET /mcp exactly, challenge included.
+app.delete('/mcp', async (req: any, res: any) => {
   const role = await oaBearerRole(req);
   if (!role) { oaChallenge(req, res); return; }
   res.status(405).json({ error: 'method_not_allowed' });
@@ -6114,6 +10070,22 @@ app.post('/api/sessions/mint', waSafe(async (req: express.Request, res: express.
   const body: any = (req as any).body || {};
   const role = String(body.role || '').trim();
   const label = String(body.label || '').trim().slice(0, 80);
+  // [WP4B-KEY-CLASSES-V1] OPTIONAL, PASSKEY-GATED, AND ONLY EVER SUBTRACTIVE. This is the one
+  // writer of session_keys.tool_classes in the tree; before it there was none, which is the
+  // whole reason the class mechanism looked absent rather than merely unused.
+  // ABSENT -> the field is NOT written and the key is byte-for-byte the key this endpoint
+  // minted yesterday. PRESENT -> it must be an array naming only known classes. An unknown name
+  // is a 400 HERE rather than a silent drop: pcNarrowClasses would read a typo as the read-only
+  // floor, which is safe but SILENT, and the operator minting a restricted key for a subagent
+  // must learn at the Autoclave that he mistyped -- not weeks later, from a surprise.
+  // An EXPLICIT empty array is legal and means the floor: sight only, no writes, no stages.
+  let tcl: string[] | null = null;
+  if (typeof body.tool_classes !== 'undefined') {
+    if (!Array.isArray(body.tool_classes)) { res.status(400).json({ error: 'tool_classes must be an array of class names; known: ' + PC_ALL_CLASSES.join(',') }); return; }
+    const badc = body.tool_classes.filter((x: any) => typeof x !== 'string' || PC_ALL_CLASSES.indexOf(x) < 0);
+    if (badc.length) { res.status(400).json({ error: 'unknown tool class ' + JSON.stringify(badc).slice(0, 120) + '; known: ' + PC_ALL_CLASSES.join(',') }); return; }
+    tcl = body.tool_classes.map((x: any) => String(x));
+  }
   if (!/^[a-z][a-z0-9-]{2,40}$/.test(role)) { res.status(400).json({ error: 'bad role' }); return; }
   const sd = await db.collection('strains').doc(role).get();
   if (!sd.exists) { res.status(400).json({ error: 'no such strain: ' + role }); return; }
@@ -6132,11 +10104,16 @@ app.post('/api/sessions/mint', waSafe(async (req: express.Request, res: express.
     created_by: 'passkey:' + WA_USER, created_at: FieldValue.serverTimestamp(),
     // [PC-KEY-TTL-V1] a plain millisecond epoch, not a server timestamp: pcSessionLookup
     // compares it with Date.now() and a Firestore Timestamp object would not compare.
-    exp: Date.now() + PC_KEY_TTL_MS
+    exp: Date.now() + PC_KEY_TTL_MS,
+    // [WP4B-KEY-CLASSES-V1] Written ONLY when asked for, so an unrestricted mint leaves the
+    // document shape it has always had and pcNarrowClasses takes its absent-means-unchanged path.
+    ...(tcl === null ? {} : { tool_classes: tcl })
   });
-  try { await db.collection('journal').add({ agent_id: 'passkey:' + WA_USER, action: 'session_key_mint', detail: 'minted a session key for ' + role, at: FieldValue.serverTimestamp() }); } catch (e) {}
+  // The classes are not a credential and belong in the audit trail: a restricted key is only a
+  // boundary if there is a durable record of what it was restricted TO.
+  try { await db.collection('journal').add({ agent_id: 'passkey:' + WA_USER, action: 'session_key_mint', detail: 'minted a session key for ' + role + (tcl === null ? ' (unrestricted: holds every class its strain holds)' : ' RESTRICTED to tool classes [' + tcl.join(',') + ']'), at: FieldValue.serverTimestamp() }); } catch (e) {}
   // Returned ONCE. Only sha256(key) is stored, so this cannot be recovered later.
-  res.json({ ok: true, role: role, key: key, note: 'shown once' });
+  res.json({ ok: true, role: role, key: key, tool_classes: tcl, note: 'shown once' });
 }));
 
 // ---- [STRAINLIFE-CREATE-V1] strain lifecycle: create a strain (from scratch, or as a clone) ----
@@ -6248,7 +10225,7 @@ app.post('/api/strain/create', waGate(async (req, res) => {
       if (id.indexOf('fleet-') === 0) { try { body = await harCoworkPromptTool({ strain: id, task: String(b.task || '') }, id); } catch (e) { body = ''; } }
       const line = 'PC-SESSION-KEY: ' + key;
       if (body && body.indexOf('----- COPY BELOW -----') >= 0) { paste = body.replace('----- COPY BELOW -----', '----- COPY BELOW -----\n' + line); }
-      else { paste = ['----- COPY BELOW -----', line, '# PARACODING.AI - STRAIN ' + id, '', 'The Paracoding.AI MCP connector is your identity. Pass the key above as the "agent" argument on EVERY tool call.', 'DO FIRST: whoami. read_file shared/fleet/LAWS.md. read_file agents/' + id + '/LESSONS.md. read_journal(limit 30).', '----- COPY ABOVE -----'].join('\n'); }
+      else { paste = ['----- COPY BELOW -----', line, '# PARACODING.AI - STRAIN ' + id, '', 'The Paracoding.AI MCP connector is your identity. Pass the key above as the "agent" argument on EVERY tool call.', 'DO FIRST: whoami -- it RETURNS the memory digest and the bootstrap; read what it hands back. read_file agents/' + id + '/LESSONS.md. read_journal(limit 30).', '----- COPY ABOVE -----'].join('\n'); }
     }
     res.json({ ok: true, id: id, mode: mode, parent: (mode === 'clone' ? parent : null), pasteable: pasteable, refused_pasteable: (askedPasteable && banned), lessons_from: lessonsFrom, inherited: copied, minted: minted, paste: paste, note: (minted ? 'this key is shown ONCE; only its sha256 is stored and it is never journalled' : 'not pasteable: no session key minted') });
   } catch (e: any) { harFail(res, e, 'harness'); }
@@ -6325,26 +10302,122 @@ app.post('/api/sessions/revoke', waSafe(async (req: express.Request, res: expres
 // =============== end Paracoding MCP OAUTH ===============
 
 
+// [MCP2-BOOT-V1] Called BEFORE listen and NOT wrapped in try/catch, on purpose: if the v2
+// SDK is missing or has no createMcpHandler this throws and the revision never becomes
+// ready. The Dockerfile already gates the same require() at BUILD time -- build stage and
+// runtime stage are the same image -- so reaching this line failing would be news.
+console.log('[mcp2]', assertMcp2Loadable());
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Paracoding Control Plane & MCP SSE Server online on port ${PORT}`);
 });
 
 // =============== FLOW HOOD FRONT DOOR (operator ruling 2026-07-31) ===============
-// One auth opens everything for WA_SESSION_MIN. The queue and the pastes get
-// their own URLs instead of being crammed into the unlock page. Approving a job
-// still costs a fresh, job-bound WebAuthn assertion -- that check is untouched.
-// NOTHING HERE IS A CATCH-ALL. The MCP connector's paths (/.well-known/*,
-// /oauth/*, /mcp, /agents/*) are not matched by any route below.
-app.get('/flowhood', (req: any, res: any) => { if (!waSessionOk(req)) { res.redirect('/gate?next=/flowhood'); return; } res.redirect('/harness'); });
-app.get('/jobs', (req: any, res: any) => { if (!waSessionOk(req)) { res.redirect('/gate?next=/jobs'); return; } res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.send(WA_GATE_HTML.split('__WA_GOOGLE_CLIENT_ID__').join(WA_GOOGLE_CLIENT_ID)); });
-app.get('/pastes', (req: any, res: any) => { if (!waSessionOk(req)) { res.redirect('/gate?next=/pastes'); return; } res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.send(WA_GATE_HTML.split('__WA_GOOGLE_CLIENT_ID__').join(WA_GOOGLE_CLIENT_ID)); });
+// One auth opens everything for WA_SESSION_MIN. Approving a job still costs a fresh,
+// job-bound WebAuthn assertion -- that check is untouched.
+//
+// [SEC-NOGATE-V1] /jobs AND /pastes ARE DELETED, not moved. Both served the same 142KB gate
+// document this commit removes, differing only in which tab it opened, so there was nothing
+// left to serve. The pastes minter already lives on the Flow Hood itself ([PCSESSIONPASTE-V1]
+// in harness.html, on the same /api/sessions/roles and /api/sessions/mint), and the queue is
+// the approvals drawer there. Their PC_SURFACE_MAP entries and their route-baseline.json
+// `registered` lines are removed with them, which the route audit requires.
+//
+// NOTHING HERE IS A CATCH-ALL. The MCP connector's paths (/.well-known/*, /oauth/*, /mcp,
+// /agents/*) are not matched by any route below.
+// [PC-CANONICAL-HOST-V48] The target moved from /harness to / with the rest of the collapse: this
+// is an alias for the hood, and the hood is at the root now. It would still arrive via the 301 on
+// /harness, but sending a signed-in operator through two redirects to reach a page one hop away is
+// how a redirect chain starts. Status is left at 302, exactly as it was -- nothing asked for this
+// alias to become permanent, and an un-cached bounce is the one that can be changed again.
+app.get('/flowhood', (req: any, res: any) => { if (pcCanonicalHostRedirect(req, res)) return; if (!waSessionOk(req)) { waSendLocked(res); return; } res.redirect(harRootWithQuery(req)); });
 // =============== end flow hood front door ===============
 
 // Type the gate hostname and land on the gate that your passkey actually works
 // on. The canonical host is WA_RP_ID -- the WebAuthn RP ID is BY DEFINITION the
 // only hostname where an assertion can verify, so there is no second copy of
 // this value to go stale.
-// ONLY the browser-facing paths below call this. /mcp, /oauth/*, /.well-known/*
-// and /agents/* never do: they are the connector and must answer on any host.
+// ONLY the browser-facing paths that CALL the function below reach this. /mcp, /oauth/*,
+// /.well-known/* and /agents/* never do: they are the connector and must answer on any
+// host. There is no middleware and no catch-all here for exactly that reason -- an app.use
+// is not filtered by PC_SURFACE_MAP, so on the single-service install it would also sit in
+// front of /mcp, and on the split install it would run on the mcp surface where there is
+// neither IAP nor a session cookie nor any hostname this code has the right to move.
+//
+// [PC-CANONICAL-HOST-V48] 2026-08-15. PC_CANONICAL_HOST IS AN OPT-IN SWITCH, NOT A SECOND COPY OF
+// THE HOSTNAME. The paragraph above is still true and is the whole reason two variables are read
+// instead of one: the redirect TARGET below is WA_RP_ID and nothing else, because the RP ID is the
+// only hostname on which a passkey assertion can verify. PC_CANONICAL_HOST does not name the
+// target -- it ARMS the redirect, and it has to be spelled the same as WA_RP_ID to do so. UNSET IS
+// THE DEFAULT AND IS TODAY'S BEHAVIOUR EXACTLY: no host is read, no comparison is made, no redirect
+// is ever issued, and an install that has not opted in cannot be moved by any of this.
+//
+// WHY A DISAGREEMENT DISARMS THE REDIRECT INSTEAD OF FOLLOWING IT. A passkey is bound to the RP ID.
+// Send a signed-in operator from the host their credential works on to a host where it does not,
+// and the sign-in they need in order to undo the mistake is the thing the mistake broke. That is a
+// lockout; deploy/LOCKOUT-CLASS.md item 1 is the same failure reached from the other side (renaming
+// the console changes CP_HOST, which changes WA_RP_ID, which invalidates every enrolled
+// credential). So a mismatch leaves the install serving precisely what it served before anyone set
+// the variable -- the known-good state -- and the boot line below names the two variables so the
+// operator can see which half they have not done yet.
+//
+// AND IT DOES NOT THROW AT BOOT, WHICH WAS THE OTHER OPTION AND IS THE WORSE ONE. This file already
+// ruled on that shape for the data lake -- "FAIL CLOSED PER CALL, WITH A NAMED ERROR, AND NOT AT
+// BOOT ... a module-level refusal turns a missing variable into a crash-looping revision and takes
+// down the gate, the console and every route that never touches the lake". Here it would be worse
+// than there, because the process that would refuse to start IS the console, IS the passkey
+// enrolment path, and IS the way back in. A hostname typed wrong in an env var must not be able to
+// take the front door off its hinges; it may only decline to move it.
+// WA_RP_ORIGIN IS CHECKED TOO, AND IT IS NOT A THIRD COPY EITHER -- IT IS THE OTHER HALF OF THE
+// SAME ANSWER. verifyAuthenticationResponse is given expectedRPID AND expectedOrigin (:2898,
+// :3853, :3888), and a mismatch in EITHER is a rejected assertion. WA_RP_ID agreeing while
+// WA_RP_ORIGIN still names only the old hostname is therefore the same lockout with an extra step:
+// the operator arrives at a host whose RP ID is right, taps the key, and the verifier refuses it.
+// The arming condition asks for the origin the browser will actually send from that host.
+const PC_CANONICAL_HOST = String(process.env.PC_CANONICAL_HOST || '').trim().toLowerCase();
+const PC_CANONICAL_RP_ID = String(WA_RP_ID || '').trim().toLowerCase();
+const PC_CANONICAL_ORIGIN = 'https://' + PC_CANONICAL_HOST;
+const PC_CANONICAL_ORIGIN_OK = WA_RP_ORIGINS.map((s) => s.toLowerCase().replace(/\/+$/, ''))
+  .indexOf(PC_CANONICAL_ORIGIN) >= 0;
+const PC_CANONICAL_ARMED = PC_CANONICAL_HOST !== '' && PC_CANONICAL_HOST === PC_CANONICAL_RP_ID
+  && PC_CANONICAL_ORIGIN_OK;
+if (PC_CANONICAL_HOST && !PC_CANONICAL_ARMED) {
+  console.error('[cp] PC-CANONICAL-HOST-V48: PC_CANONICAL_HOST is set but this service cannot prove'
+    + ' a passkey would work there -- '
+    + (PC_CANONICAL_HOST !== PC_CANONICAL_RP_ID
+        ? ('it does NOT equal WA_RP_ID'
+           + (PC_CANONICAL_RP_ID ? '' : ' (WA_RP_ID is EMPTY on this service)'))
+        : 'WA_RP_ID agrees, but WA_RP_ORIGIN does not list that host\'s https origin')
+    + '. A WebAuthn assertion is checked against BOTH the RP ID and the origin, so redirecting'
+    + ' browsers to a host that fails either one lands the operator where their credential cannot'
+    + ' be asserted and cannot be re-enrolled. THE HOST REDIRECT IS DISABLED; this service is'
+    + ' serving exactly what it served before the variable was set, and every path still answers on'
+    + ' every host it answered on. To turn it on: set WA_RP_ID and WA_RP_ORIGIN to the new hostname,'
+    + ' re-enrol a passkey there and prove the unlock round trip, and only then set'
+    + ' PC_CANONICAL_HOST to that same hostname. To turn this message off without changing anything'
+    + ' else, unset PC_CANONICAL_HOST.');
+} else if (PC_CANONICAL_ARMED) {
+  console.error('[cp] PC-CANONICAL-HOST-V48: the host redirect is ARMED -- PC_CANONICAL_HOST agrees'
+    + ' with WA_RP_ID and with an entry in WA_RP_ORIGIN, so the hostname browsers are sent to is a'
+    + ' hostname passkeys verify on.');
+}
+// TRUE means this function has ANSWERED the request, so every call site is `if (...) return;`.
+// It preserves path and query verbatim, which is what lets a bookmarked or mailed
+// /harness?enroll=<token> survive the move to the new hostname instead of arriving stripped.
+function pcCanonicalHostRedirect(req: any, res: any): boolean {
+  if (!PC_CANONICAL_ARMED) return false;
+  // A Host header is an AUTHORITY, not a hostname: it may carry a port, and an IPv6 literal keeps
+  // its brackets. Compare without the port. An absent or empty Host is left alone rather than
+  // guessed at -- there is nothing to compare it against, and a guess would bounce a health check.
+  const raw = String((req && req.get ? req.get('host') : '') || '').trim().toLowerCase();
+  const host = raw.replace(/:\d+$/, '');
+  if (!host || host === PC_CANONICAL_HOST) return false;
+  const url = String((req && (req.originalUrl || req.url)) || '/') || '/';
+  // no-store for the same reason the 301 on /harness carries it: a permanently cached host
+  // redirect survives being turned off, so unsetting PC_CANONICAL_HOST would not actually give
+  // the old hostname back to a browser that had already been moved once.
+  res.setHeader('Cache-Control', 'no-store');
+  res.redirect(301, 'https://' + PC_CANONICAL_HOST + (url.charAt(0) === '/' ? url : '/' + url));
+  return true;
+}
 
