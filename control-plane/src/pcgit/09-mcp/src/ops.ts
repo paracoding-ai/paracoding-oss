@@ -9,6 +9,8 @@
  * Firestore ref documents first (see ref-gate.ts for why).
  */
 
+import { createHash } from 'crypto';
+
 import * as git from 'isomorphic-git';
 
 import { pushRef } from '../../07-refs/src/push';
@@ -54,11 +56,27 @@ async function resolveCommit(
       // A ref pointing at an object that is not in the store. 07-refs §4.2
       // Case B, which the push ordering is designed to make unreachable. If we
       // ever see it, say so precisely rather than reporting "no such path".
+      //
+      // [PCGIT-UNARMED-MSG-V1] AND THE COMMONEST CAUSE IS NOT CORRUPTION. This
+      // message used to name repository repair and point at 07-refs repair.ts
+      // verifyRepo. On a container whose git-object VAULT REGISTRY has not been
+      // armed yet -- index.ts logs '[gittools] git-object vault registry NOT armed
+      // at boot', and it re-arms on the first MCP connection -- a freshly promoted
+      // revision reads a PERFECTLY INTACT object and cannot decrypt it, which
+      // surfaces here as NotFound. Sending the reader to a repair tool for that is
+      // worse than saying nothing: repair is destructive, the store is fine, and
+      // the condition clears itself on the next call. Name the real cause first.
       throw new ToolError(
         'OBJECT_NOT_FOUND',
         `ref ${resolved.refName ?? ref} points at ${resolved.oid}, which is not readable ` +
-          `in the object store. The repository needs repair (07-refs repair.ts verifyRepo).`,
-        { ref, refName: resolved.refName, oid: resolved.oid },
+          `in the object store. THIS IS ALMOST CERTAINLY NOT REPOSITORY CORRUPTION. On a ` +
+          `freshly promoted revision it means the git-object VAULT REGISTRY IS NOT ARMED ` +
+          `YET, so an intact object cannot be decrypted; the registry arms on an MCP ` +
+          `connection. FIX: make any other ordinary MCP call (whoami will do), then retry ` +
+          `this one. DO NOT attempt a repair -- do not run 07-refs repair.ts verifyRepo -- ` +
+          `unless the retry fails the same way after the registry is confirmed armed ` +
+          `(the service log line is '[gittools] git-object vault registry armed for epoch(s)').`,
+        { ref, refName: resolved.refName, oid: resolved.oid, likely_cause: 'vault_registry_not_armed' },
       );
     }
     throw err;
@@ -602,11 +620,276 @@ async function resolveDeleteTarget(
   return { oid: entry.oid, mode: entry.mode };
 }
 
-/** One entry of a proposal after its bytes have been named, any of three ways. */
+// ---------------------------------------------------------------------------
+// 5c. upload-the-bytes-over-HTTP, then NAME YOUR OWN UPLOAD  [SEC-PROPOSE-UPLOAD-V1]
+// ---------------------------------------------------------------------------
+
+/**
+ * The TTL on an upload record. An hour is long enough for a caller to POST a
+ * tree's worth of files and then propose them, and short enough that a record
+ * is not a standing capability sitting in Firestore for a week.
+ */
+const UPLOAD_TTL_MS = 3600_000;
+
+/**
+ * The upload record's document id, and the ONLY place it is spelled, so the
+ * writer and the resolver cannot drift into addressing two different documents.
+ *
+ * The agent name is checked rather than trusted: a `/` in it would turn one
+ * document path into a collection path -- Firestore would throw an internal
+ * error, and a name that merely SHIFTED the segments would address a document
+ * belonging to nobody. An identity this API cannot spell is a refusal.
+ */
+function assertUploadAgent(agent: string): void {
+  if (agent.indexOf('/') >= 0 || agent.indexOf('\0') >= 0) {
+    throw badRequest(
+      `agent ${JSON.stringify(agent)} cannot own an upload: an agent name may not contain a ` +
+        `slash, because the upload record is addressed by it and a slash would name a ` +
+        `different document than the one being checked. NOTHING was written.`,
+      { agent },
+    );
+  }
+}
+
+function uploadDocId(blobOid: string, agent: string): string {
+  assertUploadAgent(agent);
+  return `${blobOid}.${agent}`;
+}
+
+/**
+ * Take raw bytes off an HTTP request, write them as a git blob, and record that
+ * THIS agent is the one who supplied them.
+ *
+ * WHY THIS EXISTS: `content` is bytes a language model retyped. For a 600KB
+ * source file that is hundreds of thousands of generated tokens where a single
+ * dropped space is a broken file, and it is the largest single cost in this
+ * project. `copy_from` already removes that cost for bytes ALREADY in the
+ * repository; this removes it for bytes that are not, by letting a machine PUT
+ * them over HTTP where no model ever sees them.
+ *
+ * THE RECORD IS NOT BOOKKEEPING, IT IS THE AUTHORISATION. `resolveUploadSource`
+ * refuses anything it cannot find here, so this write is the whole reason an
+ * `uploaded` entry may name an oid at all. Read the doc comment on
+ * `ProposeUploaded` for the argument.
+ *
+ * THE DOC ID IS COMPOSITE, `${blobOid}.${agent}`, AND THAT IS LOAD-BEARING. Two
+ * agents uploading identical bytes produce the SAME oid; one shared document
+ * would then mean agent A's upload authorises agent B's `uploaded` entry, which
+ * is exactly the "an oid is a lookup key" hole this design refuses. Keying by
+ * both makes a record a statement about ONE agent and nothing else.
+ */
+export async function gitUploadBlob(
+  ctx: ServerContext,
+  bytes: Buffer,
+  agent: string,
+): Promise<{ blobOid: string; sha256: string; size: number; expiresAtMs: number }> {
+  if (typeof agent !== 'string' || agent.trim() === '') {
+    throw badRequest(
+      'an upload needs a resolved agent identity and none was supplied. The upload record ' +
+        'is the only thing that later authorises files[].uploaded, so a record written ' +
+        'without an owner would be one no agent could claim -- or one every agent could. ' +
+        'NOTHING was written.',
+    );
+  }
+  // Checked BEFORE the blob is written, so an unspellable identity costs nothing.
+  assertUploadAgent(agent);
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+    throw badRequest(
+      'the request body was empty. An upload must carry the raw bytes of exactly one file; ' +
+        'an empty body would register a zero-byte blob that a later proposal would write ' +
+        'over a real file. NOTHING was written.',
+      { size: Buffer.isBuffer(bytes) ? bytes.length : 0 },
+    );
+  }
+  if (bytes.length > ctx.cfg.maxBlobBytes) {
+    throw new ToolError(
+      'FILE_TOO_LARGE',
+      `upload is ${bytes.length} bytes, over the ${ctx.cfg.maxBlobBytes}-byte limit. ` +
+        `NOTHING was written.`,
+      { bytes: bytes.length, limit: ctx.cfg.maxBlobBytes },
+    );
+  }
+
+  // The SAME writeBlob the `content` arm performs, so an uploaded file and a
+  // typed one produce byte-identical objects and the same oid. There is no
+  // second write path into the object store.
+  const blobOid = await git.writeBlob({
+    fs: fsClient(deps(ctx)),
+    gitdir: ctx.gitdir,
+    blob: bytes,
+  });
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const nowMs = Date.now();
+  const expiresAtMs = nowMs + UPLOAD_TTL_MS;
+
+  // Written AFTER the blob and AWAITED. If this write fails the caller gets an
+  // error and no usable record, which is the safe direction: an unreferenced
+  // blob is 07-refs §4.2 Case A -- invisible and reclaimable -- while a record
+  // pointing at bytes that were never stored would resolve and then build a
+  // tree around an object that is not there.
+  await ctx.firestore
+    .collection('git_uploads')
+    .doc(uploadDocId(blobOid, agent))
+    .set({
+      agent,
+      blob_oid: blobOid,
+      sha256,
+      size: bytes.length,
+      created_ms: nowMs,
+      exp_ms: expiresAtMs,
+    });
+
+  return { blobOid, sha256, size: bytes.length, expiresAtMs };
+}
+
+/**
+ * Name bytes THE CALLER THEMSELVES just uploaded as the source of a proposed
+ * file, instead of retyping them into `content`.
+ *
+ * WHY THIS DOES NOT BREAK THE BARE-OID RULE ABOVE, AND THIS IS THE WHOLE
+ * AUTHORISATION ARGUMENT. `copy_from`'s comment says an oid is NEVER a lookup
+ * key, because handing an oid to the object store would let a caller mount ANY
+ * object into a visible tree -- including another writer's abandoned proposal,
+ * which is unreachable from every ref precisely so that it stays invisible.
+ * That rule is unchanged here, because `blob_oid` is STILL not a lookup key.
+ * It is a lookup key into the UPLOAD RECORD, `git_uploads/{blob_oid}.{agent}`,
+ * and the record only exists because this same agent POSTed those exact bytes
+ * to /git/blob minutes ago. So an `uploaded` entry reaches exactly one thing:
+ * bytes the caller already had in their hand. It grants no read reach at all --
+ * the caller cannot learn anything about an object they did not supply -- and
+ * the write reach is identical to having typed the same bytes into `content`.
+ *
+ * THE RECORD IS THEREFORE LOAD-BEARING AND ITS ABSENCE IS ALWAYS A REFUSAL. If
+ * a record does not exist, is expired, or belongs to a DIFFERENT agent, then
+ * the sentence "these are bytes you supplied" is not true, and resolving anyway
+ * would degrade this into the bare-oid form: agent B naming agent A's blob, or
+ * naming any oid at all and discovering by the response whether it exists. So
+ * every one of those cases REFUSES and NOTHING is written. There is no fallback
+ * to the object store, and there must never be one.
+ *
+ * WHAT THIS DOES NOT WIDEN: the destination. An uploaded file goes through the
+ * same `buildTree` onto the same branch as a `content` file, so every path
+ * rule, every structural refusal and the branch-name check apply unchanged.
+ */
+export interface ProposeUploaded {
+  /** The blobOid returned by the /git/blob upload this same agent performed. */
+  blob_oid: string;
+  /** OPTIONAL assertion. Refuse unless the recorded sha256 equals this. */
+  sha256?: string | null;
+}
+
+async function resolveUploadSource(
+  ctx: ServerContext,
+  destPath: string,
+  src: ProposeUploaded,
+  uploader: string,
+): Promise<{ oid: string; sha256: string; size: number }> {
+  if (src === null || typeof src !== 'object' || Array.isArray(src)) {
+    throw badRequest(`files[${destPath}].uploaded must be an object { blob_oid }`, {
+      path: destPath,
+    });
+  }
+  if (typeof uploader !== 'string' || uploader.trim() === '') {
+    // No identity means no record can be addressed, and there is deliberately no
+    // "any agent's upload will do" branch: that IS the bare-oid form.
+    throw badRequest(
+      `files[${destPath}].uploaded needs a resolved agent identity, and this call carries ` +
+        `none. An upload is authorised by being YOURS, so a proposal that cannot say who it ` +
+        `is cannot claim one. The call was REFUSED rather than run unattributed, and ` +
+        `NOTHING was written.`,
+      { path: destPath },
+    );
+  }
+  if (typeof src.blob_oid !== 'string' || !isOid(src.blob_oid)) {
+    throw badRequest(`files[${destPath}].uploaded.blob_oid must be a 40-char lowercase hex oid`, {
+      path: destPath,
+      blob_oid: src.blob_oid,
+    });
+  }
+
+  const snap = await ctx.firestore
+    .collection('git_uploads')
+    .doc(uploadDocId(src.blob_oid, uploader))
+    .get();
+  if (!snap.exists) {
+    // ONE refusal for three real causes, and it names all three, because the
+    // server must not tell the caller WHICH: "uploaded by someone else" versus
+    // "never uploaded" is exactly the existence oracle that naming a bare oid
+    // would have bought.
+    throw badRequest(
+      `files[${destPath}].uploaded names ${src.blob_oid}, which is not an upload this agent ` +
+        `can claim. Either those bytes were never POSTed to /git/blob, or they were ` +
+        `uploaded by a DIFFERENT agent, or the upload has expired (uploads live ` +
+        `${UPLOAD_TTL_MS / 60000} minutes). An oid is never a lookup key here -- an upload ` +
+        `is resolved only against a record of YOUR OWN upload. Re-POST the bytes to ` +
+        `/git/blob and use the blobOid it returns. NOTHING was written.`,
+      { path: destPath, blob_oid: src.blob_oid },
+    );
+  }
+  const rec = (snap.data() || {}) as {
+    agent?: unknown;
+    sha256?: unknown;
+    size?: unknown;
+    exp_ms?: unknown;
+  };
+  const expMs = Number(rec.exp_ms ?? 0);
+  if (!(expMs > 0) || Date.now() > expMs) {
+    throw badRequest(
+      `files[${destPath}].uploaded names ${src.blob_oid}, whose upload EXPIRED at ` +
+        `${expMs > 0 ? new Date(expMs).toISOString() : '(no expiry recorded)'}. Uploads live ` +
+        `${UPLOAD_TTL_MS / 60000} minutes; re-POST the bytes to /git/blob and use the ` +
+        `blobOid it returns. NOTHING was written.`,
+      { path: destPath, blob_oid: src.blob_oid, exp_ms: expMs, now_ms: Date.now() },
+    );
+  }
+
+  const recordedSha = typeof rec.sha256 === 'string' ? rec.sha256 : '';
+  if (src.sha256 !== undefined && src.sha256 !== null) {
+    if (src.sha256 !== recordedSha) {
+      throw badRequest(
+        `files[${destPath}].uploaded.sha256 says ${src.sha256}, but the upload recorded for ` +
+          `${src.blob_oid} is ${recordedSha || '(none recorded)'}. NOTHING was written. ` +
+          `Either you are naming a different upload than you think, or the bytes that ` +
+          `arrived are not the bytes you sent.`,
+        {
+          path: destPath,
+          blob_oid: src.blob_oid,
+          expected: src.sha256,
+          actual: recordedSha || null,
+        },
+      );
+    }
+  }
+
+  // THE RECORD IS NOT PROOF THE BLOB IS STILL THERE. Firestore and the object
+  // store are two systems, and repair.ts reclaims unreferenced loose objects
+  // after a grace period -- so a record can outlive its bytes. Building a tree
+  // around a missing object would produce a commit that pushes and then fails
+  // to read, which is the one failure this package refuses to ship. Checked
+  // without materialising the blob: an upload may be tens of megabytes and its
+  // presence is the only question being asked.
+  const present =
+    (await ctx.objects.hasLoose(src.blob_oid)) ||
+    (await ctx.objects.packContaining(src.blob_oid)) !== null;
+  if (!present) {
+    throw new ToolError(
+      'OBJECT_NOT_FOUND',
+      `files[${destPath}].uploaded names ${src.blob_oid}, which this agent did upload, but ` +
+        `that object is no longer readable in the object store. Re-POST the bytes to ` +
+        `/git/blob and use the blobOid it returns. NOTHING was written.`,
+      { path: destPath, blob_oid: src.blob_oid },
+    );
+  }
+
+  return { oid: src.blob_oid, sha256: recordedSha, size: Number(rec.size ?? 0) };
+}
+
+/** One entry of a proposal after its bytes have been named, any of four ways. */
 type NormalizedFile =
-  | { path: string; content: string; copyFrom: null; remove: false }
-  | { path: string; content: null; copyFrom: ProposeCopyFrom; remove: false }
-  | { path: string; content: null; copyFrom: null; remove: true };
+  | { path: string; content: string; copyFrom: null; uploaded: null; remove: false }
+  | { path: string; content: null; copyFrom: ProposeCopyFrom; uploaded: null; remove: false }
+  | { path: string; content: null; copyFrom: null; uploaded: ProposeUploaded; remove: false }
+  | { path: string; content: null; copyFrom: null; uploaded: null; remove: true };
 
 /** One resolved entry of a proposal, as reported back to the caller. */
 interface ProposedFile {
@@ -618,15 +901,23 @@ interface ProposedFile {
    */
   blobOid: string | null;
   /**
-   * Byte length for a `content` entry. `null` for a copy: the source blob is
-   * deliberately never materialised, so the server does not know its size and
-   * will not guess one. `blobOid` is what the caller verifies against, and it
-   * is present for both forms that write. `null` for a removal.
+   * Byte length for a `content` entry, and for an `upload`, whose size the
+   * upload record measured when the bytes arrived. `null` for a copy: the
+   * source blob is deliberately never materialised, so the server does not know
+   * its size and will not guess one. `blobOid` is what the caller verifies
+   * against, and it is present for every form that writes. `null` for a
+   * removal.
    */
   size: number | null;
   source:
     | { kind: 'content' }
     | { kind: 'copy'; path: string; ref: string; refName: string | null; commit: string }
+    /**
+     * `sha256` is the digest recorded when the bytes were uploaded, so a caller
+     * can check the file it PUT is the file that landed in the tree without
+     * reading anything back.
+     */
+    | { kind: 'upload'; sha256: string }
     /**
      * `removedBlobOid` is what the caller verifies a removal against, the way
      * `blobOid` verifies a write: it is the oid the path actually held in the
@@ -662,18 +953,26 @@ export async function gitPropose(
       path: string;
       content?: string | null;
       copy_from?: ProposeCopyFrom | null;
+      uploaded?: ProposeUploaded | null;
       delete?: boolean | null;
     }>;
     message: string;
     author?: { name: string; email: string };
+    /**
+     * The agent this call is attributed to, resolved by the transport and NEVER
+     * taken from the tool arguments a model wrote. It is the only thing that
+     * can claim an upload, so a spoofable value here would hand one agent's
+     * uploads to another.
+     */
+    uploader?: string;
   },
 ) {
   const refName = assertBranchName(args.branch);
 
   if (!Array.isArray(args.files) || args.files.length === 0) {
     throw badRequest(
-      'files must be a non-empty array of { path, content }, { path, copy_from } or ' +
-        '{ path, delete: true }',
+      'files must be a non-empty array of { path, content }, { path, copy_from }, ' +
+        '{ path, uploaded } or { path, delete: true }',
     );
   }
   if (args.files.length > ctx.cfg.maxProposeFiles) {
@@ -696,6 +995,7 @@ export async function gitPropose(
     seen.add(path);
     const hasContent = file.content !== undefined && file.content !== null;
     const hasCopy = file.copy_from !== undefined && file.copy_from !== null;
+    const hasUploaded = file.uploaded !== undefined && file.uploaded !== null;
 
     // `delete` is boolean-or-absent. There is deliberately no `delete: false`
     // form: it names no operation, and reading it as "leave this file alone"
@@ -717,33 +1017,62 @@ export async function gitPropose(
     }
     const hasDelete = del === true;
 
-    const chosen = (hasContent ? 1 : 0) + (hasCopy ? 1 : 0) + (hasDelete ? 1 : 0);
+    const chosen =
+      (hasContent ? 1 : 0) + (hasCopy ? 1 : 0) + (hasUploaded ? 1 : 0) + (hasDelete ? 1 : 0);
     if (chosen > 1) {
       throw badRequest(
-        `files[${path}] sets ${chosen} of content, copy_from and delete. EXACTLY ONE is ` +
-          `required: content sends the bytes, copy_from names an existing blob to reuse, ` +
-          `delete:true removes the path.`,
-        { path, content: hasContent, copy_from: hasCopy, delete: hasDelete },
+        `files[${path}] sets ${chosen} of content, copy_from, uploaded and delete. EXACTLY ` +
+          `ONE is required: content sends the bytes, copy_from names an existing blob to ` +
+          `reuse, uploaded names bytes you already POSTed to /git/blob, delete:true removes ` +
+          `the path.`,
+        {
+          path,
+          content: hasContent,
+          copy_from: hasCopy,
+          uploaded: hasUploaded,
+          delete: hasDelete,
+        },
       );
     }
     if (chosen === 0) {
       throw badRequest(
-        `files[${path}] sets none of content, copy_from and delete. Exactly one is ` +
+        `files[${path}] sets none of content, copy_from, uploaded and delete. Exactly one is ` +
           `required; an entry with none would write an empty file.`,
-        { path, content: false, copy_from: false, delete: false },
+        { path, content: false, copy_from: false, uploaded: false, delete: false },
       );
     }
     if (hasContent && typeof file.content !== 'string') {
       throw badRequest(`files[${path}].content must be a string`, { path });
     }
-    if (hasDelete) return { path, content: null, copyFrom: null, remove: true };
+    if (hasDelete) return { path, content: null, copyFrom: null, uploaded: null, remove: true };
+    if (hasUploaded) {
+      return {
+        path,
+        content: null,
+        copyFrom: null,
+        uploaded: file.uploaded as ProposeUploaded,
+        remove: false,
+      };
+    }
     return hasContent
-      ? { path, content: file.content as string, copyFrom: null, remove: false }
-      : { path, content: null, copyFrom: file.copy_from as ProposeCopyFrom, remove: false };
+      ? { path, content: file.content as string, copyFrom: null, uploaded: null, remove: false }
+      : {
+          path,
+          content: null,
+          copyFrom: file.copy_from as ProposeCopyFrom,
+          uploaded: null,
+          remove: false,
+        };
   });
 
   // Only bytes that actually CROSSED THE WIRE count against the cap. A copy
-  // sends none, which is the entire point of it.
+  // sends none, which is the entire point of it. NEITHER DOES AN UPLOAD, and
+  // for the same reason read the other way: its bytes went over HTTP straight
+  // into the object store before this call existed, so they never passed
+  // through the tool transport and counting them here would cap the exact case
+  // this feature exists to make cheap -- landing a file far larger than any
+  // model should ever retype. The size the upload is allowed to be was already
+  // decided at /git/blob, against cfg.maxBlobBytes.
   const totalBytes = normalized.reduce(
     (n, f) => n + (f.content === null ? 0 : Buffer.byteLength(f.content, 'utf8')),
     0,
@@ -816,6 +1145,25 @@ export async function gitPropose(
       });
       continue;
     }
+    if (file.uploaded !== null) {
+      // NO writeBlob HERE EITHER: the blob was written by /git/blob when the
+      // bytes arrived, and this resolves the caller's own upload record to it.
+      // A record that is absent, expired, or another agent's REFUSES inside
+      // resolveUploadSource and this loop never reaches the tree build.
+      const src = await resolveUploadSource(
+        ctx,
+        file.path,
+        file.uploaded,
+        String(args.uploader ?? ''),
+      );
+      written.push({
+        path: file.path,
+        blobOid: src.oid,
+        size: src.size,
+        source: { kind: 'upload', sha256: src.sha256 },
+      });
+      continue;
+    }
     const blob = Buffer.from(file.content, 'utf8');
     const blobOid = await git.writeBlob({
       fs: fsClient(deps(ctx)),
@@ -868,6 +1216,11 @@ export async function gitPropose(
     /** How many entries reused an existing blob instead of sending bytes. */
     copied: written.filter((w) => w.source.kind === 'copy').length,
     /**
+     * How many entries named bytes this agent had already POSTed to /git/blob.
+     * Each one's recorded sha256 is in `files` above, as `source.sha256`.
+     */
+    uploaded: written.filter((w) => w.source.kind === 'upload').length,
+    /**
      * How many entries REMOVED a path. The paths themselves, and the blob oid
      * each one held when it was removed, are in `files` above -- every removal
      * is an entry whose `source.kind` is `delete`.
@@ -875,8 +1228,18 @@ export async function gitPropose(
     deleted: written.filter((w) => w.source.kind === 'delete').length,
     /** Every path this commit removes, so a caller can verify at a glance. */
     deletedPaths: written.filter((w) => w.source.kind === 'delete').map((w) => w.path),
-    /** Bytes that actually crossed the wire. A copy contributes zero. */
+    /** Bytes that actually crossed the wire. A copy or an upload contributes zero. */
     bytesSent: totalBytes,
+    /**
+     * Bytes that arrived over /git/blob and were written into the tree WITHOUT
+     * crossing this tool's wire. Counted separately from bytesSent on purpose:
+     * adding them together would hide the one number this feature exists to
+     * drive to zero.
+     */
+    bytesUploaded: written.reduce(
+      (n, w) => n + (w.source.kind === 'upload' ? (w.size ?? 0) : 0),
+      0,
+    ),
     refMoved: false,
     next:
       `Nothing is visible yet: the branch still points at ${baseOid ?? '(nothing)'}. ` +
