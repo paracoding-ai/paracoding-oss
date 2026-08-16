@@ -90,8 +90,28 @@ already in flight.
 
 ## Security issues
 
-**Do not open a public issue for a vulnerability.** See `SECURITY.md` for how to
-report privately. We would much rather hear it from you first.
+**There is no private disclosure channel yet, and this file is not going to pretend
+there is one.** `SECURITY.md` says "open an issue" and names no address, no form and
+no private route; nothing else in this repository names one either.
+
+An earlier version of this section told you to see `SECURITY.md` for how to report
+*privately*. That promised a mechanism that does not exist. It is recorded here
+rather than quietly deleted, because the failure it caused is the expensive kind: a
+researcher follows the pointer, finds nothing, and then either drops the report or
+discloses in public -- and we would never learn that either happened.
+
+Until it is fixed, and in this order:
+
+1. **If it is exploitable against a running installation, do not put the details in
+   a public issue.** Open an issue saying only that you have found a security
+   problem and how we can reach you privately. We will come to you, and you keep
+   control of what gets published and when.
+2. **If it is a documentation defect** -- a control described more strongly than it
+   is implemented -- open a normal public issue with the full detail. `SECURITY.md`
+   asks for exactly those reports and they are not made worse by being public.
+
+Closing this is on the maintainers, not on you. When `SECURITY.md` names a real
+private channel, this section collapses back to one sentence pointing at it.
 
 ## What we care about in review
 

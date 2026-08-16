@@ -46,12 +46,12 @@ rather than through it.
 
 ## 2. What the installer creates, and what it grants
 
-`./install.sh YOUR_PROJECT_ID` creates this, and nothing outside the project you name. The
+`bash install.sh YOUR_PROJECT_ID` creates this, and nothing outside the project you name. The
 last row is the only one it asks you about.
 
 | Resource | Identity | Standing authority |
 |---|---|---|
-| Cloud Run `paracoding-control-plane` | `pc-control-plane@…` | `roles/datastore.user`, `roles/logging.logWriter`, **behind Identity-Aware Proxy**, public invoker binding removed |
+| Cloud Run `paracoding-control-plane` | `pc-control-plane@…` | `roles/datastore.user`, `roles/logging.logWriter`, `roles/aiplatform.user` **project-wide**, **behind Identity-Aware Proxy**, public invoker binding removed |
 | Cloud Run `paracoding-mcp` | `pc-control-plane@…` | the same image and the same identity, deployed as a second service. IAP off, publicly invokable |
 | Cloud Run `paracoding-gate-exec` | `pc-gate-exec@…` | `roles/datastore.user`, `roles/logging.logWriter`, **not publicly invokable** |
 | Firestore | — | created native-mode if absent; a Datastore-mode project is refused, not converted |
@@ -62,7 +62,21 @@ last row is the only one it asks you about.
 | `pc-webauthn-creds` | | per-job assertion enrolment for the executor — created **empty** (`{}`), `roles/secretmanager.secretAccessor` to the executor, that secret only |
 | Cloud Storage `<project>-datalake` | — | the data lake. Uniform bucket-level access, public access prevented, `roles/storage.objectAdmin` to the control plane **on that bucket only**, never the project-wide role |
 | Cloud KMS `vault-kem-xwing` on keyring `paracoding-vault` | — | `KEY_ENCAPSULATION` / `KEM_XWING`, the key the lake's at-rest envelope derives from. `roles/cloudkms.decapsulator` to the control plane, scoped to the key |
+| Cloud Storage `<project>-source` | — | **the git object store, and it holds your source tree.** Object versioning ON, uniform bucket-level access, public access prevented, `roles/storage.objectAdmin` to the control plane on that bucket only. Objects are sealed the same way the lake is; see §8 for what is deliberately *not* sealed |
+| Pub/Sub topic `paracoding-main-moved` | — | published to when the git branch moves, so a build can be triggered from it. `roles/pubsub.publisher` to the control plane |
+| `pc-build@…` | — | the CI build identity, created so that builds do not run as the project's default compute account. `roles/run.developer` on the three Cloud Run services, `roles/iam.serviceAccountUser` on **both runtime service accounts**, and the Cloud Build / Artifact Registry / logging roles a build needs. The trigger that runs as it is **not** created by the installer: step 8c prints the command and deliberately does not run it |
 | A Compute Engine workstation | — | **optional — step 5d asks, and defaults to no.** Created with no external address and OS Login enforced |
+
+**Two of those rows are the ones most worth arguing with, so they are called out rather than
+left in a table.** `roles/aiplatform.user` is granted **project-wide** and cannot be narrowed: a
+Vertex publisher model is not a resource an IAM condition can scope to. It is the predict-side
+role, not `roles/aiplatform.admin`, and it is what the chat surface and the memory embedder
+authenticate with — with the API enabled and this role missing, both return 403, and nothing in
+the install exercises that path, so you would find out on your first message. And `pc-build@…`
+holds `roles/iam.serviceAccountUser` on both runtime accounts, which is what lets a build deploy
+a revision *as* the control plane or the executor. Anything that can drive that identity can
+deploy code into your control plane. It exists because the alternative — building as the project
+default compute account — is strictly worse, not because it is harmless.
 
 Every Secret Manager secret above except `pc-webauthn-creds`, which is created empty, is
 generated on your machine with `openssl rand` and stored in Secret Manager; the KMS keys are
@@ -179,13 +193,33 @@ control plane holds `run.invoker` on it. It has no standing project authority be
 and logging roles — it does not hold Editor, it cannot administer IAM, and it cannot read your
 other secrets.
 
-Four controls run before anything executes, all fail-closed:
+Five controls run before anything executes, all fail-closed:
 
 **Status.** The job must be `confirmed` or `executing`. Anything else is refused.
 
 **Command integrity.** The approved document is the only authority on what runs. A presented
 script is hashed and compared against the approved command; a mismatch is refused and journalled
 with digest prefixes, never the command itself.
+
+**What the script may invoke — and what this does not claim.** From v8.2 the approved script runs
+with `PATH` restricted to a directory containing symlinks to an enumerated set of binaries and
+nothing else, so an unlisted binary does not resolve: `gsutil` and `ssh` answer
+`command not found`. Shell builtins and keywords do not resolve through `PATH`, so an ordinary
+`set -uo pipefail` preamble is unaffected — the previous attempt at this control was a
+first-token text scan, and arming it returned 400 on exactly that line and broke production. It
+was observe-only from then until v8.2, which means that for that period **there was no binary
+boundary at all**, and the journal carries a `gsutil` invocation recorded as "not allowlisted
+(observe-only, executing anyway)" and then executed.
+
+**The gap is stated rather than papered over: an absolute path still runs.** `/usr/bin/env` was
+measured doing so. This is a real control and it is not a sandbox — it raises the floor from
+"nothing" to "an enumerated set, unless the script names a full path". Closing it needs an
+execution-layer change: an image containing only the permitted binaries, or a container/seccomp
+boundary. Neither is attempted here. Do not describe this install as confined; describe it as
+approved. `EXEC_BINARY_ALLOWLIST_ENFORCE` no longer exists — it was deleted rather than defaulted
+off, because a switch whose documented effect is a 400 on every multi-line job is a footgun
+pointed at production. `EXEC_BIN_JAIL=0` disables the jail if an install needs a binary the list
+does not name.
 
 **Approval-time signature.** When you approve, the control plane records `sha256(command)` and
 signs the approval with a **Cloud KMS asymmetric key** (`EC_SIGN_P256_SHA256`). The executor
@@ -299,8 +333,17 @@ machine-facing service does not reach the human console.
 means violations are reported and permitted; treat script-source enforcement as absent for
 planning purposes.
 
-**Spend.** Model buses ship OFF (`fleet_mode=home`). A fresh install costs you Cloud Run idle and
-nothing else until you turn one on.
+**Spend.** Model buses ship OFF (`fleet_mode=home`), so nothing calls a model until you turn one
+on. That is not the same as "free", and the earlier wording here said Cloud Run idle and nothing
+else, which was wrong. A fresh install also stands up two Cloud Storage buckets (one with object
+versioning on, so overwritten objects are retained and billed), a Firestore database, two Cloud
+KMS keys — KMS bills per key version per month and per cryptographic operation, and **a key can
+never be deleted**, so that line does not go away when you uninstall — an Artifact Registry
+repository holding every image you build, and a Cloud Build submission per deploy. The Vertex API
+is enabled and the control plane is granted `roles/aiplatform.user` at install time, so the
+moment you do turn a bus on, inference bills per call with no cap configured anywhere in this
+tree. Idle cost is small; it is not zero, and the parts that survive an uninstall are the KMS
+keys and whatever you have put in the buckets.
 
 ---
 
@@ -514,6 +557,17 @@ at boot and `master.kem` cannot be encrypted by the thing it bootstraps; and an 
 before the envelope existed carries no `PCV1` magic and is read back as-is. §7 records the
 condition under which `master.kem` is never minted at all.
 
+**The same envelope covers the git object store, and what it deliberately leaves in the clear is
+the interesting part.** `<project>-source` holds your commit history — every blob of every file
+you have ever pushed through the repository tools — and loose objects and packs are sealed by the
+same master. Two things there are plaintext ON PURPOSE, because the store cannot be walked
+without them: pack **index** files, and the **object paths themselves**, which are the git object
+ids. So an entity that can list that bucket learns the full shape of your history — how many
+objects, how they are packed, and the oid of every one of them — without being able to read a
+byte of content. Oids are hashes of content, so anyone holding a copy of a file you committed can
+confirm you committed it. Treat the object store as leaking structure and confirming guesses,
+never as hiding that a given known file is in your tree.
+
 **Sandboxing between agents.** Cross-agent isolation is a storage-prefix convention plus a
 database status field. Assume that one compromised agent identity reaches everything in the
 shared drop zone.
@@ -534,7 +588,7 @@ is load-bearing.
 |---|---|---|
 | Anonymous internet | on the MCP service, the OAuth discovery documents and agent cards; `POST /mcp` is 401. The console is refused at the IAP edge, and the executor is not publicly invokable | §6 |
 | Someone holding your unlocked device | everything you have | non-goal, §8 |
-| A compromised agent token | stage jobs, read and write the shared drop zone, read job output — **cannot approve** | §3, §4 |
+| A compromised agent token | stage jobs, read and write the shared drop zone, read job output, and — since the repository tools shipped — `git_read`, `git_propose` and **`git_push` over your entire source tree**, which is the authority to change the code your next build compiles. It still **cannot approve**, and a push is not a deploy: a build still has to run. But it moves the branch a build reads from, so treat this row as source-tree write access and not merely as drop-zone access | §3, §4 |
 | A principal with database write | corrupt an approval into a refusal; rewrite the journal. **Cannot forge an approval** — signing needs a KMS private key no database grant confers | §5 |
 | You | full project authority | intended |
 
@@ -565,8 +619,26 @@ The order we would check things in:
 
 ## Reporting
 
-If you find something wrong — especially a claim in this document that the code does not support —
-open an issue. A documentation defect is a security defect here: a control that is described more
-strongly than it is implemented stops you from looking, which is worse than no control at all.
+**If it is exploitable, do not open an issue.** Use GitHub's private vulnerability reporting on
+this repository — the *Report a vulnerability* button under the Security tab. That channel is
+private to the maintainers until a fix ships, and it is the only private channel offered. There
+is no PGP key, and one will not be invented for this: a key nobody rotates and nobody has tested
+receiving on is worse than telling you plainly that there isn't one.
+
+**No service-level agreement, and no bounty.** This is maintained by a very small number of
+people. You will get an acknowledgement when someone reads it, not on a clock, and there is no
+money. Saying so is not a disclaimer — it is the input you need to decide how long to wait.
+
+**If you get no response in two weeks, disclose publicly.** That is not a threat to manage, it is
+permission granted in advance, and the two weeks starts when you send the report rather than when
+someone reads it. A private channel that swallows a report is worse than no private channel,
+because it converts your finding into silence and leaves every user of this tree exposed while
+believing themselves covered. Escalating on that timetable is the correct behaviour and it will
+not be treated as bad faith.
+
+**Everything that is not exploitable belongs in a public issue**, and that emphatically includes a
+claim in this document the code does not support. A documentation defect is a security defect
+here: a control described more strongly than it is implemented stops you from looking, which is
+worse than no control at all.
 
 Apache-2.0. Keep the copyright headers and the NOTICE file.

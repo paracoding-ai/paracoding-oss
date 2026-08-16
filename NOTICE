@@ -56,18 +56,22 @@ BROWSER COMPONENTS LOADED AT RUNTIME FROM A CDN
   pointed only at the manifest. They are fetched by the browser at page load.
 
   @simplewebauthn/browser    10.0.0    MIT
-                                       loaded by src/gate.html
-  qrcodejs (davidshimjs)     unpinned  MIT
-                                       loaded by src/gate.html
+                                       vendored inline in src/locked.html
   Google Identity Services   n/a       Proprietary — Google Terms of Service
                                        https://accounts.google.com/gsi/client
-                                       loaded by src/gate.html and by the OAuth
-                                       consent page generated in src/mcp-oauth.ts
+                                       loaded by the OAuth consent page
+                                       generated in src/mcp-oauth.ts
 
-  KNOWN ISSUE: these are loaded without Subresource Integrity hashes, and the
-  qrcodejs reference is unpinned (floating HEAD via a CDN gh path). Both are
-  tracked as security findings and should be pinned and vendored before you rely
-  on this in production. See SECURITY.md.
+  2026-08-14: src/gate.html is deleted along with the three routes that served it,
+  and the two entries that named it as their only loader went with it. qrcodejs is
+  no longer fetched anywhere in this tree. @simplewebauthn/browser is no longer
+  fetched from a CDN either -- src/locked.html carries it inline, pinned by tarball
+  sha512 and file sha384, so the Subresource Integrity finding below no longer
+  applies to it.
+
+  KNOWN ISSUE: the Google Identity Services script is loaded from a CDN without a
+  Subresource Integrity hash. Google does not publish a stable hash for it, so this
+  is tracked as a security finding rather than fixed. See SECURITY.md.
 
 --------------------------------------------------------------------------------
 SUPPORTING THIS PROJECT
