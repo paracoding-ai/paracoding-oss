@@ -1,14 +1,14 @@
 # release manifest v8.4
-# generated from source commit b76080a9d36c836bdc86c2314adebb67c55784d9
+# generated from source commit unknown
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 90152fa50cc43b11     15331  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 b2feedda8e7894e9      4074  NOTICE
-963e0f6aa47e42d9     11313  README.md
-a285ca3b63cdd70c      8728  SECURITY.md
-4850525908e06d27    496468  install.sh
+e7062ed17c5b95dc     11314  README.md
+98ac48c24ec48816     10263  SECURITY.md
+e7cd3a9d7adf221c    496435  install.sh
 d026c02745cfd8ae     45586  uninstall.sh
 30dfd3b04171f4ef    149949  workstation.sh
 0970f6247abf524e      1303  agent-plugin/README.md
@@ -67,7 +67,7 @@ c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 ed20628d307bcf14     11437  devgate/apply-classification-fix.py
 8e099e146bdd4a35    166999  devgate/smoke.py
 c2093ccdc4e329d2      4732  gate-exec/Dockerfile
-06cc25f628d50f17      2630  gate-exec/README.md
+6ef9e06a954341f2      2741  gate-exec/README.md
 92d86e680a3c5e47    113748  gate-exec/exec_server.py
 81e34ca907624804     17624  gate-exec/lockout_check.py
 d4341eb82c9d234d      3138  gate-exec/pcmint.py

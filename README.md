@@ -123,7 +123,7 @@ identity, and the Google accounts allowed to authorise an MCP connector.
 The installer deploys one built image as two Cloud Run services, and the separation between
 them is a security boundary rather than a packaging detail.
 
-`paracoding-control-plane` is the console: the browser pages, and the gate where you register
+`paracoding-control-plane` is the console: the browser pages, and the place where you register
 a passkey and approve work. Step 8 puts it behind Identity-Aware Proxy, grants the installing
 account `roles/iap.httpsResourceAccessor`, and removes its public invoker binding, so an
 anonymous request is refused at Google's edge before your container is reached.

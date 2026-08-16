@@ -13,30 +13,53 @@ matches the code, that is a defect and we want the report — see **Reporting** 
 
 > **No agent holds a credential that can change your infrastructure. The only principal that
 > can is you. The only mechanism is a WebAuthn assertion produced on your own device, seconds
-> before the command runs, bound to the exact command the gate showed you.**
+> before the command runs, bound to the exact command the console showed you.**
 
 Four moving parts:
 
 1. **Staging.** An agent that wants to do something privileged does not do it. It writes a
    document into the Firestore collection `pending_confirms` with `status: 'pending'`, carrying
    the literal command it wants run and the identity it was authenticated as.
-2. **The gate.** A Cloud Run service serves an approval page. You authenticate with a platform
-   passkey. Reading the queue needs a valid session; approving needs a fresh assertion.
-3. **Authority forwarding.** The gate's own service account is deliberately weak. On approval,
-   the gate takes *your* short-lived Google OAuth token, forwards it to a separate private
-   executor for one request, and never stores it. The command runs as you, with your scope, for
-   the lifetime of one token.
-4. **Journalling.** Every execution appends to the Firestore `journal` collection.
+2. **Approval, in the console.** There is no separate approval site. The queue and the approve
+   action live in the console at `/harness`, behind Identity-Aware Proxy and behind the
+   application's own passkey session. Reading the queue needs a valid session; approving live
+   needs a fresh WebAuthn assertion (`/api/webauthn/confirm/options` then `confirm/verify`).
+3. **Authority forwarding.** The control plane's own service account is deliberately weak. On a
+   live approval it takes *your* short-lived Google access token, forwards it to a separate
+   private Cloud Run executor for one request, and never stores it. The command runs as you,
+   with your scope, for the lifetime of one token.
+4. **Journalling.** Every execution, refusal and pre-approval appends to the Firestore
+   `journal` collection.
 
 All standing privilege is concentrated in a human holding a hardware-backed key. The agents are
 left with a database write.
+
+## Two approval modes, and what separates them
+
+**Live approval** is the one above: a fresh assertion at the moment of execution, and your token
+carried to the executor for that single request.
+
+**Pre-approval** (`POST /api/webauthn/preapprove`) exists because useful work happens while you
+are away. It stamps the job `preapproved` with a single-use `run_token`, a 12-hour expiry, and
+the digest of the command as approved. When the job later fires through `/api/jobs/fire`, the
+token is re-checked constant-time, the status must still be `preapproved`, and the command digest
+is re-verified — a command edited after pre-approval reverts the job to `pending` and returns 409.
+A pre-approved job deliberately forwards an **empty** user token, so it runs under the executor's
+own scoped service identity rather than yours.
+
+**A destructive command cannot be pre-approved at all.** The route refuses it outright with 403
+and journals the refusal, because a Face ID collected now cannot be re-demanded hours later with
+nobody present to abort. Destructive work stays on the live path where a human is in front of it.
+
+`PC_REQUIRE_PASSKEY=0` trades the passkey for IAP identity alone during development. It defaults
+to on, and the session token records which mode minted it.
 
 ---
 
 ## What the approval is bound to
 
 An approval is signed at approval time with a Cloud KMS asymmetric key. The signature covers the
-job id **and** the digest of the command as shown on the approval page.
+job id **and** the digest of the command exactly as it was shown to you when you approved it.
 
 - The control plane holds the private half. The executor that runs the job holds only the public
   half — it can verify a signature without being able to produce one.
