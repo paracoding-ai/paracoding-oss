@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.7.0",
+    "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "@simplewebauthn/server": "10.0.0",
     "express": "5.2.1",
     "firebase-admin": "14.2.0",

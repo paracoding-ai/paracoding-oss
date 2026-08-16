@@ -14,7 +14,7 @@
  * logo beaconing. It was caught only because a post-deploy check curled the
  * served page and grepped the response.
  *
- * WHAT IT DOES NOT DO, deliberately: it does not ban base64. gate.html carries
+ * WHAT IT DOES NOT DO, deliberately: it does not ban base64. harness.html carries
  * a legitimate data: URI, the installer runs `openssl rand -base64 32`, and
  * index.ts decodes AGENT_TOKENS_B64 from the environment at runtime. A blanket
  * ban is unsatisfiable, and an unsatisfiable gate gets deleted by whoever hits
