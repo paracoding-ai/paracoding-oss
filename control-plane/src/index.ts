@@ -754,6 +754,11 @@ const PC_TOOL_CLASS: any = {
   git_list: 'read',
   git_log: 'read',
   git_diff: 'read',
+  // [PCGIT-ARCHIVE-TOOL-V1] 'read', and it grants nothing git_read does not: the archive is
+  // the same reach in one request. GET /git/archive already gates its session-key branch on
+  // this exact class, so classifying it any other way would let one path serve what the other
+  // withholds. An unclassified tool falls to 'other' and would be withheld from every role.
+  git_archive: 'read',
   git_propose: 'write',
   git_propose_patch: 'write',
   git_push: 'write',
@@ -1070,6 +1075,22 @@ function pcCapNote(toolName: string, argNames: string[], shown: number, total: n
   const edge = keptTail
     ? 'THE TEXT BELOW STARTS MID-VALUE, and the OLDEST entries were cut. It is NOT valid JSON,\nit is NOT the whole list, and the number of entries visible is NOT the number that exist.'
     : 'THE TEXT ABOVE STOPS MID-VALUE, and the entries after the cut are gone. It is NOT valid\nJSON, it is NOT the whole list, and the number of entries visible is NOT the number that exist.';
+  // [PCGIT-DIFF-CAP-V1] TWO EXTRA LINES FOR THE GIT READERS, AND THE SECOND ONE IS THE
+  // IMPORTANT ONE. git_diff is not on PC_RESULT_CAP_EXEMPT and must not be: a whole-tree
+  // diff is unbounded, and exempting it would let a single call return megabytes, which is
+  // the failure this cap exists to prevent. But its own payload carries "truncated": false,
+  // and that flag describes gitDiff's CHANGE LIST -- it is set before this cap is applied
+  // and knows nothing about it. An agent that reads it after a byte cut concludes it holds
+  // a complete diff when it holds a fragment that does not even parse. So the marker
+  // contradicts the flag by name, and points at the tool that returns a whole tree in one
+  // request instead of leaving the caller to page a diff that has no pager.
+  const gitAdvice = (toolName === 'git_diff' || toolName === 'git_log' || toolName === 'git_list')
+    ? ('IGNORE ANY "truncated": false IN THE PAYLOAD ABOVE -- that flag describes ' + toolName
+       + "'s own\nchange list and is written BEFORE this byte cap is applied. It does not know "
+       + 'about this cut.\nFOR A WHOLE TREE, USE git_archive: it returns the entire repository at a ref as one\n'
+       + 'tarball over HTTP and is not subject to this cap. Rebuilding a tree out of capped diffs\n'
+       + 'is the exact waste git_archive exists to end.\n')
+    : '';
   const body = '======== ' + PC_RESULT_CAP_TAG + ' TRUNCATED -- ' + kept + ' ========\n'
     + 'tool: ' + toolName + '\n'
     + 'shown: ' + shown + ' of ' + total + ' characters (' + pct + '%); '
@@ -1078,6 +1099,7 @@ function pcCapNote(toolName: string, argNames: string[], shown: number, total: n
     + 'Do not parse it, do not count it, and do not report what it contains as complete.\n'
     + 'TO GET THE REST: ' + how + '\n'
     + 'There is no cursor or offset on this surface: fleet tools narrow by FILTER, not by page.\n'
+    + gitAdvice
     + '======== END ' + PC_RESULT_CAP_TAG + ' ========';
   return keptTail ? (body + '\n\n') : ('\n\n' + body);
 }
@@ -1519,10 +1541,11 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
   const AG = { agent: z.string().optional() };
 
   server.registerTool('whoami',
-    { description: 'CALL THIS FIRST, EVERY SESSION, BEFORE ANYTHING ELSE. It delivers the fleet memory digest of what earlier strains already measured, then the bootstrap that says how you work here. Skipping it means re-deriving what the fleet already paid to learn. Return the role you are acting as. Your role is RESOLVED SERVER-SIDE: from the connector bearer, or from a session key you present as the `agent` argument (minted by the operator at the Autoclave, looked up in session_keys). `agent` is a CREDENTIAL, not a role name -- a role name resolves to nothing, and a key that does not resolve is REFUSED, never downgraded to a weaker role or silently upgraded to a stronger one. Once resolved the role is fixed for the request and no tool argument can change it. Privileged execution is still gated by the human secret.', inputSchema: { ...AG } },
+    { description: 'CALL THIS FIRST, EVERY SESSION, BEFORE ANYTHING ELSE. It delivers the fleet memory digest of what earlier strains already measured, then the bootstrap that says how you work here. Skipping it means re-deriving what the fleet already paid to learn. Return the role you are acting as. Your role is RESOLVED SERVER-SIDE: from the connector bearer, or from a session key you present as the `agent` argument (minted by the operator at the Autoclave, looked up in session_keys). `agent` is a CREDENTIAL, not a role name -- a role name resolves to nothing, and a key that does not resolve is REFUSED, never downgraded to a weaker role or silently upgraded to a stronger one. Once resolved the role is fixed for the request and no tool argument can change it. Privileged execution runs under PC_AUTO_APPROVE, which ships as 1: a staged job is signed and executed in the same call, and the journal records it. Set it to 0 and staged work sits instead.', inputSchema: { ...AG } },
     async (a: any) => {
       const role = who(a);
       const c = await ctxBuild();
+      const charter = await ctxCharter(role);
       const body = [
         'ROLE: ' + role,
         'context_sha: ' + c.sha,
@@ -1537,6 +1560,9 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
         '================ BOOTSTRAP -- HOW YOU WORK HERE ================',
         c.boot,
         '',
+        ...(charter
+          ? ['================ YOUR CHARTER -- WHAT THIS STRAIN OWNS ================', charter, '']
+          : []),
         '================ END ================'
       ].join('\n');
       return { content: [{ type: 'text', text: body }] };
@@ -1729,12 +1755,32 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     try {
       const t = await harReadLake(CTX_BOOTSTRAP_PATH);
       if (t && t.trim().length > 200) return t;
-      return 'BOOTSTRAP_EMPTY: ' + CTX_BOOTSTRAP_PATH + ' exists but is empty or truncated. '
-        + 'You are operating with NO delivered rules. Tell the operator before you do anything privileged.';
-    } catch (e) {
-      return 'BOOTSTRAP_MISSING: ' + CTX_BOOTSTRAP_PATH + ' could not be read. '
-        + 'You are operating with NO delivered rules. Tell the operator before you do anything privileged. '
-        + 'Do NOT substitute another file.';
+    // [SEC-BOOTSTRAP-ABSENT-V90] ABSENT AND EMPTY ARE DIFFERENT PROBLEMS AND THIS REPORTED BOTH
+    // AS "empty or truncated". harReadLake returns '' for a MISSING object and for a zero-byte
+    // one alike, so a FRESH INSTALL -- where nothing has ever written this file -- told the agent
+    // the file existed. MEASURED on a real adopter install 2026-08-16: that prefix was entirely
+    // empty and the message still claimed the file was there. An operator cannot act on that:
+    // repairing a truncated file and creating the first one are different jobs. The probe runs
+    // only on the already-degraded path, so the healthy case costs nothing.
+    let pcPresent = false;
+    try {
+      pcPresent = (await getStorage().bucket(pcLakeBucket()).file(CTX_BOOTSTRAP_PATH).exists())[0];
+    } catch (e2) { pcPresent = false; }
+    if (!pcPresent) {
+      return 'BOOTSTRAP_ABSENT: ' + CTX_BOOTSTRAP_PATH + ' does not exist in this lake, so no '
+        + 'rules have ever been delivered to this install. You are operating with NO delivered '
+        + 'rules: tell the operator before you do anything privileged. It is fixed by creating '
+        + 'the file -- write_file ' + CTX_BOOTSTRAP_PATH + ' -- and every agent picks it up '
+        + 'within a minute.';
+    }
+    return 'BOOTSTRAP_EMPTY: ' + CTX_BOOTSTRAP_PATH + ' exists but holds only '
+      + String((t || '').trim().length) + ' characters, under the 200 this check requires. '
+      + 'You are operating with NO delivered rules. Tell the operator before you do anything privileged.';
+  } catch (e) {
+    return 'BOOTSTRAP_UNREADABLE: ' + CTX_BOOTSTRAP_PATH + ' exists but could not be read -- a '
+      + 'decrypt failure or a storage error, NOT a missing file. '
+      + 'You are operating with NO delivered rules. Tell the operator before you do anything privileged. '
+      + 'Do NOT substitute another file.';
     }
   };
 
@@ -1837,7 +1883,35 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     } catch (e: any) { return 'MEMORY_DIGEST_UNAVAILABLE: ' + String((e && e.message) || e); }
   };
 
-  const ctxBuild = async () => {
+  // [SEC-STRAIN-CHARTER-V90] EACH STRAIN IS ALSO HANDED ITS OWN JOB, NOT ONLY THE FLEET RULES.
+// BOOTSTRAP.md says how every strain works here; this says what THIS one owns, what to ask it,
+// and what it must not do. Both are lake objects the operator can edit, and editing the charter
+// is the intended way to steer a strain -- not repeating yourself in every chat.
+// A strain with no charter file is normal and silent: the section is simply omitted. This is
+// additive, so an install that predates the charters, or an operator who deletes one, loses
+// nothing.
+// THE ROLE IS VALIDATED BEFORE IT BECOMES A PATH. It arrives from a resolved session key rather
+// than from a tool argument, but it is still concatenated into an object name, and a component
+// that can contain a slash or a dot-dot is how a read escapes its prefix. Anything that is not
+// a plain lowercase role name yields no charter rather than a guess.
+// Derived from the bootstrap path rather than written out again, so the two cannot drift and
+// the fleet prefix is defined in exactly one place.
+const CTX_CHARTER_DIR = CTX_BOOTSTRAP_PATH.replace(/[^/]+$/, '') + 'strains/';
+const ctxCharterCache: any = {};
+const ctxCharter = async (role: string): Promise<string> => {
+  if (!role || !/^[a-z0-9][a-z0-9-]{0,40}$/.test(role)) return '';
+  const now = Date.now();
+  const hit = ctxCharterCache[role];
+  if (hit && (now - hit.at) < CTX_TTL_MS) return hit.text;
+  let text = '';
+  try {
+    const t = await harReadLake(CTX_CHARTER_DIR + role + '.md');
+    if (t && t.trim().length > 100) text = t;
+  } catch (e) { text = ''; }
+  ctxCharterCache[role] = { at: now, text: text };
+  return text;
+};
+const ctxBuild = async () => {
     const now = Date.now();
     if (ctxCache.sha && (now - ctxCache.at) < CTX_TTL_MS) return ctxCache;
     // ctxMemory budgets itself now. This is only a RUNAWAY STOP, set well above
@@ -2120,7 +2194,7 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     });
 
   server.registerTool('stage_privileged_job',
-    { description: 'Run a privileged job. With PC_AUTO_APPROVE=1 (NOT the installed default -- install.sh sets it to 0) it is pre-approved, KMS-signed and EXECUTED in this call, and the result comes straight back -- there is no approval console and nothing to go and tap. Read the first word of the result: RAN means it executed, STAGED means PC_AUTO_APPROVE is off and it is sitting unrun. Destructive bodies also run by default; set PC_GUARDRAILS=1 to have them refused and returned to chat instead.',
+    { description: 'Run a privileged job. With PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) it is pre-approved, KMS-signed and EXECUTED in this call, and the result comes straight back -- there is no approval console and nothing to go and tap. Read the first word of the result: RAN means it executed, STAGED means PC_AUTO_APPROVE is off and it is sitting unrun. Destructive bodies also run by default, because install.sh ships PC_GUARDRAILS=0; set PC_GUARDRAILS=1 to have them refused and returned to chat instead. Both defaults are a deliberate product decision -- this fleet is built to ACCELERATE security-minded agentic engineering, so the pre-ship checks stay and the runtime speed bumps go; the work is still classified, KMS-signed and journalled.',
       inputSchema: { command_type: z.string(), command: z.string().optional(), target: z.string().optional(), ...AG } },
     async (a: any) => {
       const _sdr = pcSecretDestroyRefusal(String(a.command || ''));
@@ -2141,7 +2215,7 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     });
 
   server.registerTool('list_pending_confirm',
-    { description: 'List privileged jobs sitting at pending. On a DEFAULT INSTALL this list FILLS UP, because install.sh sets PC_AUTO_APPROVE=0 and there is no approval console: a staged job sits here until the operator runs it themselves or turns PC_AUTO_APPROVE on. It is NOT a queue anyone is going to come and tap. With PC_AUTO_APPROVE=1 it should be empty, and a non-empty list then means a job failed to reach the executor and was returned to pending.', inputSchema: { ...AG } },
+    { description: 'List privileged jobs sitting at pending. On a DEFAULT INSTALL this list SHOULD BE EMPTY, because install.sh sets PC_AUTO_APPROVE=1: a job is pre-approved, KMS-signed and EXECUTED in the call that staged it, so nothing accumulates here. That is a deliberate posture -- this fleet accelerates security-minded agentic engineering rather than putting a tap in front of work the operator has already asked for; every rung the executor checks still runs and every job is still journalled. A NON-EMPTY list therefore means one of two things: a job failed to reach the executor and was returned to pending, or this install has set PC_AUTO_APPROVE=0 to keep the per-job tap -- in which case a staged job sits here until the operator runs it themselves, because there is no approval console and it is NOT a queue anyone is going to come and tap.', inputSchema: { ...AG } },
     async () => {
       const snap = await db.collection('pending_confirms').where('status', '==', 'pending').limit(50).get();
       return { content: [{ type: 'text', text: JSON.stringify(snap.docs.map((d: any) => d.data()), null, 2) }] };
@@ -2592,13 +2666,13 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     return { mode: 'staged', job_id: ref.id, command_type: cmdType, staged_by: who(a), note: 'STAGED and NOT run: PC_AUTO_APPROVE is off and there is no approval console. Set PC_AUTO_APPROVE=1, or run the command yourself.' };
   }
   server.registerTool('vm_start',
-    { description: 'START the workstation. With PC_AUTO_APPROVE=1 (NOT the installed default -- install.sh sets it to 0) this RUNS -- the standing order that only the operator starts the VM was enforced by a human tap that no longer exists, so treat starting it as a real action you are taking on their behalf and say so. Returns { mode: "ran", result } when it executed, or { mode: "staged", job_id } when PC_AUTO_APPROVE is off -- in which case the box is untouched and the job sits unrun, because there is no approval console to go and tap. Read the result with read_job_log.', inputSchema: { ...AG } },
+    { description: 'START the workstation. With PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) this RUNS -- the standing order that only the operator starts the VM was enforced by a human tap that no longer exists, so treat starting it as a real action you are taking on their behalf and say so. Returns { mode: "ran", result } when it executed, or { mode: "staged", job_id } when PC_AUTO_APPROVE is off -- in which case the box is untouched and the job sits unrun, because there is no approval console to go and tap. Read the result with read_job_log.', inputSchema: { ...AG } },
     async (a: any) => { const cmd = 'gcloud compute instances start' + HARVM_T + ' || { echo "start failed at the current machine type; retrying at e2-medium"; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type e2-medium && gcloud compute instances start' + HARVM_T + '; }; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_start', 'START ' + HARVM_NAME + ' (falls back to e2-medium if there is no capacity at the current size)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('vm_stop',
-    { description: 'STOP the workstation browser box. With PC_AUTO_APPROVE=1 (NOT the installed default -- install.sh sets it to 0) this RUNS IMMEDIATELY and can kill a session the operator is working in -- there is no approval step in front of it any more, so ask them in chat first and only call this once they have said yes. Returns { mode: "ran", result } when it executed, { mode: "staged" } only if PC_AUTO_APPROVE is off.', inputSchema: { ...AG } },
+    { description: 'STOP the workstation browser box. With PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) this RUNS IMMEDIATELY and can kill a session the operator is working in -- there is no approval step in front of it any more, so ask them in chat first and only call this once they have said yes. Returns { mode: "ran", result } when it executed, { mode: "staged" } only if PC_AUTO_APPROVE is off.', inputSchema: { ...AG } },
     async (a: any) => { const cmd = 'gcloud compute instances stop' + HARVM_T + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_stop', 'STOP ' + HARVM_NAME, cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('vm_resize',
-    { description: 'Set the workstation machine type (e.g. e2-medium, e2-standard-2). A resize STOPS the instance first, so it can kill the operator session -- and with PC_AUTO_APPROVE=1 (NOT the installed default -- install.sh sets it to 0) it RUNS IMMEDIATELY rather than waiting for a tap. Ask in chat first. Returns { mode: "ran", result } when it executed.', inputSchema: { machine_type: z.string(), ...AG } },
+    { description: 'Set the workstation machine type (e.g. e2-medium, e2-standard-2). A resize STOPS the instance first, so it can kill the operator session -- and with PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) it RUNS IMMEDIATELY rather than waiting for a tap. Ask in chat first. Returns { mode: "ran", result } when it executed.', inputSchema: { machine_type: z.string(), ...AG } },
     async (a: any) => { const mt = String((a && a.machine_type) || '').trim(); if (mt.length > 40 || !/^[a-z][a-z0-9]*-[a-z0-9-]+$/.test(mt)) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'blocked: machine_type must look like e2-medium or e2-standard-2 (lowercase letters, digits and hyphens only) -- got: ' + mt.slice(0, 40) }) }] }; } const cmd = 'gcloud compute instances stop' + HARVM_T + '; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type ' + mt + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_resize', 'RESIZE ' + HARVM_NAME + ' to ' + mt + ' (STOPS it first; does NOT start it again)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   }  // [SEC-VM-UNCONFIGURED-V1] end WS_VM/WS_ZONE guard
   // VERIFY-GREP: F13-JOBLOG-OWNERSHIP-V1
@@ -2615,7 +2689,7 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     { description: 'Read the full output (stdout/stderr/exit) of a gate job by id, from Firestore -- so the human never pastes logs. Pass job_id. You may read jobs YOU staged; operator principals (LOG_READ_ALL) read everything. If a job was refused, quarantined, superseded, or its executor failed, the reason comes back in `reason` and ran=false -- a refusal is NOT a malfunction, do not re-stage blindly.', inputSchema: { job_id: z.string(), ...AG } },
     async (a: any) => { try { const me = who(a); const d = await db.collection('pending_confirms').doc(a.job_id).get(); if (!d.exists) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'job not found' }) }] }; } const x: any = d.data(); const OPS = String(process.env.LOG_READ_ALL || 'fleet-advisor').split(',').map((s: string) => s.trim()).filter(Boolean); const isOperator = OPS.indexOf('*') >= 0 || OPS.indexOf(me) >= 0; const stagedBy = String(x.staged_by || ''); if (!isOperator && stagedBy !== me) { console.warn('[cp] F13: ' + me + ' denied read_job_log on ' + a.job_id + ' (staged_by ' + (stagedBy || '(unset)') + ')'); return { content: [{ type: 'text', text: JSON.stringify({ error: 'not your job: ' + a.job_id + ' was staged by another principal. You can read the jobs you staged; ask the operator (or fleet-advisor) for this one.', job_id: a.job_id, staged_by: stagedBy || null, denied: true }) }] }; } const reason = x.fire_refused_reason || x.quarantine_reason || x.exec_failed_reason || x.supersede_note || x.expired_reason || x.error || null; return { content: [{ type: 'text', text: JSON.stringify({ job_id: a.job_id, status: x.status, ran: x.status === 'executed', exit_code: x.exit_code, ran_as: x.ran_as, staged_by: stagedBy || null, command_type: x.command_type || null, reason: reason, quarantine_reason: x.quarantine_reason || null, quarantined_at: x.quarantined_at || null, fire_refused_reason: x.fire_refused_reason || null, fire_refused_at: x.fire_refused_at || null, supersede_note: x.supersede_note || null, superseded_by_job: x.superseded_by_job || null, superseded_by_role: x.superseded_by_role || null, superseded_at: x.superseded_at || null, expired_reason: x.expired_reason || null, expired_at: x.expired_at || null, exec_failed_reason: x.exec_failed_reason || null, exec_http: (typeof x.exec_http === 'number') ? x.exec_http : null, stdout: x.stdout_tail || '', stderr: x.stderr_tail || '' }) }] }; } catch (e: any) { return { content: [{ type: 'text', text: JSON.stringify({ error: String((e && e.message) || e) }) }] }; } });
   server.registerTool('gcp_api',
-    { description: 'Call ANY GCP REST endpoint (https://*.googleapis.com) directly — no gcloud, no Cloud Build, no VM. TRUST LADDER: blessed READS (GET on compute/run/storage/logging/monitoring in our project) run instantly as the least-privilege control-plane identity; if it is not permitted it auto-escalates to the gate. EVERYTHING else — any mutation, DELETE, IAM, Secret Manager, a brand-new API — goes through the executor and, with PC_AUTO_APPROVE=1 (NOT the installed default -- install.sh sets it to 0), RUNS IN THIS CALL and returns { mode:"ran", result }. There is no approval step and no second Face ID; destructive verbs are still classified, but the classification decides what is journalled, not whether it happens. { mode:"staged" } comes back only when PC_AUTO_APPROVE is off. Pass method (GET/POST/PATCH/DELETE...), url (full https), optional body (object), optional reason (why).', inputSchema: { method: z.string(), url: z.string(), body: z.record(z.string(), z.any()).optional(), reason: z.string().optional(), ...AG } },
+    { description: 'Call ANY GCP REST endpoint (https://*.googleapis.com) directly — no gcloud, no Cloud Build, no VM. TRUST LADDER: blessed READS (GET on compute/run/storage/logging/monitoring in our project) run instantly as the least-privilege control-plane identity; if it is not permitted it auto-escalates to the gate. EVERYTHING else — any mutation, DELETE, IAM, Secret Manager, a brand-new API — goes through the executor and, with PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1), RUNS IN THIS CALL and returns { mode:"ran", result }. There is no approval step and no second Face ID; destructive verbs are still classified, but the classification decides what is journalled, not whether it happens. { mode:"staged" } comes back only when PC_AUTO_APPROVE is off, which is NOT how this ships. That is deliberate: the product accelerates security-minded agentic engineering, so every check that fails a CUT is kept and the per-call tap is not. Pass method (GET/POST/PATCH/DELETE...), url (full https), optional body (object), optional reason (why).', inputSchema: { method: z.string(), url: z.string(), body: z.record(z.string(), z.any()).optional(), reason: z.string().optional(), ...AG } },
     async (a: any) => { const r = await harGcpApi(who(a), a.method, a.url, a.body, a.reason || ''); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('run_status',
     { description: 'List Cloud Run services in our project/region (blessed read via control-plane identity; auto-escalates to the gate if not permitted). Optional region (default us-east1, where our services live).', inputSchema: { region: z.string().optional(), ...AG } },
@@ -5575,14 +5649,39 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
   let doc = '';
   try { doc = await harReadLake(HAR_COWORK_PROMPTS_PATH); } catch (e) { doc = ''; }
   if (doc) {
-    const A = doc.indexOf('## PROMPT 1');
-    const Bm = doc.indexOf('## PROMPT 2');
+    // ANCHOR THE MARKERS TO A WHOLE LINE. indexOf() matched '## PROMPT 1' ANYWHERE in the
+    // document, including inside a paragraph that DESCRIBES the contract -- which is exactly
+    // what the shipped document's own preamble does. The slice then started in the preamble
+    // and the advisor prompt came out ONE CHARACTER LONG. Nothing refused and the fallback
+    // below did not fire, because by indexOf's reckoning both markers were present: the
+    // failure mode was silent garbage handed to the operator to paste. A heading is a line,
+    // so it is matched as one, \r tolerated so a document edited on Windows still slices.
+    const pcMark = (n: number): number => {
+      const m = new RegExp('^##[ \\t]*PROMPT[ \\t]*' + n + '[ \\t]*\\r?$', 'm').exec(doc);
+      return m ? m.index : -1;
+    };
+    const A = pcMark(1);
+    const Bm = pcMark(2);
     if (A >= 0 && Bm > A) {
       let body = advisor ? doc.slice(A, Bm) : doc.slice(Bm);
+      // THE MARKERS ARE A SLICING CONTRACT, NOT PART OF THE PROMPT. The slice necessarily
+      // BEGINS at the literal '## PROMPT n' line it was found by, and the advisor slice
+      // necessarily ENDS on whatever separates the two sections in the source document.
+      // Neither is text the operator should be pasting into an agent, so both come off here
+      // rather than by asking every future editor of that lake document to lay it out in a
+      // way that happens to render acceptably.
+      body = body.replace(/^##\s*PROMPT\s*\d+[^\n]*\n/, '').replace(/\n\s*-{3,}\s*$/, '');
       body = body.replace(/<ROLE>/g, strain);
-      body = task ? body.replace(/<TASK[^>]*>/g, task) : body.replace(/<TASK[^>]*>/g, 'Ask the operator what they wants first, then read the relevant lake files before touching anything.');
+      body = task ? body.replace(/<TASK[^>]*>/g, task) : body.replace(/<TASK[^>]*>/g, 'Ask the operator what they want first, then read the relevant lake files before touching anything.');
       const head = 'PASTE THIS INTO A FRESH COWORK CHAT (attach the Paracoding.AI connector FIRST -- the connector is the identity).\nThat chat has full source + deploy access via the gate.\n\n----- COPY BELOW -----\n';
-      return (head + body.trim() + '\n----- COPY ABOVE -----').slice(0, 11000);
+      // CAP THE BODY, NOT THE WHOLE STRING. Slicing the assembled result was truncating from
+      // the END, so an over-long lake document silently removed the '----- COPY ABOVE -----'
+      // line -- the operator then pastes a prompt that was cut off mid-sentence with nothing
+      // saying so. Cap the part that can grow, and say plainly when it was cut.
+      const LIM = 10000;
+      body = body.trim();
+      if (body.length > LIM) body = body.slice(0, LIM) + '\n\n[TRUNCATED: ' + HAR_COWORK_PROMPTS_PATH + ' section is longer than ' + LIM + ' characters. Shorten it -- what follows this line was NOT sent.]';
+      return head + body + '\n----- COPY ABOVE -----';
     }
   }
   const fb = [
@@ -5601,7 +5700,7 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
     '',
     'TRAPS: the container is ephemeral - the lake is the only durable memory. MCP read_file PREPENDS a banner line + blank line NOT in the stored object; strip both on any read-then-write. fleet-work-runner does NOT hot-load. deploy-cp-harness.sh is RETIRED (exit 1): the control plane is built from the git STORE (Firestore repos/<repoId>/refs + lake <repoId>/.git/objects/), reached with the git_* tools - git_push onto memory-v1, then a staged deploy-store.py --commit <oid> --tag <tag>.',
     '',
-    'YOUR ASSIGNMENT: ' + (task || 'Ask the operator what they wants first.'),
+    'YOUR ASSIGNMENT: ' + (task || 'Ask the operator what they want first.'),
     '',
     'TONE: direct, senior, no padding. Own mistakes plainly. Verify before you claim.',
     '----- COPY ABOVE -----',
@@ -7614,7 +7713,19 @@ async function harGcpStage(caller: string, method: string, url: string, body: an
   lines.push('# ' + method + ' ' + url);
   if (reason) lines.push('# reason: ' + String(reason).replace(/[\r\n]+/g, ' ').slice(0, 300));
   if (hasBody) lines.push("printf %s '" + bodyB64 + "' | base64 -d > /tmp/gcp_body.json");
-  lines.push('curl -sS -X ' + method.toUpperCase() + " '" + url + "' -H \"Authorization: Bearer $CLOUDSDK_AUTH_ACCESS_TOKEN\" -H \"Content-Type: application/json\"" + (hasBody ? ' --data @/tmp/gcp_body.json' : ''));
+  // [SEC-GCPAPI-TOKEN-V90] RESOLVE THE TOKEN, AND REFUSE RATHER THAN SEND "Bearer ". This line
+  // expanded $CLOUDSDK_AUTH_ACCESS_TOKEN straight into the header. On the auto-approve and
+  // pre-approve paths that variable is unset, so the header went out as a literal "Bearer " --
+  // non-empty, so curl still sent it -- and Google answered 401 CREDENTIALS_MISSING. The gate now
+  // fills the variable from the metadata server; this is the second brace on that pair, and it
+  // turns "no token anywhere" into a real error instead of a silent 401.
+  lines.push('PC_TOK="${CLOUDSDK_AUTH_ACCESS_TOKEN:-}"');
+  lines.push('[ -n "$PC_TOK" ] || PC_TOK=$(gcloud auth print-access-token 2>/dev/null)');
+  lines.push('[ -n "$PC_TOK" ] || { echo "gcp_api: no access token. CLOUDSDK_AUTH_ACCESS_TOKEN is unset and gcloud produced none, so this call would have gone out unauthenticated and returned 401. Not sending it." >&2; exit 1; }');
+  // --fail-with-body exits non-zero on 4xx/5xx WHILE STILL PRINTING THE BODY. Without it a 401 is
+  // a successful transfer, the job reports exit 0, and the caller gets a green result whose
+  // payload is an error. That is precisely how this defect stayed invisible.
+  lines.push('curl -sS --fail-with-body -X ' + method.toUpperCase() + " '" + url + "' -H \"Authorization: Bearer $PC_TOK\" -H \"Content-Type: application/json\"" + (hasBody ? ' --data @/tmp/gcp_body.json' : ''));
   const cmd = lines.join('\n');
   const u = (() => { try { return new URL(url); } catch (e) { return null as any; } })();
   const host = u ? u.hostname.replace('.googleapis.com', '') : 'gcp';
@@ -9519,7 +9630,41 @@ async function pcArchiveCaller(req: any): Promise<string | null> {
 }
 app.get('/git/archive', async (req: any, res: any) => {
   const who = await pcArchiveCaller(req);
-  if (!who) { res.status(401).json({ error: 'unauthorized' }); return; }
+  if (!who) {
+    // [PCGIT-ARCHIVE-401-V1] A 401 THAT NAMES THE SCHEME, BECAUSE THE COMMONEST CAUSE IS
+    // NOT A BAD KEY. Every other fleet tool takes its credential as ?agent= / ?key= /
+    // ?session_key= on the query string; this route reads ONLY the Authorization header.
+    // A perfectly valid key passed the fleet-editor way therefore failed here with the
+    // identical opaque body a revoked key produced, and callers concluded their credential
+    // had been revoked and went looking for the wrong fault. The body now separates the two.
+    const _hdr = String((req.get && req.get('authorization')) || '');
+    const _qKeys = ['agent', 'key', 'session_key', 'token', 'access_token']
+      .filter((k) => typeof req.query[k] !== 'undefined' && String(req.query[k] || '') !== '');
+    const _body: any = {
+      error: 'unauthorized',
+      accepted: 'Authorization: Bearer <session key>   (or a Google-signed service-account ID token)',
+      rejected: 'the credential as a QUERY PARAMETER. ?agent=, ?key=, ?session_key=, ?token= and '
+        + '?access_token= are IGNORED on this route -- every other fleet tool takes the key that way, '
+        + 'this one does NOT, and that mismatch is the usual cause of this 401.',
+      hint: 'curl -H "Authorization: Bearer $PC_SESSION_KEY" "' + String(process.env.MCP_PUBLIC_URL || '<mcp-base-url>').replace(/\/+$/, '') + '/git/archive?ref=main" -o tree.tar.gz',
+    };
+    if (_qKeys.length && !_hdr) {
+      _body.diagnosis = 'YOUR CREDENTIAL IS PROBABLY FINE. You sent ' + _qKeys.map((k) => '?' + k + '=').join(', ')
+        + ' and NO Authorization header, so nothing was ever checked. Resend it as the header above '
+        + 'before concluding the key is revoked or expired.';
+    } else if (!_hdr) {
+      _body.diagnosis = 'No Authorization header was sent at all, so no credential was checked.';
+    } else if (_hdr.slice(0, 7).toLowerCase() !== 'bearer ') {
+      _body.diagnosis = 'An Authorization header was sent but its scheme is not "Bearer". Only Bearer is accepted.';
+    } else {
+      _body.diagnosis = 'A Bearer credential WAS presented in the correct place and was not accepted: '
+        + 'it is unknown, expired, or (for a session key) does not hold the "read" tool class, or (for a '
+        + 'service-account ID token) is not in PC_ARCHIVE_ALLOWED_SA / has the wrong audience. '
+        + 'This one really is a credential problem.';
+    }
+    res.status(401).json(_body);
+    return;
+  }
   const ref = String(req.query.ref || 'main');
   const sub = String(req.query.path || '');
   try {
@@ -9891,7 +10036,7 @@ function pcDeniedText(reason: string): string {
   const txt = 'DENIED: ' + why + '\n\n'
     + 'This MCP connector is account-level and serves every Cowork chat, so a chat must prove which strain it is before it can use any tool. '
     + 'Pass your session key as the "agent" argument on EVERY tool call. It is the line beginning PC-SESSION-KEY in this chat bootstrap paste. '
-    + 'If there is no such line, ask the operator: they mints one at the Flow Hood (Autoclave, New strain session) and pastes it here. '
+    + 'If there is no such line, ask the operator: they mint one at the Flow Hood (Autoclave, New strain session) and paste it here. '
     + 'Do NOT guess a role name -- the role is resolved from the key on the server, and a role name is not a key.';
   return txt;
 }

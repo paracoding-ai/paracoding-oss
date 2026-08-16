@@ -480,6 +480,59 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
     { description: 'Unified diff from from_ref to to_ref in git format. Identical refs return identical:true with an empty patch.',
       inputSchema: { from_ref: z.string(), to_ref: z.string(), path: z.string().optional(), ...AG } },
     wrap(gitDiff, (a: any) => ({ from_ref: a.from_ref, to_ref: a.to_ref, path: a.path })));
+  // [PCGIT-ARCHIVE-TOOL-V1] THE CAPABILITY EXISTED AND WAS INVISIBLE, WHICH IS THE SAME AS
+  // NOT EXISTING. GET /git/archive has served whole trees for a while, but nothing on the
+  // TOOL surface named it. An agent surveying git_read/git_list/git_log/git_diff correctly
+  // concluded there was no way to obtain a clone and hand-rebuilt one out of diffs -- days
+  // of model-retyped bytes, every time, per session. A route no tool description mentions is
+  // a route no agent finds. This tool exists to make the archive DISCOVERABLE.
+  //
+  // IT RETURNS A URL AND MEASURED METADATA, NOT THE TARBALL. The archive is megabytes of
+  // gzip; base64 through an MCP text result would be ~4/3 of that and is cut dead by the
+  // 55,555-character result cap several hundred times over. So this builds the archive
+  // IN-PROCESS -- the same gitArchiveTarGz the route calls -- and reports the commit, the
+  // file count, the exact byte length and the sha256 of the bytes the route will serve, so
+  // the caller can verify its download instead of trusting it. The bytes themselves come
+  // over HTTP, which is the transport that can carry them.
+  server.registerTool('git_archive',
+    { description: 'Get the WHOLE repository at a ref as one gzipped tarball -- the clone that git_read/git_list/git_diff cannot give you. Use this INSTEAD of reconstructing a tree out of diffs or reading files one at a time. It returns the download URL plus the resolved commit, file count, exact byte length and sha256 of the bytes that URL will serve (verify your download against them); the tarball itself travels over HTTP, not through this tool, because it is megabytes and would be destroyed by the result cap. TWO GOTCHAS, AND BOTH HAVE COST REAL TIME: (1) AUTHORISATION IS AN HTTP HEADER AND ONLY A HEADER -- `Authorization: Bearer <your session key>`. The ?agent= / ?key= / ?session_key= query forms that EVERY OTHER FLEET TOOL uses DO NOT WORK on this route and fail with a 401 identical to the one a wrong or expired key produces, so a good credential looks revoked. If you get a 401, check that you sent the header before you conclude anything about your key. (2) A 500 saying the ref "is not readable in the object store" or that "the repository needs repair" on a freshly promoted revision means THE VAULT REGISTRY IS NOT ARMED YET -- the objects are intact and cannot yet be decrypted. It is NOT corruption. Make any other ordinary MCP call (whoami will do) and retry. DO NOT ATTEMPT A REPAIR. Optional path narrows the archive to one subtree.',
+      inputSchema: { ref: z.string(), path: z.string().optional(), ...AG } },
+    async (a: any) => {
+      try {
+        const _ref = String(a.ref);
+        const _sub = String(a.path || '');
+        const out: any = await gitArchiveTarGz(_ref, _sub);
+        const _base = String(process.env.MCP_PUBLIC_URL || '').replace(/\/+$/, '');
+        const _q = '/git/archive?ref=' + encodeURIComponent(_ref) + (_sub ? ('&path=' + encodeURIComponent(_sub)) : '');
+        const _url = _base ? (_base + _q) : _q;
+        const _sha = require('crypto').createHash('sha256').update(out.tgz).digest('hex');
+        return okr({
+          url: _url,
+          method: 'GET',
+          // Spelled out again in the RESULT and not only in the description: the description is
+          // read once at session start, the result is read at the moment of use.
+          auth: 'Authorization: Bearer <your session key>',
+          auth_warning: 'THE HEADER IS THE ONLY ACCEPTED FORM. ?agent=, ?key= and ?session_key= -- the '
+            + 'query forms every other fleet tool takes -- are IGNORED here and produce a 401 that is '
+            + 'BYTE-IDENTICAL to the one a wrong or expired key produces. A 401 from this URL is far more '
+            + 'often a misplaced credential than a revoked one.',
+          example: 'curl -fsSL -H "Authorization: Bearer $PC_SESSION_KEY" "' + _url + '" -o tree.tar.gz',
+          verify: 'sha256sum tree.tar.gz  # must equal sha256 below; also check Content-Length against bytes_gzip',
+          commit: out.commit,
+          ref: _ref,
+          ...(_sub ? { path: _sub } : {}),
+          files: out.files,
+          bytes_uncompressed: out.bytes,
+          bytes_gzip: out.tgz.length,
+          sha256: _sha,
+          on_500: 'A 500 naming "not readable in the object store" or "the repository needs repair" on a '
+            + 'freshly promoted revision means the VAULT REGISTRY IS NOT ARMED YET, not corruption. The '
+            + 'objects are intact. Make any other ordinary MCP call, then retry. DO NOT attempt a repair.',
+          note: 'The bytes are NOT returned through MCP: the archive is megabytes and the result cap is '
+            + '55,555 characters. Fetch the URL over HTTP.',
+        });
+      } catch (e) { return failr(e); }
+    });
   server.registerTool('git_propose',
     { description: 'Create a commit on top of a branch head. WHOLE FILE writes only: each entry replaces the entire file. Each entry gives EXACTLY ONE of four options -- zero or two is refused. (1) content, the bytes. (2) copy_from {path, ref}, which REUSES A BLOB ALREADY IN THE REPOSITORY -- the server resolves path at ref and writes that blob oid straight into the tree, so none of its bytes cross the wire and the file cannot be corrupted in transit. copy_from goes through the same ref gate and the same path rules as git_read, so it reaches nothing you could not already read, and an oid is NEVER a lookup key. Optional copy_from.blob_oid is an ASSERTION: the whole call is refused if the source does not resolve to it. (3) uploaded {blob_oid}, for bytes that are NOT yet in the repository: POST the raw file to /git/blob with your session key first, then name the blobOid that call returned. The bytes go over HTTP straight into the object store, so they never cross THIS tool and nothing has to be retyped -- which is the only sane way to land a large file. It resolves ONLY against an upload the SAME agent made, and only while that upload is unexpired; an upload that was never made, has expired, or belongs to another agent is REFUSED and NOTHING is written. An oid is still NEVER a lookup key: you are naming bytes YOU supplied, not naming a blob in the store. Optional uploaded.sha256 is an ASSERTION against the digest recorded when the bytes arrived, and a mismatch refuses the whole call. (4) delete:true, which REMOVES the path. One explicit path per entry: there is no glob, no prefix and no recursive directory removal. Removing a path that does not exist is REFUSED, never a silent success, and a directory left empty by a removal is pruned so the resulting tree stays a valid git object. A removal is resolved against the branch you are already writing to and reaches nothing a write to the same path would not, so it is refused wherever an overwrite would be (a directory, a symlink, a submodule). A per-file blobOid comes back for every entry that writes, so you can still verify each against a locally computed sha1; a removal reports source.removedBlobOid instead -- the oid the path actually held -- plus top-level deleted and deletedPaths, and an uploaded entry reports source.sha256 plus top-level uploaded and bytesUploaded. Nothing becomes visible until git_push. Returns commitOid and baseOid.',
       inputSchema: { branch: z.string(), files: z.array(z.object({ path: z.string(), content: z.string().optional(), copy_from: z.object({ path: z.string(), ref: z.string(), blob_oid: z.string().optional() }).optional(), uploaded: z.object({ blob_oid: z.string(), sha256: z.string().optional() }).optional(), delete: z.boolean().optional() })).min(1), message: z.string(), ...AG } },
@@ -524,5 +577,5 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
         return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }], ...(r && r.ok ? {} : { isError: true }) };
       } catch (e) { return failr(e); }
     });
-  return ['git_read', 'git_list', 'git_log', 'git_diff', 'git_propose', 'git_propose_patch', 'git_push'];
+  return ['git_read', 'git_list', 'git_log', 'git_diff', 'git_archive', 'git_propose', 'git_propose_patch', 'git_push'];
 }
