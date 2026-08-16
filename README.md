@@ -126,6 +126,11 @@ Ask a strain in the console chat for a service, and it builds the container and 
 to Cloud Run in your project — then verifies the result anonymously and reports the HTTP
 code back.
 
+![The console chat on the left, where Fleet GCP has built and deployed a calculator app to Cloud Run and reported a 200 OK; on the right, the deployed calculator running in a browser window](docs/screenshots/03-build-a-calculator.png)
+
+Left is the chat, right is the app it just deployed. The strain list down the side is a fleet
+that has been running for a while — the release ships three strains and you grow the rest.
+
 ![The console chat asking Fleet GCP to build and deploy a hello-world app to Cloud Run, with the build and deployment summary and a 200 OK verification](docs/screenshots/01-build-and-deploy.png)
 
 Everything configurable lives on one panel: theme, the model substrate (Claude or Gemini,
