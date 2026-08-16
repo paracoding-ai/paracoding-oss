@@ -65,7 +65,7 @@ flowchart TB
 
 **Why there cannot be one service.** IAP on Cloud Run is one switch per service. The
 console is the bootstrap path into a brand-new install, so it must sit behind IAP -- that
-is how the operator reaches a working page before any passkey exists. The MCP surface must
+is how the operator reaches a working page with no credential enrolled. The MCP surface must
 *not* sit behind IAP, because IAP consumes the `Authorization` header and an MCP client has
 no Google identity to present. Both of the obvious builds were tried and both are recorded
 in the source comment at `index.ts` around line 393: one service with IAP on made `/mcp`
@@ -161,14 +161,14 @@ sequenceDiagram
     B->>CP: POST /api/webauthn/unlock/options
     B->>CP: POST /api/webauthn/unlock/verify
     CP-->>B: Set-Cookie gate_session, then RELOAD in place
-  else PC_REQUIRE_PASSKEY=0
+  else PC_REQUIRE_PASSKEY=0 -- what install.sh ships
     CP->>CP: verify IAP JWT against Google JWKS, check iss, exp, aud
     CP->>CP: email must be in WA_APPROVER_EMAILS
-    CP-->>B: 200, weaker, and the page says so
+    CP-->>B: 200 harness.html
   end
 ```
 
-![The auth path: Google IAP, then the passkey session, with the org policy enforced where an IAM binding is written.](/wiki/assets/02-auth-path.png)
+![The auth path: Google IAP, then the application's own session check, with the org policy enforced where an IAM binding is written.](/wiki/assets/02-auth-path.png)
 
 **Three controls, in order, and each one does a different job.**
 
@@ -190,9 +190,9 @@ permanent -- the binding survives. So the recommendation for a second pair of ha
 second **in-domain** account with its own key, never a personal address admitted through a
 temporary hole.
 
-**The passkey session** is the inner door, and it is where the code you can read lives.
-`waSessionOk` (`index.ts:2783`) is synchronous and is called as the first statement of every
-guarded handler:
+**The application's own session check** is the inner door, and it is where the code you can
+read lives. `waSessionOk` (`index.ts:2783`) is synchronous and is called as the first
+statement of every guarded handler:
 
 - **Fail closed on a weak secret.** `WA_SESSION_SECRET` shorter than 16 characters means the
   gate never *issues* and never *verifies* a session. An empty-key HMAC is forgeable, so a
@@ -203,9 +203,10 @@ guarded handler:
   `PC_REQUIRE_PASSKEY=1` a payload whose `pk !== 1` is refused. Without that, disarming for
   ten minutes would hand out full-length sessions that outlive the policy that permitted
   them.
-- **`PC_REQUIRE_PASSKEY` defaults to on** (`index.ts:2669`: anything other than the string
-  `'0'` is on). With it explicitly off, a *verified* IAP identity on `WA_APPROVER_EMAILS` is
-  accepted. Verified means: signature checked against Google's IAP JWKS at
+- **`PC_REQUIRE_PASSKEY` is on in code and off as installed.** The in-code default is on
+  (`index.ts:2669`: anything other than the string `'0'` is on); `install.sh` writes `0` onto
+  both services, so the shipped install takes the second branch. With it off, a *verified*
+  IAP identity on `WA_APPROVER_EMAILS` is accepted. Verified means: signature checked against Google's IAP JWKS at
   `https://www.gstatic.com/iap/verify/public_key-jwk`, `iss` equal to
   `https://cloud.google.com/iap`, `exp` in the future, and `aud` equal to `PC_IAP_AUD` when
   that is set. `X-Goog-Authenticated-User-Email` is **not** trusted on its own -- it is
@@ -238,27 +239,29 @@ between them. It **consumes** an enrol token and never mints one -- minting
 enrolment link is a privileged act. Removing any of the four locks the operator out with no
 way back except a manual bootstrap, which is why the file says so at the top.
 
-*One endpoint answers without a passkey session, and it is smaller than it sounds.*
+*One endpoint answers without a session, and it is smaller than it sounds.*
 `GET /api/webauthn/status` is mapped `console`, so IAP has already admitted the caller
 against an in-domain Google account -- it is not reachable anonymously from the internet.
 It answers
-`{registered, setupEnabled, sessionMin, iap}` without a **passkey session**, which is
+`{registered, setupEnabled, sessionMin, iap}` without a **session**, which is
 unavoidable: the locked page must choose a flow before a session can exist. What it used to
 disclose was a standing answer to "is the first-registration window open", for the whole life
 of the install. Since [SEC-STATUS-SETUPFLAG-V83] `setupEnabled` is reported **only while no
 credential is registered** -- the one state in which the page reads it, since its branch sits
-after `else if (st.registered)` -- so on any install with a passkey the field is constant
-false. Note also what it never was: both setup endpoints refuse without a constant-time
+after `else if (st.registered)` -- so once a credential exists the field is constant false.
+On a stock 9.0 install none is registered and the page is never reached, because
+`PC_REQUIRE_PASSKEY=0` admits the IAP identity before `locked.html` is served at all. Note
+also what it never was: both setup endpoints refuse without a constant-time
 `waEq()` match on `WA_BOOTSTRAP_SECRET`, so knowing the window is open was never sufficient
 to walk through it.
 
 *A session is not an approval.* `WA_SESSION_MIN` has an in-code default of 10 minutes;
-`oss/wiki/pages/operators-guide.md` records that a fresh install sets 240, i.e. one unlock
-opens the console for four hours. Elevation is separate and narrower: `waMakeElevated` binds
+`oss/wiki/pages/operators-guide.md` records that a fresh install sets 240, i.e. a session
+lasts four hours. Elevation is separate and narrower: `waMakeElevated` binds
 an elevation to **one job id and one command digest**, `WA_ELEVATE_MIN` defaults to 5
 minutes, and `waElevatedForJob` re-hashes the command from the job's *current* arguments so
-an edited command is refused. A generic "the human did a Face ID recently" cookie has never
-been allowed to satisfy a destructive approval, and that is unchanged by anything below.
+an edited command is refused. A generic "this browser authenticated recently" cookie has
+never been allowed to satisfy a destructive approval, and that is unchanged by anything below.
 
 ---
 
@@ -621,7 +624,7 @@ are looking at the file this page describes.
 ### `control-plane/src/index.ts` -- 634,893 bytes
 
 The control plane. One Express app holding the entire route table: the console pages, the
-cookie/passkey session code (`waSessionOk`, `waSendLocked`, `waMakeSession`,
+cookie session code (`waSessionOk`, `waSendLocked`, `waMakeSession`,
 `waMakeElevated`, `waElevatedForJob`), the MCP tool registrations, the OAuth 2.1 and
 discovery endpoints, the chat provider plumbing, and the dispatcher that calls the executor
 (`waCallExec`, `waApprovalEnvelope`). It is also where `PC_SURFACE` and `PC_SURFACE_MAP`
@@ -662,8 +665,11 @@ and the file says so.
 ### The three HTML documents
 
 - **`control-plane/src/locked.html` -- 18,446 bytes.** The only document any console URL
-  serves to a caller with no session, now served in place under a 401 at whichever URL was
-  asked for. Four flows: unlock, first setup, add-a-device, status. It consumes enrol
+  serves to a caller with no session, served in place under a 401 at whichever URL was
+  asked for. Four flows: unlock, first setup, add-a-device, status. On a stock install it is
+  reached only by a caller carrying no IAP identity at all, since `PC_REQUIRE_PASSKEY=0`
+  admits a verified identity on the approver allow-list without it; the file stays in the
+  tree because `PC_REQUIRE_PASSKEY=1` puts it back in the path unchanged. It consumes enrol
   tokens and never mints them. The SimpleWebAuthn browser bundle is vendored inline and
   pinned by tarball sha512 and file sha384; it used to be described as a byte-identical copy
   of the one in `gate.html`, and since that file is gone this is now the only copy.

@@ -27,29 +27,26 @@ sentence costs one file write and no deploy. See **Changing the code** for how.
 
 **You are the authorisation. The chat is your hands.**
 
-If you have read an older copy of this page, the sentence to unlearn is the one that
-said an agent stages work and then stops until you tap a passkey for it. On a fresh
-install that is no longer true, and it is a decision rather than a regression. An
-agent connected to this system reads, plans, writes files and stages a job -- and on
-the shipped defaults that job runs, in the same breath, because the decision was
-already made when you said what you wanted. The ruling that produced this posture,
+An agent connected to this system reads, plans, writes files and stages a job -- and
+on the shipped defaults that job runs, in the same breath, because the decision was
+already made when you said what you wanted. There is no per-job tap and nothing to
+enrol before you start. The ruling that produced this posture,
 verbatim, so you can disagree with it on purpose: *"we don't add speed bumps we add
 accelerators"*, and *"there is no gate going forward for a job to show up in for me to
 approve because nothing needs approved its all coming from me the chat is just my
 hands."*
 
-What that moves rather than deletes is where the authentication sits. It is no longer
-a tap per job. It is the account that got past Identity-Aware Proxy, the passkey
-session in front of the console, and the IAM grant on the executor's own service
-account -- which is now the real ceiling on what an auto-run job can do to your
-project, because when a job auto-runs there is no human credential in the path to
-borrow. Every job is still journalled, including the ones an older build would have
-refused.
+What that moves rather than deletes is where the authentication sits. It is the
+account that got past Identity-Aware Proxy, its place on the approver allow-list, and
+the IAM grant on the executor's own service account -- which is the real ceiling on
+what an auto-run job can do to your project, because when a job auto-runs there is no
+human credential in the path to borrow. Every job is still journalled, including the
+ones an older build would have refused.
 
-`PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 ./install.sh YOUR_PROJECT_ID` restores the older
-system entire -- the per-job tap and the runtime refusals both. Both variables are
-read from the environment, so they are a Cloud Run configuration revision and **no job
-can arm or disarm them.**
+`PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 ./install.sh` restores the older system entire --
+the per-job tap and the runtime refusals both. Both variables are read from the
+environment, so they are a Cloud Run configuration revision and **no job can arm or
+disarm them.**
 
 Read **Authorisation** next; it is still the page that matters most, and it is the one
 that states exactly what is and is not refused now.
@@ -62,7 +59,7 @@ The split is a security boundary, not packaging.
 
 | service | who talks to it | reachable how |
 |---|---|---|
-| the console | you, in a browser | behind Identity-Aware Proxy, then behind a passkey session |
+| the console | you, in a browser | behind Identity-Aware Proxy, then behind the approver allow-list |
 | the MCP service | agent clients | publicly invokable, token-authenticated, IAP off |
 
 They have to be separate. IAP on Cloud Run is one switch per service with no
@@ -79,8 +76,9 @@ installer printed both when it finished.
   console: it reads nothing and issues no session.
 - MCP URL, at `/mcp` -- give this to an agent client. See **Connect an agent**.
 
-Underneath IAP the console is still guarded by the application's own passkey session;
-a fresh install sets `PC_REQUIRE_PASSKEY=1`. Two independent locks, on purpose. If IAP
+Underneath IAP the console is still guarded by the application's own session check; a
+fresh install sets `PC_REQUIRE_PASSKEY=0`, and in that mode a verified IAP identity on
+the approver allow-list is what satisfies it. Two independent locks, on purpose. If IAP
 were ever removed, the console would still not be readable by an anonymous caller:
 `/harness`, `/wiki`, `/flow`, `/chat`, `/lakeview` and `/flowhood` answer an anonymous
 request with `401` and the locked document served **in place**, at the URL you asked
@@ -203,11 +201,12 @@ done. Read them. Short version:
   bucket, grants the control plane on that bucket and nothing else, and sets both
   variables on the MCP service, which is where the git tools are served. See
   **Changing the code**.
-- Some steps are manual and stay manual. Registering your passkey is one, and it stays
-  manual even though passkeys no longer approve routine jobs: the passkey is what
-  unlocks the console session, the console fails closed with no approver registered,
-  and recovery from zero is a redeploy rather than a documented happy path. Register a
-  second one, on a second device, before you lose the first.
+- Console access rests entirely on one Google identity being on the approver
+  allow-list. The console fails closed with no approver on it, and recovery from that
+  state is a redeploy rather than a documented happy path. Add a second account **in
+  your domain** to `WA_APPROVER_EMAILS` and to the IAP binding before you need it.
+- Some steps are manual and stay manual: the Google OAuth client and the org-policy
+  decisions are yours to make. The installer names them and continues.
 
 If you find something wrong, the design intends that finding it costs you a refusal
 rather than an incident.

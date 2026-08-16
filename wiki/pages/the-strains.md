@@ -51,9 +51,11 @@ the hole. It is the first refusal most new strains meet. See **Systems manual**.
 role that did it. When you are staring at a job at the gate, "who asked for this" is
 a fact you can read, not an inference.
 
-**Blast radius.** A leaked session key is a leaked *role*, not a leaked system. It
-buys the attacker that strain's scope, and it still buys them nothing privileged --
-execution is behind your passkey regardless of who is asking.
+**Blast radius.** A leaked session key is a leaked *role*, not a leaked system. It buys
+the attacker that strain's scope and nothing outside it. Be clear about what that does
+**not** bound: on the shipped defaults `PC_AUTO_APPROVE=1`, so a role that can call
+`run_command` can cause a command to run. What bounds *that* is the IAM grant on the
+executor's own service account, not the strain. **Authorisation** has the full picture.
 
 **Separate memory.** Each strain accumulates its own lessons file. A security
 reviewer and a publisher should not share a set of habits.

@@ -40,7 +40,8 @@ Six things. Nothing else is load-bearing.
 `/wiki`, `/dash`, `/flow`, `/lakeview` and `/chat`, plus `/mcp` for machine clients, and
 `GET /` is an unconditional 302 to `/harness`. An anonymous caller to a console page gets
 **401 with the locked document served in place**, at the URL they asked for. The section
-**The passkey lock** below says what that document is and what it is still for.
+**The edge, and the session check behind it** below says what that document is and what it
+is still for.
 
 The executor records bucket is the sixth thing, and it is new enough to be worth naming
 here rather than only where it is used: the executor holds **no Firestore client at all**.
@@ -72,7 +73,7 @@ to register.
 | `PC_SURFACE` | Effect |
 |---|---|
 | unset | every route registers. The wrapper is not even installed. |
-| `console` | browser pages plus the cookie/passkey-gated `/api/*` those pages call. No `/mcp`. |
+| `console` | browser pages plus the cookie-session-gated `/api/*` those pages call. No `/mcp`. |
 | `mcp` | the MCP transports, OAuth and discovery, and the legacy bearer API. No browser pages. |
 | anything else | `throw` at boot. Not a warning, not a default. |
 
@@ -87,7 +88,7 @@ mechanism will bite whoever edits it:
   exists to make that impossible. It can only bite when `PC_SURFACE` is set, so it
   cannot brick a single-service deployment.
 - **`both` is honoured and unused.** The split follows the auth mechanism each handler
-  uses -- a cookie/passkey session only from a browser that reached the console through
+  uses -- a cookie session only from a browser that reached the console through
   IAP, a bearer or OAuth token only from a machine client -- and those two partition the
   table with no overlap.
 
@@ -225,9 +226,12 @@ private key it needed, and a branch that has never executed is not a feature. Th
 matching `ssh` branch went in the same change, which is why the executor now has exactly one
 execution branch.
 
-The browser tools reach the workstation's Chrome through a DevTools Protocol bridge that
-**no installer provisions**, and they are **withheld rather than registered to fail on first
-call** -- the same doctrine as the git tools. `WS_CDP_PORT` is the discriminator, and it is
+The browser tools reach the workstation's Chrome through a DevTools Protocol bridge.
+`install.sh` provisions no workstation and therefore no bridge; `workstation.sh` stands one
+up when it builds a machine, on **loopback only** and behind a token, with no firewall rule
+opened for it -- so the control plane still cannot reach it, and the tools are **withheld
+rather than registered to fail on first call**, the same doctrine as the git tools. You
+reach the bridge yourself over the IAP tunnel. `WS_CDP_PORT` is the discriminator, and it is
 the honest one: the port used to carry a default of `8025` that nothing listens on, which is
 a guess dressed as configuration. An explicit `WS_CDP_PORT` is the only signal that a
 deployer actually stood a bridge up. `browser_eval` is an ungated mutation primitive against
@@ -274,7 +278,7 @@ agent   read_job_log         -->  the projection
 ```
 
 **Nothing was skipped to get there, and that is the point.** `pcAutoRun` stamps a *real*
-pre-approval in the same field names the passkey approve route writes, rather than
+pre-approval in the same field names the legacy approve route writes, rather than
 bypassing the path -- so the executor's rungs all still run: the `approved_sha256` pin, the
 KMS approval signature, the single-use claim, the lockout check. What changed is the
 delivery mechanism for the decision, not the machinery that carries it. The approver field
@@ -312,9 +316,9 @@ holds. Breakage is the accepted cost and rolling forward is the accepted cure.
 `POST /api/webauthn/preapprove` -- the route that authorises a job to be fired *later, while
 the human is away* -- still hard-refuses a destructive command, unconditionally, with no
 `PC_GUARDRAILS` in front of it. Its argument is narrower than the one the ruling addressed
-and still holds: a Face ID collected now cannot be re-demanded at fire time, so accepting one
-there would only buy a signature authorising an unattended destructive run up to twelve hours
-afterwards with nobody present to abort it. `pcAutoRun` fires in the same breath as the
+and still holds: an authorisation collected now cannot be re-demanded at fire time, so
+accepting one there would only buy a signature authorising an unattended destructive run up
+to twelve hours afterwards with nobody present to abort it. `pcAutoRun` fires in the same breath as the
 request, so there is no such window. The distinction is *unattended later* versus *now, at the
 operator's instruction*, and it is the reason these two look inconsistent and are not.
 
@@ -556,13 +560,13 @@ There used to be a fallback there that allowed an absent pin, on the reasoning t
 enforcing it unconditionally would 403 every job predating the field, including the job
 that would undo the change. It is gone, and the reason it could go is that the missing
 half was found: the control plane had exactly **one** writer of `approved_sha256`, inside
-the passkey approve route, and the pre-approve to `POST /api/jobs/fire` path never passes
+the legacy approve route, and the pre-approve to `POST /api/jobs/fire` path never passes
 through that route. **Every** pre-approved job therefore arrived with the field absent,
 permanently -- so the fallback's own stated exit condition, that the absence count reach
 zero on its own, could never be met. That was not a legacy-document problem. It was a live
 one.
 
-Three writers now exist. The passkey approve route stamps the pin whenever the job has a
+Three writers now exist. The legacy approve route stamps the pin whenever the job has a
 command to hash; the pre-approve route stamps it beside `cmd_sha` when it mints the
 single-use `run_token` that `POST /api/jobs/fire` later redeems; and `pcAutoRun` stamps it
 under the **same field names** when it pre-approves a job for immediate firing. A different
@@ -737,7 +741,7 @@ One legacy field survives on approved documents: a symmetric HMAC stamp, emitted
 a key is configured and **verified by nothing**. Handing a verifier the minting key was
 the hole asymmetric signing replaced; a fresh install creates no such secret.
 
-## The edge, and the passkey lock behind it
+## The edge, and the session check behind it
 
 There are two independent locks on a console page and they belong to different systems.
 
@@ -759,10 +763,12 @@ Turning it off, adding the account and turning it back on **does** work, which m
 exception you told yourself was temporary is permanent. If you need a second operator, add a
 second account **in your domain** with its own key.
 
-**The passkey lock is the inner one and it is this application's.** With no valid session
-the console answers **401 and serves `control-plane/src/locked.html` in place**, at the URL
-the caller asked for -- unlock, first-time setup, device enrolment, nothing else. Three
-things about that shape are deliberate:
+**The session check is the inner one and it is this application's.** A fresh install sets
+`PC_REQUIRE_PASSKEY=0`, so a verified IAP identity on `WA_APPROVER_EMAILS` satisfies it with
+nothing to enrol and nothing to unlock. A caller carrying no IAP identity at all still gets
+**401 with `control-plane/src/locked.html` served in place**, at the URL it asked for --
+unlock, first-time setup, device enrolment, nothing else. Three things about that shape are
+deliberate:
 
 1. **There is no `?next=` and no redirect.** The caller's URL never changed, so unlocking
    lands them where they already were by reloading. There is no target to carry, and with it
@@ -773,10 +779,11 @@ things about that shape are deliberate:
    refused; the old redirect was indistinguishable from a working page that had moved, and
    the installer's own guard check read that 302 as proof the console was guarded. No
    `WWW-Authenticate` header is sent, so no browser credential dialog appears.
-3. **The passkey path did not go away with the gate page.** It lost the larger of its two
-   documents and kept the small one. With `PC_REQUIRE_PASSKEY=1` this IS the working unlock
-   page, and it is the way back in if the identity provider in front of the console ever
-   fails.
+3. **The WebAuthn path did not go away with the gate page.** It lost the larger of its two
+   documents and kept the small one, and all fifteen `webauthn` routes are still in the tree.
+   With `PC_REQUIRE_PASSKEY=1` this IS the working unlock page, and it is the way back in if
+   the identity provider in front of the console ever fails. **Operators guide** has that
+   switch.
 
 The API middleware answers differently and says why. A console `/api/*` path with no session
 returns 403 JSON naming **both** possibilities: no console session, or you are calling the
@@ -789,7 +796,7 @@ is no IAP and never a session cookie.
 | `WA_SESSION_MIN` | 10 | 240 |
 | `WA_ELEVATE_MIN` | 5 | not set |
 | `WA_JOB_TTL_MIN` | 60 | not set |
-| `PC_REQUIRE_PASSKEY` | on | 1 |
+| `PC_REQUIRE_PASSKEY` | on | 0 |
 | `WA_SESSION_SECRET` | — | from Secret Manager |
 | `WA_APPROVER_EMAILS` | — | your account |
 
@@ -800,11 +807,12 @@ forgeable and a forgeable session cookie is a forgeable approval. An empty appro
 allowlist denies the Google-identity approval path outright; an empty list used to
 short-circuit the check and accept any authenticated Google identity.
 
-**When a human does approve a job, the tap is bound to that job.** This is the manual
-approval path, still present and still what `PC_AUTO_APPROVE=0` restores. With passkeys
-required, the approve route demands a fresh elevation bound to *that* job: the elevation
-cookie carries both the job id and the sha256 of the job's command as it stands now. A
-generic "the human did a Face ID recently" cookie satisfies nothing, and an edited command
+**When a human does approve a job, the approval is bound to that job.** This is the manual
+approval path. It is still present, no console page calls it on a stock install, and
+`PC_REQUIRE_PASSKEY=1` is what puts it back in front of a person. With that gate on, the
+approve route demands a fresh elevation bound to *that* job: the elevation cookie carries
+both the job id and the sha256 of the job's command as it stands now. A generic "this
+browser authenticated recently" cookie satisfies nothing, and an edited command
 is refused. The danger verdict is kept only for the wording of the prompt -- it never
 decides whether a tap is needed. Assertions are bound the same way: the last 32 bytes of the
 challenge must equal the sha256 of the job id, a pipe, and the action, which is what makes
@@ -821,9 +829,9 @@ plane that dies mid-flight cannot jam a job forever.
 
 ### The confirm route there used to be two of
 
-There is now exactly one confirm endpoint, and it is the passkey one. A second
+There is now exactly one confirm endpoint, and it is the WebAuthn one. A second
 endpoint used to sit on the MCP surface guarded by a shared bearer secret in a header
-rather than by a passkey, carrying none of the danger or elevation checks its passkey
+rather than by a credential, carrying none of the danger or elevation checks its
 twin has. It has been **removed**, along with the secret it read: nothing binds that
 secret to either service any more, and the installer no longer creates it.
 

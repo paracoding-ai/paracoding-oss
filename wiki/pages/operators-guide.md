@@ -72,17 +72,37 @@ account and re-enabling it does work, and the exception it creates is permanent.
 recommendation for a second pair of hands is a second **in-domain** account with its own
 key, not a personal address let in through a temporary hole.
 
-**Then the passkey session.** A fresh install sets `PC_REQUIRE_PASSKEY=1` and
-`WA_SESSION_MIN=240`, so one unlock opens the console for four hours. The unlock page is the
-same small document you get under the 401. Because the 401 is served in place, the way back
-in after you unlock is to **reload** -- you are already at the page you wanted, which is why
-`?next=` was deleted rather than reimplemented.
+**Then the approver allow-list.** A fresh install sets `PC_REQUIRE_PASSKEY=0` and seeds
+`WA_APPROVER_EMAILS` with the installing account, so the application's own check is satisfied
+by the verified IAP identity you already presented -- there is nothing to enrol and nothing
+to unlock. `WA_SESSION_MIN=240` still bounds a session at four hours. An anonymous caller
+carries no IAP identity, so it still gets the 401 with the locked document served in place;
+because that 401 is served at the URL you asked for, the way back is a **reload**, which is
+why `?next=` was deleted rather than reimplemented.
 
-**Register a second passkey now, from a session you already have.** The console fails closed
-with no approver registered, and there is no console path around it: recovery from zero is a
-redeploy and is not a documented happy path. Treat two registered devices as an operating
-requirement, not advice. The credential store is a Secret Manager secret, and it is one of
-the five the uninstaller deletes.
+**Add a second operator now, before you need one.** The console fails closed with nobody on
+the allow-list, and there is no console path around it: recovery from zero is a redeploy and
+is not a documented happy path. Two grants do it -- the account on the console service's IAP
+binding, and its address in `WA_APPROVER_EMAILS` on both services. Treat two accounts able to
+reach the console as an operating requirement, not advice.
+
+### The legacy passkey gate
+
+`PC_REQUIRE_PASSKEY=1` is the one line that re-arms the whole legacy WebAuthn gate. Nothing
+was deleted to reach the current posture: `locked.html` and all fifteen `webauthn` routes are
+still in the tree, unreferenced, and that variable puts them back in the path unchanged --
+the console then requires an enrolled credential and an unlock, and `WA_SESSION_SECRET` is
+still minted at install for exactly this reason.
+
+It is a deploy-time variable on both services, so arming it is a Cloud Run revision and no
+job can flip it. Arm it before you lose access, not after: with the gate on and no credential
+enrolled, the console fails closed the same way, and the credential store is a Secret Manager
+secret that is one of the five the uninstaller deletes.
+
+```
+gcloud run services update CONSOLE-SERVICE --region REGION --project PROJECT \
+  --update-env-vars PC_REQUIRE_PASSKEY=1
+```
 
 One error worth recognising:
 
@@ -208,16 +228,17 @@ So the single most useful thing to read in a tool result is the first word. **`R
 happened. `STAGED` means it did not.** If you read `STAGED` and walk away believing the work
 is done, nothing will tell you otherwise until you check the world.
 
-Approving one of those still costs a fresh passkey assertion bound to that job id and to the
-command text as it stands now, and it still runs under the approving human's Google access
-token. Three answers you will see instead of a result:
+Approving one of those goes through the legacy approval routes, which no console page calls
+on a stock install. An approval made that way is bound to that job id and to the command text
+as it stands at the time, and it runs under the approving human's Google access token. Three
+answers you will see instead of a result:
 
 **`412 google_not_connected`** -- "Approvals run as you, so they need a Google connection.
-Nothing was changed and this job is still waiting." Re-unlocking the passkey reloads the page
-and kills the browser-held Google token with it. Reconnect Google and approve once. The job
-is still pending and nothing was consumed.
+Nothing was changed and this job is still waiting." Anything that reloads the page kills the
+browser-held Google token with it. Reconnect Google and approve once. The job is still
+pending and nothing was consumed.
 
-**`409 stale_gate_view`** -- the document drifted between the render and your tap, so nothing
+**`409 stale_gate_view`** -- the document drifted between the render and the approval, so nothing
 was done to it. Reload the console page and read the job again; do not retry against the
 stale one. Deny is bound the same way, because a deny aimed at a drifted id destroys a staged
 job nobody chose to discard.
@@ -424,17 +445,25 @@ external IP; egress goes through Cloud NAT and you reach it over Chrome Remote D
 (outbound only, no inbound firewall rule) or `gcloud compute ssh --tunnel-through-iap`. It
 stops itself after thirty minutes idle.
 
-Create it one of three ways -- they share a single definition of the creation logic, so they
-cannot drift:
+**It is not part of the install.** `install.sh` builds no workstation and asks you nothing
+about one; the machine lives in `workstation.sh`, shipped beside the installer and run
+separately, whenever you decide you want it. That is why coming back for a workstation six
+months later does not mean re-running a ten-step installer over a live deployment.
 
 ```
-PC_WS_KIND=linux bash install.sh ...        # at install time
-bash workstation.sh linux                   # afterwards, standalone
-./provision-linux-workstation.sh PROJECT_ID [REGION] [ZONE]
+bash workstation.sh                              # asks: none / linux / windows
+bash workstation.sh linux                        # non-interactive, scriptable
+bash workstation.sh windows
+bash workstation.sh --project P --region R linux
 ```
 
-**Then point the tools at it, on BOTH services.** `WS_VM` and `WS_ZONE` decide which single
-machine the `vm_*` tools address:
+Running it twice is safe, and running it once per flavour is safe: the two flavours get
+different instance names, so they coexist, and re-running for a flavour that already exists
+**adopts** it and prints its details rather than replacing it.
+
+**Then point the tools at it, on BOTH services.** `workstation.sh` prints these two commands
+with your real values filled in when it finishes; it does not run them for you. `WS_VM` and
+`WS_ZONE` decide which single machine the `vm_*` tools address:
 
 ```
 gcloud run services update <mcp-service> --region $REGION --project $PROJECT \
@@ -664,7 +693,7 @@ do and then does it.
 
 Without `--keep-data` it deletes the Firestore database it created -- approvals, journal,
 work items, strain records, session keys. Either way it deletes five Secret Manager secrets,
-one of which is the passkey credential store. **Both are irreversible.** Pass `--keep-data`
+one of which is the WebAuthn credential store. **Both are irreversible.** Pass `--keep-data`
 if you intend to reinstall over the same state.
 
 It deletes the workstation instance if one exists, and says so before each one, because
@@ -721,14 +750,14 @@ Each is called out in place above. Collected so you can recognise one before you
 | Action | What does not come back |
 |---|---|
 | `uninstall.sh` without `--keep-data` | the Firestore database: approvals, journal, work items, strains, session keys |
-| `uninstall.sh`, either way | five Secret Manager secrets, including the passkey credential store |
+| `uninstall.sh`, either way | five Secret Manager secrets, including the WebAuthn credential store |
 | Deleting either Cloud Storage bucket | agent memory and the handoffs; the git object store, which is your commit history |
 | Deleting a workstation instance | its boot disk |
 | Overwriting the vault master | every object sealed under the old one |
 | Creating a KMS keyring or key | nothing -- but neither can ever be deleted, so a wrong name is permanent |
 | Disabling `allowedPolicyMemberDomains` to admit one account | the exception: the binding survives re-enabling, permanently |
 | Running a command | with `PC_AUTO_APPROVE=1` it has already run as you; no undo, no second reviewer |
-| Losing every registered passkey | console access; recovery is a redeploy |
+| Losing every account on `WA_APPROVER_EMAILS` | console access; recovery is a redeploy |
 
 ## When you are not sure
 

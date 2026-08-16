@@ -19,10 +19,13 @@ browser, and the Claude desktop app preinstalled. It exists so an agent has some
 to *be* -- a machine with a real browser session, rather than a request-scoped
 container.
 
-The installer asked whether to create one at step 5d and **defaulted to no**. That
-default is deliberate: a VM bills whether or not anything uses it.
+**The installer does not build one and does not ask about one.** The workstation is its
+own script, `workstation.sh`, shipped beside `install.sh` and run whenever you decide
+you want the machine. Keeping it out of the install is deliberate on both counts: a VM
+bills whether or not anything uses it, and an optional component must not be able to
+abort a run that has already succeeded at everything else.
 
-## Creating one later
+## Creating one
 
 From the release directory:
 
@@ -126,15 +129,15 @@ verified for you; the sign-in is yours.
 ## The Chrome extension
 
 Both flavours force-install a Chrome extension by enterprise policy -- the Windows
-registry `ExtensionInstallForcelist` key, and the Linux managed policy JSON -- and the
-installer writes the published Claude extension id onto the instance as the
+registry `ExtensionInstallForcelist` key, and the Linux managed policy JSON -- and
+`workstation.sh` writes the published Claude extension id onto the instance as the
 `pc-claude-ext-id` metadata value, so it **is** installed.
 
 The id is a value, not a hardcode. The startup scripts read it from instance metadata,
 validate it to be exactly 32 characters in the range a-p, and skip-and-log rather than
 guess when it is absent. So all three of these work:
 
-- `PC_CLAUDE_EXT_ID=<id>` when you run the installer, to force-install your own.
+- `PC_CLAUDE_EXT_ID=<id>` when you run `workstation.sh`, to force-install your own.
 - `PC_CLAUDE_EXT_ID=` (explicitly empty), to ship the machine with **nothing**
   force-installed.
 - After the fact, on one instance:
@@ -159,5 +162,6 @@ anyone is using it. Stop it when you are not:
 gcloud compute instances stop <instance-name> --zone <your-zone> --project <your-project>
 ```
 
-The `vm_stop` tool does the same thing through the gate, which costs you an approval
-tap but leaves an auditable record of who stopped it and when.
+The `vm_stop` tool does the same thing through the executor. It is one of the tools that
+still **stages** rather than auto-running -- it returns `STAGED ... job <id>` -- so it
+costs you an approval, and it leaves an auditable record of who stopped it and when.

@@ -26,10 +26,8 @@ a running build, all three answer 404. An anonymous request to `/harness`, `/wik
 place**, at the URL you asked for -- no redirect, no `?next=`. `GET /` is a 302 to
 `/harness`.
 
-If you have read an older copy of this page, the sentence to unlearn is the one that said
-nothing reaches your infrastructure until a human has tapped a passkey for it. On a fresh
-install that is not true, deliberately, and the rest of this page is about what is true
-instead.
+On a fresh install nothing waits for a human tap. That is deliberate, and the rest of this
+page is what authorises work instead.
 
 ## What authorises a job now
 
@@ -61,7 +59,7 @@ prompt.
 
 **The signed approval, which is now provenance rather than permission.** Nothing was
 bypassed to remove the tap: the control plane stamps a **real** pre-approval into the same
-Firestore fields the passkey approve route writes, signs it with the same Cloud KMS
+Firestore fields the legacy approve route writes, signs it with the same Cloud KMS
 asymmetric key under the same `PC-APPROVAL-CANON-V2` bytes, and the executor verifies it
 exactly as it verifies a human's. The approver field inside the *signed* bytes reads
 `auto:lockout-check`, because there is no person in that path and a transcript must never
@@ -87,10 +85,12 @@ account and re-enabling it *does* work, and the exception it creates is permanen
 recommendation for a second pair of hands is a second **in-domain** account with its own
 key, not a personal address let in through a temporary hole.
 
-**Then the passkey session.** A fresh install sets `PC_REQUIRE_PASSKEY=1` and
-`WA_SESSION_MIN=240`, so one unlock opens the console for four hours. The unlock page is the
-same small document served under the 401, in place, at the URL you asked for -- which is
-why the way back in after unlocking is simply to reload.
+**Then the approver allow-list.** A fresh install sets `PC_REQUIRE_PASSKEY=0` and seeds
+`WA_APPROVER_EMAILS` with the installing account, so the application's own check is
+satisfied by a verified IAP identity on that list -- no enrolment, no credential to
+register. `WA_SESSION_MIN=240` still bounds a session at four hours. An anonymous caller,
+who carries no IAP identity at all, still gets the 401 with the locked document served in
+place, at the URL asked for.
 
 ## What is refused at runtime: by default, nothing
 
@@ -118,8 +118,8 @@ Both variables are read with a shell default, so they are set on the command lin
 time:
 
 ```
-PC_GUARDRAILS=1 ./install.sh YOUR_PROJECT_ID          # refusals back
-PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 ./install.sh YOUR_PROJECT_ID   # the older system entire
+PC_GUARDRAILS=1 ./install.sh                          # refusals back
+PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 ./install.sh        # the older system entire
 ```
 
 `PC_GUARDRAILS=1` restores exactly three behaviours, and it is worth being precise about
@@ -137,9 +137,12 @@ which:
   error in the lockout checker is journalled and the job continues; with them on, it is a
   403.
 
-`PC_AUTO_APPROVE=0` is the separate, larger change: every privileged action waits for a
-human to approve it with a WebAuthn assertion carrying user presence, produced by a device
-you are holding. Not a password, not an API token, not a config flag.
+`PC_AUTO_APPROVE=0` is the separate, larger change: every privileged action stops at
+`pending` and stays there. Nothing comes along and runs it -- not a timer, not a retry. Be
+clear about what that buys and what it does not: it is a **stop**, not a tap. No console
+page fires a pending job, and the approval routes that remain are an API surface rather than
+something you can go and click. **Operators guide** covers the legacy posture end to end if
+what you want is the older per-job approval.
 
 WHY THE DEFAULT IS THIS WAY ROUND, stated so you can weigh it rather than inherit it: a tap
 that arrives forty times an hour stops being read, and an approval nobody reads writes
@@ -209,7 +212,8 @@ whether a command is a good idea -- it is about recoverability. Everything in it
 you unable to reach the console that would let you undo it.
 
 The nine, as rule ids you will see in the journal: `LC1` console service rename (renaming it
-changes the WebAuthn Relying Party ID and invalidates every registered passkey), `LC2` the
+changes the console hostname, which is both the IAP audience and the WebAuthn Relying Party
+ID -- so it takes out the way in and invalidates any credential enrolled under it), `LC2` the
 MCP service name and its domain mapping, `LC3` the OAuth config, `LC4` the auth-path
 secrets, `LC5` the approval KMS keyrings, `LC6` the signer's own code and config, `LC7`
 `PC_REQUIRE_ASSERTION`, `LC8` writes to the identity collections, `LC9`
@@ -284,18 +288,18 @@ is not empty; that indicator is the reliable signal. If it is lit and the drawer
 nothing, go at it directly: `list_pending_confirm` for the list, `GET /api/webauthn/job/:id`
 for one job, `read_job_log` afterwards for the result.
 
-Approving one of these still costs a **fresh** passkey assertion with user presence, bound to
-that job id and to the sha256 of that job's command as it stands when you tap -- so a command
-edited underneath you is refused and asks again rather than approving the new text -- and it
-still runs under the approving human's Google access token. Three answers you will see
-instead of a result:
+Approving one of these goes through the legacy approval routes, which no console page calls
+on a stock install. When they are used, an approval is bound to that job id and to the sha256
+of that job's command as it stands at approval time -- so a command edited underneath you is
+refused rather than approved as new text -- and it runs under the approving human's Google
+access token. Three answers you will see instead of a result:
 
 **`412 google_not_connected`** -- approvals run as you, so they need a Google connection.
-Nothing was changed and the job is still waiting. Re-unlocking the passkey reloads the page
-and kills the browser-held Google token with it; reconnect and approve once.
+Nothing was changed and the job is still waiting. Anything that reloads the page kills the
+browser-held Google token with it; reconnect and approve once.
 
-**`409 stale_gate_view`** -- the document drifted between the render and your tap, so nothing
-was done to it. Reload and read the job again. Deny is bound the same way, because a deny
+**`409 stale_gate_view`** -- the document drifted between the render and the approval, so
+nothing was done to it. Reload and read the job again. Deny is bound the same way, because a deny
 aimed at a drifted id destroys a staged job nobody chose to discard.
 
 **`409` with `preserved_exit_code`** -- you approved something that has already run or is
@@ -345,18 +349,20 @@ Say it plainly, because the credibility of what remains depends on knowing its e
   and not with `-e`, so a failure in the middle does not stop the rest and the exit code is
   the exit code of the *last* thing. Check the world before you re-run.
 
-## Registering another passkey
+## Adding a second operator
 
-Passkeys no longer approve routine jobs, and it would be easy to conclude from that they no
-longer matter. They do: a passkey is what unlocks the console session, and it is still what
-approves anything sitting in the residual queue.
+There is no credential to enrol. Console access is a Google identity that IAP admits and
+that appears on `WA_APPROVER_EMAILS`, so adding a second pair of hands is two grants: put the
+account on the console service's IAP binding, and add its address to `WA_APPROVER_EMAILS` on
+both services. Both are Cloud Run configuration, so it is a revision rather than a job.
 
-Your first passkey was registered during install, at step 9, in front of you. That moment
-cannot be automated and should not be. To add a second device or a second person, unlock with
-an existing passkey and register the new one from there. Do this before you lose the first
-device -- the console fails closed with no approver registered, there is no console path
-around that, and recovery from zero is a redeploy rather than a documented happy path. The
-credential store is a Secret Manager secret, and it is one of the five the uninstaller
-deletes.
+Make it a second **in-domain** account with its own hardware key, for the reason in **The two
+doors** above: the domain constraint is enforced when a binding is written, and the temporary
+hole you open to admit a personal address does not close again.
 
-Keep at least two registered. Treat that as an operating requirement, not advice.
+Do this before you need it. The console fails closed with nobody on the allow-list, there is
+no console path around that, and recovery from zero is a redeploy rather than a documented
+happy path.
+
+Keep at least two accounts able to reach the console. Treat that as an operating requirement,
+not advice.

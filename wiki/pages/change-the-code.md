@@ -84,9 +84,9 @@ colours and the footer copy are all in here.
 with the gate. It is no longer a page you get redirected *to*. An anonymous request to
 `/harness`, `/wiki`, `/flow`, `/chat`, `/lakeview` or `/flowhood` is answered **401 with
 this document served in place, at the URL the caller asked for** -- no redirect, no
-`?next=`. `GET /` is a 302 to `/harness`. With `PC_REQUIRE_PASSKEY=1`, which is the
-default and what the installer sets, this small document is also the working passkey
-unlock page.
+`?next=`. `GET /` is a 302 to `/harness`. The installer sets `PC_REQUIRE_PASSKEY=0`, so on a
+stock install this document is what an identity-less caller gets and nothing more; set
+`PC_REQUIRE_PASSKEY=1` and it is also the working WebAuthn unlock page.
 
 Find them:
 
@@ -117,22 +117,18 @@ Prose only.
 
 **Do not rename the console Cloud Run service.**
 
-The WebAuthn Relying Party ID is that service's hostname -- the installer sets
-`WA_RP_ID` and `WA_RP_ORIGIN` from it directly. Every passkey already registered is
-bound to it. Rename the service and the hostname changes and **every registered passkey
-stops working.**
+That hostname is load-bearing twice. It is the IAP audience the installer pins into
+`PC_IAP_AUD`, and it is the WebAuthn Relying Party ID the installer writes into `WA_RP_ID`
+and `WA_RP_ORIGIN`. Rename the service, the hostname changes, and **both break** -- the IAP
+audience check stops matching, and any credential enrolled under the old name stops working.
 
-An older version of this page finished that sentence with "which means nobody can
-approve the job that would fix it." That is no longer the reason to care, because there
-is no approval queue. The reason to care now is narrower and still good: the passkey
-unlock is the way back into the console **if the identity provider in front of it ever
-fails**. IAP is the outer door and the passkey is the inner one, and breaking the inner
-one leaves you depending on the outer one being healthy on the day you need it.
+That is why `LC1` names a console service rename as lockout-class. The way back into the
+console if the identity provider in front of it ever fails is the WebAuthn unlock page, and
+breaking it leaves you depending on the outer door being healthy on the day you need it.
 
 Change the display name in the HTML. Leave the service name alone. If you genuinely
-must move to your own domain, register new passkeys against the new hostname *before*
-you retire the old one, and keep the old console reachable until you have proved the
-new one works.
+must move to your own domain, stand the new console up and prove you can reach it *before*
+you retire the old one.
 
 ## 3. Propose the change
 
@@ -364,7 +360,7 @@ gcloud run services describe <console-service> \
 Then open the console URL and hard-reload. If you changed `locked.html` you will see it
 **without signing in** -- an anonymous request gets it at 401, in place -- and that is
 the fastest confirmation available anywhere in this system, because it needs no session,
-no passkey and no IAP round trip.
+no credential and no IAP round trip.
 
 If the page is unchanged: you are looking at a cached asset, or the revision serving
 traffic is not the one you just built. Check the serving revision name first. That single

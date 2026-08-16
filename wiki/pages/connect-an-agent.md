@@ -92,16 +92,16 @@ attaches. A session key is how a chat acquires an identity.
 
 ### 2. A session key, for everything else
 
-Mint one from the console: reach the console host through IAP, unlock the passkey
-session, and click **Session pastes** in the harness header. You get a paste block to
-drop into a new chat.
+Mint one from the console: reach the console host through IAP as an account on the
+approver allow-list, and click **Session pastes** in the harness header. You get a paste
+block to drop into a new chat.
 
 The panel used to live on the gate console. `/gate` is deleted, and the minter moved
 into `control-plane/src/harness.html` -- it appends itself to the header at runtime and
 calls the same two endpoints it always called, `GET /api/sessions/roles` and
-`POST /api/sessions/mint`, both passkey-gated and both classed `console`. So this was a
-move of the UI, not a new capability. `/flowhood` still exists and, for a session that is
-already unlocked, is a redirect to `/harness`, so either name reaches the same page.
+`POST /api/sessions/mint`, both session-gated and both classed `console`. So this was a
+move of the UI, not a new capability. `/flowhood` still exists and, for a caller with a
+valid session, is a redirect to `/harness`, so either name reaches the same page.
 Several strings inside the running code still tell you to mint "at the Flow Hood
 (Autoclave, New strain session)" -- that is this page, under its older names.
 
@@ -179,17 +179,15 @@ been corrected in a later cut, this paragraph is the stale one -- check the tree
 It can read your lake under `shared/` and its own `agents/<role>/` folder, read and write
 memory, read the journal, post and complete work items, and write files.
 
-**It can also run privileged work, and on a fresh install it does so immediately.** The
-sentence that used to sit here -- that a privileged tool stages to the gate and waits for
-a human to tap a passkey -- is false as of 2026-08-14 and is the single most important
-thing to unlearn from an older copy of this page. The installer ships
-`PC_AUTO_APPROVE=1` and `PC_GUARDRAILS=0` on both services. What actually happens when an
-agent calls `run_command`:
+**It can also run privileged work, and on a fresh install it does so immediately.** There
+is no staging-and-waiting step for `run_command`: the installer ships `PC_AUTO_APPROVE=1`
+and `PC_GUARDRAILS=0` on both services. What actually happens when an agent calls
+`run_command`:
 
 - A job document is written first, so the record exists before anything executes, and
   `staged_by` names the role that asked.
 - The control plane then stamps a **real** pre-approval into the same Firestore fields
-  the passkey approve route used to write, signs it with the same Cloud KMS asymmetric
+  the legacy approve route used to write, signs it with the same Cloud KMS asymmetric
   key over the same `PC-APPROVAL-CANON-V2` bytes, and fires it. Nothing was bypassed --
   the executor verifies that signature exactly as it verified a human's.
 - The approver inside the *signed* bytes reads `auto:lockout-check`, because there is no
@@ -229,9 +227,11 @@ run is a measurement that they are there. See **Changing the code**.
 
 Some tool families are deliberately absent on a fresh install rather than broken:
 
-- **The browser tools** need a live CDP endpoint on a running machine. The installer
-  provisions none. See **The workstation**.
-- **The `vm_*` tools** need a workstation instance. See **The workstation**.
+- **The browser tools** need a live CDP endpoint the control plane can reach. `install.sh`
+  builds no workstation at all, and the bridge `workstation.sh` stands up is loopback-only
+  with no firewall rule opened for it. See **The workstation**.
+- **The `vm_*` tools** need a workstation instance, which `install.sh` does not create. Run
+  `workstation.sh` and set `WS_VM`/`WS_ZONE`. See **The workstation**.
 
 Absent is not the same as broken. You get no tool rather than a tool that fails on its
 first call.
@@ -242,7 +242,7 @@ Deleting a strain revokes every session key bound to that role: the delete route
 `session_keys` for that role and marks each one revoked, and it reports the count back in
 its response.
 
-An individual key is revoked with `POST /api/sessions/revoke`, which is passkey-gated
+An individual key is revoked with `POST /api/sessions/revoke`, which is session-gated
 like everything else on the console surface. It takes an **id prefix**, and that id is
 the one `GET /api/sessions` lists -- the first twelve characters of `sha256(key)`, not
 the key. A prefix of a hash is not a credential, which is why the listing can safely show

@@ -51,7 +51,7 @@ Four outcomes, and only one of them is the console you want:
   asserts on its presence rather than on the code -- read the probe in `oss/gen.py`
   if you want to check that claim rather than take it.
 - **`401` *without* that header, serving the locked page.** That refusal came from the
-  application's own passkey session, not from the edge. It is not nothing -- an
+  application's own session check, not from the edge. It is not nothing -- an
   anonymous caller still got no data -- but it is one layer where the design calls for
   two, and step 8b records it as a **FAIL** for exactly that reason. The status code on
   its own would have passed, which is why the status code on its own is not the check.
@@ -256,38 +256,43 @@ So if a job did not run, check, in this order:
 1. Was it **staged** rather than run? Some tool paths still answer `{"mode":"staged"}`
    and stop. **The approval channel is now chat, not a page you tap** -- the gate
    console it used to point at is deleted, so a staged job waits on an answer in the
-   conversation and comes back re-issued once you give one. A job fired through the
-   console's own fire endpoint still requires a fresh passkey elevation while
-   `PC_REQUIRE_PASSKEY=1`, which is the default.
+   conversation and comes back re-issued once you give one. The console's own fire
+   endpoint requires a fresh elevation, and on a stock install (`PC_REQUIRE_PASSKEY=0`)
+   no console page calls it.
 2. Was it **refused** rather than pending? `read_job_log(job_id)` returns a reason.
    A refusal happens before the approval is consumed, so a refused job costs you
    nothing and the same approval can be presented again once the cause is fixed.
    With guardrails off, the refusals you are most likely to meet are the ones that
    run *before* a job exists -- a duplicate of something already staged, or a secret
    destroy that has not been through the consumer preflight.
-3. Does the tool need something the installer did not provision? `vm_*` needs a
-   workstation; browser tools need a live CDP endpoint on a running machine.
+3. Does the tool need something `install.sh` does not provision? `vm_*` needs a
+   workstation, and the installer builds none -- run `workstation.sh`, then set
+   `WS_VM`/`WS_ZONE` on both services. Browser tools additionally need a CDP endpoint the
+   control plane can reach, which the loopback-only bridge is not.
 
 ## Nobody can get into the console
 
-The passkey unlock did **not** go away with the gate. It lost the larger of its two
-documents and kept the small one: with `PC_REQUIRE_PASSKEY=1` -- the default --
-`control-plane/src/locked.html`, the page you get under that `401`, **is** the working
-unlock page, and it is the way back in if the identity provider in front of the console
-ever fails.
+A fresh install sets `PC_REQUIRE_PASSKEY=0`, so what admits you is a **verified IAP
+identity on the approver allow-list** (`WA_APPROVER_EMAILS`) and nothing else. If your
+account is not on that list, or IAP will not admit it, you get the `401` and
+`control-plane/src/locked.html` -- which on this posture is a dead end, because there is no
+credential enrolled to unlock with.
 
-If no passkey is registered it refuses rather than defaulting open, and there is no path
-around that from inside the console itself. The one documented escape is a deploy-time
-environment change (`PC_REQUIRE_PASSKEY=0`, which then admits an IAP-verified identity
-on the approver allow-list and nothing else), and setting it needs `run.admin` -- which
-the control plane's own service account deliberately does not hold. That is the point:
-a compromised control plane cannot unlock itself.
+It refuses rather than defaulting open, and there is no path around that from inside the
+console itself. The escape is a deploy-time change to `WA_APPROVER_EMAILS` (or to the IAP
+binding), and either needs `run.admin` / IAM rights -- which the control plane's own
+service account deliberately does not hold. That is the point: a compromised control plane
+cannot unlock itself.
 
-Prevent it: **register at least two passkeys, on two devices.** Do it now, from a
-session you already have, not after you have lost the first device. The same argument
-applies to the account in front of the console -- see the second-account recommendation
-in the operator's guide, because the domain-restriction constraint that makes an
-out-of-domain grant impossible also means a stranger's account cannot rescue you.
+The WebAuthn unlock did **not** go away with the gate. It lost the larger of its two
+documents and kept the small one, and `PC_REQUIRE_PASSKEY=1` puts it back in the path --
+which is the way back in if the identity provider in front of the console ever fails. The
+operator's guide has that switch.
+
+Prevent it: **keep at least two accounts able to reach the console**, on the IAP binding
+and on `WA_APPROVER_EMAILS`. Do it now, not after you have lost the first. Make the second
+one **in-domain**, because the domain-restriction constraint that makes an out-of-domain
+grant impossible also means a stranger's account cannot rescue you.
 
 ## The deploy said it succeeded and the old code is still serving
 
