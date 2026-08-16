@@ -3,10 +3,22 @@
   "title": "Operator wiki",
   "note": "This file is the slug ALLOW-LIST as well as the nav tree. The /wiki route serves a slug only if it matches the flat-slug regex AND appears in `pages` below. Both checks run before any path is joined. A page whose object exists in shared/wiki/pages/ but which is absent here is NOT served; a page listed here whose object is absent 404s. Adding a slug here is the deliberate act of publishing it.",
   "sections": [
-    { "id": "start", "title": "Start here" },
-    { "id": "operate", "title": "Operating it" },
-    { "id": "extend", "title": "Changing it" },
-    { "id": "help", "title": "When it breaks" }
+    {
+      "id": "start",
+      "title": "Start here"
+    },
+    {
+      "id": "operate",
+      "title": "Operating it"
+    },
+    {
+      "id": "extend",
+      "title": "Changing it"
+    },
+    {
+      "id": "help",
+      "title": "When it breaks"
+    }
   ],
   "pages": [
     {
@@ -44,6 +56,14 @@
     {
       "slug": "the-strains",
       "title": "The strains",
+      "section": "operate",
+      "status": "live",
+      "audience": "public",
+      "owner": "unassigned"
+    },
+    {
+      "slug": "working-with-agents",
+      "title": "Working with your agents",
       "section": "operate",
       "status": "live",
       "audience": "public",
