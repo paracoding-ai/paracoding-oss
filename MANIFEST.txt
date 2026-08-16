@@ -7,7 +7,7 @@
 9e42f0bf5c319e34     11351  LICENSE
 b2feedda8e7894e9      4074  NOTICE
 963e0f6aa47e42d9     11313  README.md
-a8eca99dfbfac6d7     42421  SECURITY.md
+a285ca3b63cdd70c      8728  SECURITY.md
 4850525908e06d27    496468  install.sh
 d026c02745cfd8ae     45586  uninstall.sh
 30dfd3b04171f4ef    149949  workstation.sh

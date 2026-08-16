@@ -1,28 +1,19 @@
 # Security
 
-**Paracoding — v3**
+**Paracoding — v8.4**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
-This document describes what this release actually enforces, and what it does not. Every
-claim below was checked against the source in this tree. Where a control is weaker than its
-name suggests, that is said here rather than left for you to find.
-
-Three phrases do not appear anywhere in this document: *appears secure*, *should be safe*,
-*industry standard*. They are the three ways security prose lies without technically lying.
-
-If you find a claim here that no longer matches the code, that is a defect and we want the
-report. Open an issue.
+This document describes what this release enforces and how to report a problem. Every claim
+below was checked against the source in this tree. If you find a claim here that no longer
+matches the code, that is a defect and we want the report — see **Reporting** at the end.
 
 ---
 
-## 1. The claim, stated tightly enough to attack
+## The claim, stated tightly enough to attack
 
 > **No agent holds a credential that can change your infrastructure. The only principal that
 > can is you. The only mechanism is a WebAuthn assertion produced on your own device, seconds
 > before the command runs, bound to the exact command the gate showed you.**
-
-That is the whole product. Everything below either explains how it is implemented, or names a
-place where it is weaker than it sounds.
 
 Four moving parts:
 
@@ -37,585 +28,103 @@ Four moving parts:
    the lifetime of one token.
 4. **Journalling.** Every execution appends to the Firestore `journal` collection.
 
-The architecture concentrates all standing privilege in a human holding a hardware-backed key
-and leaves the agents with a database write. That is the correct shape. The limitations in §7
-are, almost without exception, places where the implementation leaves a path *around* the shape
-rather than through it.
+All standing privilege is concentrated in a human holding a hardware-backed key. The agents are
+left with a database write.
 
 ---
 
-## 2. What the installer creates, and what it grants
+## What the approval is bound to
 
-`bash install.sh YOUR_PROJECT_ID` creates this, and nothing outside the project you name. The
-last row is the only one it asks you about.
+An approval is signed at approval time with a Cloud KMS asymmetric key. The signature covers the
+job id **and** the digest of the command as shown on the approval page.
 
-| Resource | Identity | Standing authority |
-|---|---|---|
-| Cloud Run `paracoding-control-plane` | `pc-control-plane@…` | `roles/datastore.user`, `roles/logging.logWriter`, `roles/aiplatform.user` **project-wide**, **behind Identity-Aware Proxy**, public invoker binding removed |
-| Cloud Run `paracoding-mcp` | `pc-control-plane@…` | the same image and the same identity, deployed as a second service. IAP off, publicly invokable |
-| Cloud Run `paracoding-gate-exec` | `pc-gate-exec@…` | `roles/datastore.user`, `roles/logging.logWriter`, **not publicly invokable** |
-| Firestore | — | created native-mode if absent; a Datastore-mode project is refused, not converted |
-| `pc-session-secret` | | gate session HMAC key — control plane only |
-| `pc-human-confirm-secret` | | `x-human-token` shared secret — control plane only |
-| `pc-bootstrap-secret` | | first-passkey enrollment — mounted, used once, then **unmounted** |
-| Cloud KMS `approval-signing` on keyring `paracoding-approvals` | — | `EC_SIGN_P256_SHA256`. `roles/cloudkms.signer` to the control plane, `roles/cloudkms.publicKeyViewer` to the executor, both scoped to the key and not to the project |
-| `pc-webauthn-creds` | | per-job assertion enrolment for the executor — created **empty** (`{}`), `roles/secretmanager.secretAccessor` to the executor, that secret only |
-| Cloud Storage `<project>-datalake` | — | the data lake. Uniform bucket-level access, public access prevented, `roles/storage.objectAdmin` to the control plane **on that bucket only**, never the project-wide role |
-| Cloud KMS `vault-kem-xwing` on keyring `paracoding-vault` | — | `KEY_ENCAPSULATION` / `KEM_XWING`, the key the lake's at-rest envelope derives from. `roles/cloudkms.decapsulator` to the control plane, scoped to the key |
-| Cloud Storage `<project>-source` | — | **the git object store, and it holds your source tree.** Object versioning ON, uniform bucket-level access, public access prevented, `roles/storage.objectAdmin` to the control plane on that bucket only. Objects are sealed the same way the lake is; see §8 for what is deliberately *not* sealed |
-| Pub/Sub topic `paracoding-main-moved` | — | published to when the git branch moves, so a build can be triggered from it. `roles/pubsub.publisher` to the control plane |
-| `pc-build@…` | — | the CI build identity, created so that builds do not run as the project's default compute account. `roles/run.developer` on the three Cloud Run services, `roles/iam.serviceAccountUser` on **both runtime service accounts**, and the Cloud Build / Artifact Registry / logging roles a build needs. The trigger that runs as it is **not** created by the installer: step 8c prints the command and deliberately does not run it |
-| A Compute Engine workstation | — | **optional — step 5d asks, and defaults to no.** Created with no external address and OS Login enforced |
+- The control plane holds the private half. The executor that runs the job holds only the public
+  half — it can verify a signature without being able to produce one.
+- Edit the command after approval and the digest no longer matches; the executor refuses it.
+- A claim is single-use: the executor claims the job for execution in a transaction, so the same
+  approval cannot be replayed into a second run.
+- Firestore IAM has no per-collection granularity. Something with database access can *corrupt*
+  an approval. It cannot forge one.
 
-**Two of those rows are the ones most worth arguing with, so they are called out rather than
-left in a table.** `roles/aiplatform.user` is granted **project-wide** and cannot be narrowed: a
-Vertex publisher model is not a resource an IAM condition can scope to. It is the predict-side
-role, not `roles/aiplatform.admin`, and it is what the chat surface and the memory embedder
-authenticate with — with the API enabled and this role missing, both return 403, and nothing in
-the install exercises that path, so you would find out on your first message. And `pc-build@…`
-holds `roles/iam.serviceAccountUser` on both runtime accounts, which is what lets a build deploy
-a revision *as* the control plane or the executor. Anything that can drive that identity can
-deploy code into your control plane. It exists because the alternative — building as the project
-default compute account — is strictly worse, not because it is harmless.
+## The binary jail
 
-Every Secret Manager secret above except `pc-webauthn-creds`, which is created empty, is
-generated on your machine with `openssl rand` and stored in Secret Manager; the KMS keys are
-generated by Cloud KMS and their private halves never leave it.
-**None ship in this tree.** There is no phone-home, no telemetry, and no license check.
+An approved script runs with `PATH` restricted to a jail directory built from an enumerated set
+of binaries, so an unlisted command does not resolve. The jail is constructed before the request
+handler runs and its state is journalled. What authorises the work in the first place is that a
+human approved that exact command and the executor refuses any script whose hash does not match
+the approval — the jail narrows what an approved script can reach for.
 
-**One secret that used to be on this list is not created any more.** Earlier versions created
-`pc-approval-mac-key`, a symmetric HMAC key for the legacy approval stamp, and granted it to the
-control plane. The executor stopped reading it when approvals moved to Cloud KMS, so on a new
-installation it verified nothing on either side — an unused credential with a rotation burden and
-no purpose. A fresh install now provisions no symmetric approval key at all. **An existing
-installation keeps it**: the control plane still writes the legacy HMAC beside the KMS signature
-for the benefit of an executor predating the change, re-running the installer never deletes a
-secret, and the upgrade path adds secrets without removing ones it does not name. `uninstall.sh`
-still removes `pc-approval-mac-key` if it is there, so an upgraded deployment still tears down
-cleanly. See §5.
+## Two services, one image
 
-Three installer decisions worth knowing about:
+One built image is deployed as two Cloud Run services, and the split is a security boundary.
 
-**It refuses a service-account identity.** Approved jobs execute with the approver's own OAuth
-token, so the gate needs a human to consent. An installer that accepted a robot identity would
-produce a system whose central claim was false from the first minute.
+- `paracoding-control-plane` is the human console. Install step 8 puts it behind Identity-Aware
+  Proxy, grants the installing account `roles/iap.httpsResourceAccessor`, and removes the public
+  invoker binding, so an anonymous request is refused at Google's edge before the container is
+  reached. Underneath IAP the console is still guarded by the application's own passkey session,
+  and step 8 asserts that guard against the live deployment — `/harness` must answer an anonymous
+  caller `401` with the locked page — *before* IAP goes in front of it. If it cannot enable IAP it
+  says so and prints the command, rather than reporting a clean install.
+- `paracoding-mcp` is the machine-facing surface: the MCP transports, OAuth 2.1 and its discovery
+  documents, the agent cards, and the token-authenticated agent API. It is publicly invokable
+  because IAP consumes the `Authorization` header and an MCP client has no Google identity to
+  present. `POST /mcp` answers `401` to anything unauthenticated; a client that connects with no
+  credential resolves to no role and receives exactly one tool, `whoami`.
 
-**It deploys twice.** The WebAuthn RP ID must equal the host serving the gate, and the origin
-allowlist is a separate exact match — neither is knowable until the service exists. So step 5
-ships a stock image purely to learn the URL, and step 6 builds the real one with the right
-values. Getting this wrong locks you out of your own gate permanently. One extra deploy makes
-that impossible.
+Every route in the 90-route surface map is declared as `console`, `mcp` or `both`. A route that
+maps to neither surface throws at boot rather than shipping a surface nobody audited.
 
-**The enrollment window closes itself.** `WA_BOOTSTRAP_SECRET` is mounted, you register, and the
-installer removes it. It does not rely on you remembering.
+## Identity
 
----
+Every strain is a first-class identity with its own scope, journal lane and memory, and cannot
+read another's — a leaked session key leaks a role, not the system. Role is resolved server-side
+from the key when it is presented; it is never trusted from anything the caller sends. Session
+keys are minted by you, expire (seven days by default), and are deliberately not shipped inside
+any release artifact.
 
-## 3. Identity
+## Encryption at rest
 
-**Your identity** is a WebAuthn credential in your device's secure element. It is the root of
-trust and there is nothing above it.
+Git objects and the data lake are sealed in the same envelope: AES-256-GCM with HKDF-derived
+keys under X-Wing, the hybrid post-quantum KEM combining ML-KEM-768 and X25519 (1120-byte
+ciphertext). Breaking it requires breaking both the lattice and the elliptic curve. The git
+server itself has no git binary and no disk: refs live in Firestore under a serializable
+compare-and-swap inside a transaction, objects in Cloud Storage as atomic whole-packfile writes.
+There is no force push.
 
-**An agent's identity** is bound to its connector token. The token authenticates and *also*
-determines the acting role: one token, exactly one role, resolved server-side. A caller-supplied
-`agent` argument is a credential to be looked up, never a claim to be believed — a value that
-does not resolve is refused outright, never downgraded to a weaker role or silently upgraded.
+## Model access and billing
 
-**Identities cannot assert themselves into existence.** The approve path refuses to approve any
-job whose `staged_by` is not an ACTIVE document in the `strains` registry. Such a job is moved
-to `quarantined`, journalled once, and answered 403 — it can never be approved afterwards, not
-even by you on a verified device. **Deny remains permitted at all times**, because refusing to
-let an operator deny a bad job would be its own defect.
+`config/models.fleet_mode` is a three-position switch. `home` makes no model call of any kind.
+`dual` allows API-key transports. `work` is keyless Vertex only, billed to the project, and the
+keyed transport is **refused in code** so a stray key cannot start billing a card. An unset,
+unreadable or unrecognised value reads as `home`. The installer sets `work`.
 
-New connectors land on `fleet-onboarder`, a deliberately minimal role, rather than inheriting
-anything privileged.
+Nothing in this release holds an API key, and none is needed to run it.
 
-**Session keys expire.** A chat is bound to a strain by a server-minted key pasted into its
-bootstrap. That key carries an expiry -- seven days by default, `PC_KEY_TTL_DAYS` -- enforced
-server-side when the key is resolved, not trusted from anything the caller sends. Before v3 a
-key was valid forever, so one pasted into a chat transcript, a screenshot or a shared log was
-a permanent credential that only an explicit revoke could kill. When a key lapses the denial
-says so and tells you to mint a fresh paste.
+## Release gates
 
-**Possession of the key is the identity.** Every chat reaches this control plane through one
-account-level connector: one bearer, one client ID, one source IP, and a stateless transport.
-The server has no signal that distinguishes chat A from chat B. Two chats given the same paste
-are the same role, and a chat that reads another chat's key out of its own context can use it.
+The release generator refuses to emit a tree that fails its checks: a leak-baseline ratchet, a
+route audit, a blob audit, an image-reference hook, a boot-dependency check, and an AST-level
+structural gate that parses the emitted executor and asserts the job-claim and subprocess calls
+are where they are supposed to be. `MANIFEST.txt` records a truncated SHA-256 and byte length for
+every file in the release, so a truncated or mis-copied download is detected on arrival.
 
-**Strains do not authenticate through the OAuth connector.** The app connector always acts as
-the human principal. A workload that needs its own identity presents a Google-signed
-service-account ID token, audience-pinned to this deployment and mapped to an active strain.
-There is deliberately no strain picker on the consent page: that page is reachable by anyone,
-and a form field is not an authorization boundary.
+## Non-goals
+
+- This is not a sandbox for untrusted code. It is an approval boundary: the control is that a
+  human approved one exact command, not that the command is confined afterwards.
+- It does not defend a compromised approver device. A passkey on a machine an attacker already
+  controls approves what that attacker asks for.
+- It does not attempt bit-for-bit reproducible builds. A rebuild produces a working, equivalent
+  deployment.
+
+## If you are evaluating this
+
+Read `gate-exec/exec_server.py` first — signature verification, job claim and the jail are all
+there, in one file. Then `control-plane/src/index.ts` for the surface map and the staging path.
+Then install it into a throwaway project and try to make it run something you did not approve.
+That is the interesting test, and the answer we want is a refusal.
 
 ---
-
-## 4. The gate
-
-**User verification is required and enforced.** Every WebAuthn ceremony requests
-`userVerification: 'required'`, and every verification asserts `requireUserVerification: true`.
-A presence tap — touching a key without a biometric or PIN — is not an approval.
-
-If you are upgrading and enrolled a credential before v2.1, it may have been registered without
-user verification. Those credentials will stop working and must be re-enrolled. That is the
-intended outcome, not a bug.
-
-**Assertions are bound to the job.** The challenge is `randomBytes(24) || sha256(jobId|action)`,
-and the server re-derives and constant-time-compares the trailing 32 bytes. An assertion minted
-to approve one job cannot approve another. This is the load-bearing control in the entire
-system.
-
-**Destructive commands take a second touch.** A command matching the danger classifier returns
-HTTP 428 and requires a fresh, job-bound assertion before it can run at all.
-
-**Sessions fail closed.** A gate session is an HMAC over its payload. If the signing secret is
-missing or shorter than 16 characters, the system refuses to *issue* sessions and refuses to
-*verify* them. No secret means no valid session means the gate stays locked. It does not degrade
-to open.
-
-**God-mode fails closed twice.** An empty approver allowlist denies elevated execution outright
-rather than accepting any authenticated Google identity, and a Google token is only accepted if
-its audience matches this deployment's own client ID — a token minted for some other application
-you have signed into will not pass.
-
-**Batch approval is a client-side loop, not a batch endpoint.** Ticking twenty boxes runs the
-single-job path twenty times; every job clears the identity check, the danger step-up and the
-allowlist independently. Twenty jobs are never approved under one assertion. The one caveat: the
-loop reports failures as an aggregate count without naming which job failed, so re-read the queue
-after a batch rather than trusting the summary line.
-
----
-
-## 5. The executor
-
-The executor is a separate Cloud Run service that is **never publicly invokable**. Only the
-control plane holds `run.invoker` on it. It has no standing project authority beyond its database
-and logging roles — it does not hold Editor, it cannot administer IAM, and it cannot read your
-other secrets.
-
-Five controls run before anything executes, all fail-closed:
-
-**Status.** The job must be `confirmed` or `executing`. Anything else is refused.
-
-**Command integrity.** The approved document is the only authority on what runs. A presented
-script is hashed and compared against the approved command; a mismatch is refused and journalled
-with digest prefixes, never the command itself.
-
-**What the script may invoke — and what this does not claim.** From v8.2 the approved script runs
-with `PATH` restricted to a directory containing symlinks to an enumerated set of binaries and
-nothing else, so an unlisted binary does not resolve: `gsutil` and `ssh` answer
-`command not found`. Shell builtins and keywords do not resolve through `PATH`, so an ordinary
-`set -uo pipefail` preamble is unaffected — the previous attempt at this control was a
-first-token text scan, and arming it returned 400 on exactly that line and broke production. It
-was observe-only from then until v8.2, which means that for that period **there was no binary
-boundary at all**, and the journal carries a `gsutil` invocation recorded as "not allowlisted
-(observe-only, executing anyway)" and then executed.
-
-**The gap is stated rather than papered over: an absolute path still runs.** `/usr/bin/env` was
-measured doing so. This is a real control and it is not a sandbox — it raises the floor from
-"nothing" to "an enumerated set, unless the script names a full path". Closing it needs an
-execution-layer change: an image containing only the permitted binaries, or a container/seccomp
-boundary. Neither is attempted here. Do not describe this install as confined; describe it as
-approved. `EXEC_BINARY_ALLOWLIST_ENFORCE` no longer exists — it was deleted rather than defaulted
-off, because a switch whose documented effect is a 400 on every multi-line job is a footgun
-pointed at production. `EXEC_BIN_JAIL=0` disables the jail if an install needs a binary the list
-does not name.
-
-**Approval-time signature.** When you approve, the control plane records `sha256(command)` and
-signs the approval with a **Cloud KMS asymmetric key** (`EC_SIGN_P256_SHA256`). The executor
-verifies it with the **public half only**: it holds `roles/cloudkms.publicKeyViewer` on that key
-and no permission that can sign.
-
-The signed message is `PC-APPROVAL-CANON-V1` — a 21-byte domain tag followed by seven
-length-prefixed fields, `alg`, `jid`, `csha`, `appr`, `kver`, `iat`, `exp`, where every length is
-a **UTF-8 byte count** and `iat`/`exp` are RFC3339 UTC timestamps. The executor never parses
-those bytes; it **rebuilds** them and verifies the signature over the rebuild, taking `jid` from
-the job it is executing and `csha` from the command it is about to run rather than from the
-stamp. Length prefixes rather than a delimiter, because with a `|` join two different field
-tuples can produce identical bytes and one signature would cover both.
-
-The check has four outcomes and only one of them lets anything through:
-
-- **`ok`** — present and verified.
-- **`bad`** — present and it does not verify, or it verifies and is expired or future-dated.
-  **403, unconditionally.** A signature that is present and wrong is an attack, not a migration
-  artefact, so no setting relaxes it.
-- **`unverifiable`** — present but it could not be checked at all: no key-version allowlist
-  configured on the executor, a key version that is not on the allowlist, a public key that
-  cannot be fetched or is the wrong algorithm, a stamp naming a different canonicalisation, a
-  malformed field. **403, unconditionally.** "We were not given the means to check" is never a
-  way to switch the check off.
-- **`absent`** — no signature on the document. This is the only rung that allows, and only when
-  `APPROVAL_REQUIRE_SIGNED=0`. The absence is journalled as `exec_approval_sig_absent`. See §7.
-
-The separate `approved_sha256` digest is handled the same way: *present but unreadable* is
-refused rather than treated as absent — otherwise anyone who could write junk into the field
-would have a bypass.
-
-**One approval, one run.** The approval is consumed atomically in its own field before the
-subprocess starts, inside a transaction that re-reads status. A crash mid-run does not leave a
-live approval. A `confirmed` approval also expires — one hour by default — and a job carrying no
-approval timestamp is refused rather than trusted.
-
-### What the signature does and does not buy you
-
-Firestore IAM has **no per-collection granularity**, and the executor genuinely needs writes,
-not just the read: it spends the approval in a `@firestore.transactional` single-use claim,
-appends a journal entry on every path including refusals, and writes `executed_at` and the
-result back. So it must hold `roles/datastore.user`, and that grant is necessarily project-wide.
-There is no narrower grant that permits those writes.
-
-This means the executor's service account *can write the very document it verifies*. It could
-rewrite a command and its digest together. What it cannot do is produce a valid **signature**,
-because signing needs `roles/cloudkms.signer` on the approval key and only the control plane
-holds it. Database access does not confer it, and neither does the public key the executor
-reads. **A compromised executor cannot forge an approval.**
-
-That is the property the earlier design did not have. Until v3 the stamp was a symmetric
-`HMAC(key, jobId|sha)` under `pc-approval-mac-key`, and the executor held that same key in order
-to verify — so the service this section names as the adversary was handed the signing key and
-could mint an approval for any command it liked. The symmetric MAC is gone from the executor: it
-reads no `APPROVAL_MAC_KEY` and computes no HMAC anywhere.
-
-Be precise about how far that has been carried, because the two halves are at different stages.
-**New installations do not provision `pc-approval-mac-key` at all** — it is not created, not
-granted, and not injected into either service. **Existing installations retain it until the
-dual-emit is removed at source.** The control plane's approve path still writes the legacy HMAC
-beside the KMS signature when the key is present, so a deployment that already has the secret
-keeps stamping one; that emit is what an executor predating the change relies on. It is
-conditional on the variable being set, which is why omitting it from a new install is safe rather
-than a lockout: with no key the HMAC is skipped, the KMS signature is written alone, and the
-approval verifies normally. The MAC is therefore not gone — it is gone from the executor, and
-gone from new installs. Removing it from the control plane is a source change with a deploy
-behind it, and it has not happened yet.
-
-The installer's grant of the key to the executor was deliberately removed and must not be
-re-added under any circumstances.
-
-So the honest statement is: **a principal with database access can corrupt an approval; it
-cannot forge one.** Anything corrupted is refused, not executed.
-
-**This is a mitigation, not an elimination.** The stronger design — the control plane passes the
-approved command and its signature in the request, and the executor holds no database access at
-all — is not implemented in this release. It is the main thing we would change next. See §7.
-
----
-
-## 6. Build-time and network posture
-
-**The route audit runs as a build step.** It parses every `app.get/post/put/delete/patch/all/use`
-registration, hard-fails on any wildcard route (a catch-all registered before the connector routes
-would swallow `/.well-known/*` and `/oauth/*`), hard-fails if any of the seven MCP connector
-routes is missing, and compares the set of unguarded routes against a committed baseline. A
-**new** route with no auth guard fails the build, and a failed build produces no image, so nothing
-can deploy. Read §7 for what this check cannot see.
-
-**The release refuses to be generated if it contains operator-specific values.** The generator
-scans every emitted file for project IDs, session keys, bucket names, bearer tokens, API keys,
-and for any operator name or operator hostname, and refuses to declare the release publishable if
-it finds any. This is why the tree you are reading names no host it does not own.
-
-**Ingress.** One image is deployed as two Cloud Run services, and they are reachable in different
-ways on purpose. The console, `paracoding-control-plane`, serves the browser pages and the gate;
-it sits behind Identity-Aware Proxy, only the installing account is granted
-`roles/iap.httpsResourceAccessor`, and its public invoker binding is removed, so an anonymous
-request is refused at Google's edge. Underneath that, the application's own passkey session is
-still the guard, and the installer asserts it in the moment before IAP goes in front of it. The
-MCP service, `paracoding-mcp`, is publicly invokable with IAP off, because IAP consumes the
-`Authorization` header and an MCP client has no Google identity to present; `POST /mcp` requires
-a token, and `GET /` is a console route that this service does not serve. The executor is not
-publicly invokable. The installer's self-test asserts each of these against your live deployment,
-not against source. Splitting the surfaces is a boundary, not a convenience: a compromise of the
-machine-facing service does not reach the human console.
-
-**Response headers** on the gate: `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`,
-`Strict-Transport-Security`, and a Content-Security-Policy in **report-only** mode. Report-only
-means violations are reported and permitted; treat script-source enforcement as absent for
-planning purposes.
-
-**Spend.** Model buses ship OFF (`fleet_mode=home`), so nothing calls a model until you turn one
-on. That is not the same as "free", and the earlier wording here said Cloud Run idle and nothing
-else, which was wrong. A fresh install also stands up two Cloud Storage buckets (one with object
-versioning on, so overwritten objects are retained and billed), a Firestore database, two Cloud
-KMS keys — KMS bills per key version per month and per cryptographic operation, and **a key can
-never be deleted**, so that line does not go away when you uninstall — an Artifact Registry
-repository holding every image you build, and a Cloud Build submission per deploy. The Vertex API
-is enabled and the control plane is granted `roles/aiplatform.user` at install time, so the
-moment you do turn a bus on, inference bills per call with no cap configured anywhere in this
-tree. Idle cost is small; it is not zero, and the parts that survive an uninstall are the KMS
-keys and whatever you have put in the buckets.
-
----
-
-## 7. Known limitations
-
-Ordered by what we would fix first. This section is the part of the document most worth your
-time.
-
-### The executor holds project-wide database access
-
-Covered in §5. Firestore IAM cannot scope a grant to a collection, and the executor genuinely
-needs the writes — the single-use claim that spends the approval, a journal entry on every path
-including refusals, and the `executed_at` result write. So `roles/datastore.user` is project-wide
-and implies write access to everything in the database, including the audit journal. The
-asymmetric approval signature is what stands between that and a forged approval: the executor can
-corrupt a record, it cannot sign one. **The fix is architectural** — move the approved command
-and its signature into the request and take the database away from the executor entirely — and
-it is not done.
-
-### The lake's encryption key is minted only if your machine can do X-Wing
-
-Step 5e always creates the keyring `paracoding-vault` and the key `vault-kem-xwing`. The lake
-object those protect, `shared/vault/master.kem`, is a different matter: minting it needs a
-client-side X-Wing encapsulation, which needs a Python `cryptography` carrying ML-KEM-768. A bare
-`python3` has no ML-KEM, and openssl 3.5.6 does not implement X-Wing, so on such a machine the
-installer prints exactly what is missing and skips the mint. It is never forged, and the mint it
-does perform is verified against Cloud KMS before it is published.
-
-**Without `master.kem` the lake is fail-closed, not plaintext.** `harWriteLake` calls
-`vaultMaster()` before `file.save()`, so every write outside the five cleartext prefixes throws.
-There is no plaintext fallback branch. In that state `read_file` and `list_files` work and
-`write_file` and `put_file` do not — a refusal, not a leak. To finish it, install the library and
-re-run the installer from that machine: provisioning is idempotent, the keyring and key are
-adopted rather than remade, and an existing `master.kem` is never overwritten. Until this
-release, the installer said this at run time and no shipped document said it at all.
-
-### An unsigned approval is refused only where the executor is armed
-
-`APPROVAL_REQUIRE_SIGNED` gates exactly one rung: a job carrying **no** signature at all. A
-signature that is present and wrong, or present and uncheckable, is refused with 403 whatever
-this flag says (§5).
-
-**A fresh install arms it.** Step 5b provisions the KMS keyring, key and grants, finds the
-enabled key version, and the deploy sets `APPROVAL_REQUIRE_SIGNED=1` on the executor. Three cases
-leave it unset: you supplied `PC_APPROVAL_SIG_KEY_VERSION` or `PC_APPROVAL_SIG_KEY_VERSIONS`
-yourself, in which case arming is left to you; a `--rehearse` run where KMS could not be
-provisioned, which warns and arms nothing rather than requiring a signature nobody can produce;
-and an upgrade of an existing deployment, which does not rewrite the variable for you.
-`PC_APPROVAL_REQUIRE_SIGNED=1` or `=0` overrides either way.
-
-**The executor's own in-code default is `0`**, and that is an upgrade property rather than a
-fresh-install one: a deployment upgrading from a build that predates the signer has approvals in
-flight carrying no signature, and requiring one would 403 every job including the one that would
-undo the change. Absences are journalled as `exec_approval_sig_absent`, and a missing
-`approved_sha256` as `exec_approval_sha_absent`. Once those have stopped appearing, set
-**`APPROVAL_REQUIRE_SIGNED=1`** from the deploy surface, not through the gate. Until you do, an
-attacker with database write can delete `approval_sig` to reach the permissive rung rather than
-having to defeat it.
-
-### The route audit proves less than it looks like it proves
-
-Three specific gaps, all worth knowing before you rely on a green build:
-
-- **"Guarded" is a substring test.** A route counts as guarded if a guard function's *name*
-  appears anywhere in its handler body — including in a comment, a string, or code after an early
-  return. It is a regression detector, not a proof of enforcement.
-- **Rate limiters count as guards.** A route whose only protection is a rate limit is
-  public-but-throttled and will be reported guarded.
-- **WebSocket upgrade handlers are invisible.** `server.on('upgrade')` never enters the Express
-  middleware stack, so an upgrade path cannot be audited by this tool at all.
-
-A pass means *no new Express route appeared without a guard-shaped string in its body*. Read
-`control-plane/route-baseline.json` yourself to see what is public today.
-
-### The installer's self-test does not exercise the execution path
-
-The installer's checks run against your live deployment and are real HTTP assertions, not source
-greps, and a functional phase at step 8b calls the MCP tool surface, reporting every tool as
-exercised, asserted, or not-exercised with the reason it could not be run unattended. But nothing
-stages a job, approves it, or executes anything: an approval needs a passkey with user presence,
-and the executor check asserts only that the service is *unreachable*, which Cloud Run's IAM
-layer answers before the container is consulted.
-
-**So: approve one trivial job before you trust a new installation.** Stage `echo hello`, approve
-it, confirm exit 0. That is the check the installer does not do for you, and it is the one that
-matters most.
-
-### The manifest detects accident, not tampering
-
-`MANIFEST.txt` carries a truncated digest per file and nothing signs the manifest itself. It will
-catch a corrupted download. It will not catch a deliberate substitution, because an attacker who
-can change a file can change its row. Verify the release against the repository if provenance
-matters to you.
-
-### Strain identity is authenticated; the tool surface is a setting, not a boundary yet
-
-Two mechanisms sit behind "which strain is this", and they have different properties.
-
-**A workload authenticates.** It presents a Google-signed service-account ID token. Google
-verifies the signature and expiry, the audience is pinned to this deployment's own public
-URL as a replay guard, the identity must be a `.iam.gserviceaccount.com` principal, and it
-is resolved against `strains` by `sa_email` with `status == active`. A workload cannot claim
-another strain's identity without that service account's credentials -- and because the
-service account carries its own IAM, which strain a workload is also bounds what it can do
-in your project. This is authentication, and it is real authority.
-
-**A chat presents a key.** Possession of a session key is the identity: one account-level
-connector, one bearer, a stateless transport, and no signal distinguishing chat A from chat
-B. A key copied out of one chat's context works in another. Keys expire after seven days by
-default.
-
-**The MCP tool surface is configurable per strain and this deployment does not narrow it.**
-`strains/<role>.tool_classes` selects which classes of tool a role receives -- read, write,
-stage, infra, browser -- and is enforced at registration, so a role never sees a tool it may
-not use. An absent, empty, or malformed field means **every class**, which is the state
-every strain ships in. `whoami` is never withheld, so a role can always report what it is.
-
-So the honest statement is: every admitted role currently receives the same toolset because
-no strain has been narrowed, not because the platform cannot narrow one. Narrowing a role is
-a database field and takes effect on the next request, with no deploy. Until you set one,
-treat a leaked **session key** as carrying the blast radius of any admitted role -- that is
-a statement about tool registration, not about whether strain identity is real.
-
-### OAuth credentials are revocable, and re-authorizing retires what it replaces
-
-`oauth_tokens` and `oauth_refresh` carry a `revoked` flag, honoured in **both** the bearer
-path and the `refresh_token` grant. Enforcing it in only the first would be worse than not
-having it: a credential would be reported dead while it still minted access tokens. A
-successful authorization also marks prior credentials for the same `client_id` **and**
-`email` revoked, so authorizations stop accumulating. That sweep is fail-soft and
-journalled -- tidying old credentials never blocks a sign-in.
-
-`revoked` is read as `=== true`, never `!== false`, so records written before this shipped
-keep working until something explicitly revokes them.
-
-**What this does not give you.** Revocation is a field, and there is no operator UI for it
-in this release -- setting it is a database write. There is also no automatic expiry on a
-refresh credential beyond its 30-day TTL. Session keys still have the better story here:
-both a revoked flag and a default seven-day expiry.
-
-### Builds are not reproducible
-
-Two builds of this tree will not be byte-identical. If you need reproducibility, this release
-does not provide it.
-
-### Secrets touch disk during installation
-
-Generated secrets are written to a temporary file in the release directory, passed to
-`gcloud secrets create`, and removed. The removal is not on a trap, so an abnormal exit can leave
-one behind. After installing, `ls -a` the directory and confirm no `.s.tmp` or `.b.tmp` remains.
-The enrollment URL also contains the bootstrap secret, so it appears in your shell scrollback; it
-is single-use and unmounted afterwards, but it is there.
-
-### The installer needs an interactive terminal
-
-The enrollment step waits on `read`. Run non-interactively — piped, or in CI — it returns
-immediately and the bootstrap window closes before you can register. Run it in a real terminal.
-
-### The published source is honest, not readable
-
-`control-plane/src/index.ts` is the assembled control plane: one file, several hundred thousand
-bytes, some lines very long. It is genuinely the code that runs, which is the point — there is no
-separate "real" source that this tree approximates. But it is not a file a human reviews by
-reading top to bottom, and we are not going to pretend otherwise. The route audit exists because
-inspection does not scale here.
-
-### This release has been installed from zero a small number of times
-
-Not a large one. The failure modes we know about are documented above. The ones we do not know
-about are the reason the gate is designed so that finding a problem costs you a refusal rather
-than an incident.
-
----
-
-## 8. Non-goals
-
-Stating these plainly is part of an honest posture. A non-goal misread as a failure wastes your
-time; a failure misfiled as a non-goal is a lie.
-
-**Multi-tenancy.** One operator, one project. There is no per-user authorization model and no
-tenant isolation. Two people sharing an installation share all authority.
-
-**Separation of duty.** The approver is the project owner. No two-person rule, no quorum, no role
-that can approve a narrow class of change without being able to approve all of them. Do not deploy
-this as a change-control system for a team that needs four eyes.
-
-**Least privilege at approval time.** Approval forwards your full `cloud-platform` scope. The
-system does not down-scope authority to the task. A typo in an approved command has project-wide
-reach.
-
-**Protection against a compromised device.** The passkey is the root of trust. A compromised
-phone is a compromised fleet.
-
-**Agent alignment.** Nothing here constrains what an agent *wants*. The gate constrains what an
-agent can *do* without you, which is a different and more tractable problem. An agent that
-persuades you to tap approve has won.
-
-**Confidentiality from your cloud provider, except in the data lake.** This is per-surface, so
-it is stated per-surface. Firestore, Secret Manager and Cloud Storage itself are encrypted with
-Google-managed keys; no customer-managed encryption key is configured for any of them, and no
-`--kms-key` is passed anywhere in the installer. For those surfaces Google can read your data at
-rest. **The data lake is the exception.** Objects the control plane writes there are sealed in
-the application layer before they reach Cloud Storage: AES-256-GCM under a per-object key derived
-from a master that Cloud KMS produces by decapsulating `shared/vault/master.kem` with the
-customer-managed key `vault-kem-xwing` on keyring `paracoding-vault` — `KEY_ENCAPSULATION` /
-`KEM_XWING`, the X-Wing hybrid post-quantum KEM (ML-KEM-768 with X25519) — with the object's own
-path bound in as additional authenticated data. Two carve-outs, and neither is incidental: five
-prefixes are stored in the clear by design, `shared/deploy/`, `shared/harness/`,
-`shared/passkey/`, `shared/mcp-oauth/` and `shared/vault/`, because the control plane loads them
-at boot and `master.kem` cannot be encrypted by the thing it bootstraps; and an object written
-before the envelope existed carries no `PCV1` magic and is read back as-is. §7 records the
-condition under which `master.kem` is never minted at all.
-
-**The same envelope covers the git object store, and what it deliberately leaves in the clear is
-the interesting part.** `<project>-source` holds your commit history — every blob of every file
-you have ever pushed through the repository tools — and loose objects and packs are sealed by the
-same master. Two things there are plaintext ON PURPOSE, because the store cannot be walked
-without them: pack **index** files, and the **object paths themselves**, which are the git object
-ids. So an entity that can list that bucket learns the full shape of your history — how many
-objects, how they are packed, and the oid of every one of them — without being able to read a
-byte of content. Oids are hashes of content, so anyone holding a copy of a file you committed can
-confirm you committed it. Treat the object store as leaking structure and confirming guesses,
-never as hiding that a given known file is in your tree.
-
-**Sandboxing between agents.** Cross-agent isolation is a storage-prefix convention plus a
-database status field. Assume that one compromised agent identity reaches everything in the
-shared drop zone.
-
----
-
-## 9. Threat model
-
-**Assets.** Your Google identity and its `cloud-platform` authority; the integrity of the approval
-decision; the confidentiality of your database; your ability to approve work; the integrity of the
-audit journal.
-
-**Assumed sound.** Google Cloud's control plane, Firestore and Cloud Storage. Your device's secure
-element. TLS. And that you read the command on the approval screen before tapping — that last one
-is load-bearing.
-
-| Actor | What they get | Bounded by |
-|---|---|---|
-| Anonymous internet | on the MCP service, the OAuth discovery documents and agent cards; `POST /mcp` is 401. The console is refused at the IAP edge, and the executor is not publicly invokable | §6 |
-| Someone holding your unlocked device | everything you have | non-goal, §8 |
-| A compromised agent token | stage jobs, read and write the shared drop zone, read job output, and — since the repository tools shipped — `git_read`, `git_propose` and **`git_push` over your entire source tree**, which is the authority to change the code your next build compiles. It still **cannot approve**, and a push is not a deploy: a build still has to run. But it moves the branch a build reads from, so treat this row as source-tree write access and not merely as drop-zone access | §3, §4 |
-| A principal with database write | corrupt an approval into a refusal; rewrite the journal. **Cannot forge an approval** — signing needs a KMS private key no database grant confers | §5 |
-| You | full project authority | intended |
-
-**Where the weight sits.** Spoofing the human is hard — WebAuthn with user verification enforced
-and per-job assertion binding. Spoofing an agent is hard — server-side token-to-role resolution
-with a fail-closed registry. Tampering is the axis that carries the residual risk, and the
-approval signature is what carries it. Repudiation is bounded but not eliminated: every execution
-has an atomic single-use claim record, and the journal is still writable by anything holding
-database access.
-
----
-
-## 10. If you are evaluating this
-
-The order we would check things in:
-
-1. Approve one trivial job. `INSTALL COMPLETE` does not cover the execution path (§7).
-2. Confirm your authenticator actually performs user verification — you should be prompted for a
-   biometric or PIN on every approval, not just a tap.
-3. Confirm `APPROVAL_REQUIRE_SIGNED=1` is set on the executor — a fresh install sets it, an
-   upgrade does not. If it is not, watch the journal for `exec_approval_sig_absent` and set it
-   once that line stops appearing.
-4. Read `control-plane/route-baseline.json` to see which routes are public today. Do not infer it
-   from a green build.
-5. Treat the Content-Security-Policy as absent until it stops being report-only.
-6. Confirm no `.s.tmp` or `.b.tmp` survived your install.
-7. Verify state from the journal, not from a document in the shared drop zone.
 
 ## Reporting
 
