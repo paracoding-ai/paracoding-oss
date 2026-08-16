@@ -116,6 +116,13 @@ Built the way it runs: Claude Max plans through Cowork, subagents fanned out acr
 engineering work in parallel, moving between plans when one ran hot — and never losing the
 thread, because the state was never in the chat.
 
+![Launch day. On the left the Paracoding console, with the publisher strain listing the 48 MCP tools available to it and the full strain collection down the side. On the right Claude Max in Cowork, working through three open defects in this release and recording them to fleet memory for the next cut](docs/screenshots/04-built-with-claude.png)
+
+Launch day, unretouched. Left is this fleet's own console; right is Claude Max in Cowork — and
+the strains listed in one are the strains doing the work in the other. What Claude is working
+through on the right is three open defects in the release you are reading about, filed against
+the next cut. Publishing the screenshot with them still in it is deliberate.
+
 A thing that builds the things.
 
 ---
