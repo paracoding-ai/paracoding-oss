@@ -1,9 +1,5 @@
 # Paracoding — v10.0
 
-Most agent demos end with "…and then it deployed to production."
-
-This one ends with a refusal.
-
 Paracoding is an agent platform that installs into **your own** Google Cloud project in one
 command. Agents propose. You commit. Then it builds the next version of itself.
 
