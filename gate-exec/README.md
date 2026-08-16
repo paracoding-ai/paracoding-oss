@@ -9,8 +9,12 @@ POST /run {job_id, access_token, script_b64}
  2 read the approved command as arguments.command || arguments.cmd -- IDENTICAL precedence to
    waJobCommand() in the control plane. They drifted once and every cmd-shaped job 403d.
  3 if script_b64 was presented, sha256-compare it to the approved command; refuse on mismatch
- 4 first-token binary allowlist, OBSERVE-ONLY by default. Enforcing it turned
-    into a 400 and broke production. Every skip is journalled.
+ 4 [EXEC-BIN-JAIL-V82] PATH JAIL: the child runs with PATH restricted to symlinks of an
+   enumerated binary set, so an unlisted binary does not resolve. Builtins/keywords do not
+   use PATH, so `set -uo pipefail` -- which broke production when the old first-token text
+   scan was armed -- cannot be affected. That scan survives as telemetry only and its
+   EXEC_BINARY_ALLOWLIST_ENFORCE switch is DELETED. Gap: absolute paths still run.
+   Disable with EXEC_BIN_JAIL=0.
  5 bound the AGE of a confirmed approval (EXEC_APPROVAL_MAX_AGE_SECONDS, default 3600)
  6 consume the approval atomically (exec_claim_id) BEFORE running anything: one approval =
    one run, and a crash mid-run cannot leave it spendable
