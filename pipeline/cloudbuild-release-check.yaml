@@ -1,0 +1,427 @@
+# SPDX-License-Identifier: Apache-2.0
+# cloudbuild-release-check.yaml -- "is the thing we would hand a downloader still
+# true?" Verifies only. Deploys nothing. ZERO taps. Rev 5, 2026-08-11.
+#
+# REV 5 STOPS THIS BUILD TELLING A READER TO REDO WORK THAT IS ALREADY DONE.
+# [SEC-DEVGATE-RCEXIT-V1]. Build <build-id> at 600b8d29
+# failed step 2 and printed, in that same step, ZERO drift:
+#     69 emitted file(s), 69 verified byte for byte
+#     0 file(s) unchecked -- every emitted file has a derived expectation
+#     MANIFEST.txt covers 68 file(s) and every hash matches
+# It exited 3 (INCOMPLETE -- source provenance unverifiable), not 1 (DRIFT).
+# check-release-tree.py's source_provenance() shells out to `git status`, the step
+# ran in python:3.13-slim, THAT IMAGE HAS NO git, the OSError branch returned False
+# and the verdict was downgraded. The yaml then wrapped ANY non-zero as
+# "THE EMITTED TREE UNDER oss/release/ IS STALE" and exited 9 -- discarding a
+# distinction the checker draws deliberately and sending a reader to re-cut a tree
+# that was provably current.
+#
+# TWO CHANGES, AND NEITHER OF THEM WEAKENS A CHECK:
+#   1. STEPS 2 AND 2b RUN IN cloud-sdk:slim, WHICH CARRIES BOTH TOOLS. MEASURED in
+#      build <build-id>, not assumed: that image is
+#      Debian 13 trixie with git 2.47.3 and Python 3.13.5 (the same python minor
+#      python:3.13-slim was giving us), `git status --porcelain` over the unbundled
+#      checkout returns rc=0 with ZERO lines, and check-release-tree.py over the
+#      real 600b8d29 tree exits 0 with "source provenance: every path outside
+#      oss/release/ is clean at HEAD". The one-byte negative control still
+#      exits 1 in that same image, so moving it costs no discrimination.
+#   2. THE EXIT CODES ARE NO LONGER COLLAPSED. 1 DRIFT, 3 INCOMPLETE, 2 CANNOT-LOOK
+#      and anything else now print DIFFERENT text and produce DIFFERENT build exits
+#      (9 / 10 / 11 / 13). Exit 3 STILL FAILS THE BUILD -- an unverifiable
+#      provenance is a real gap and must stay visible -- it simply no longer claims
+#      staleness, and it says in so many words that re-cutting would change nothing.
+#
+# AND THE ENVIRONMENT IS NOW ASSERTED RATHER THAN ASSUMED. Step 2 refuses with a
+# NAMED failure if its image lacks git or python3. That is the durable half of this
+# fix: the defect was never really about one image, it was that a tool's
+# environmental precondition was invisible, so its absence arrived disguised as a
+# verdict about the release tree.
+#
+# REV 3 IS THE ONE THAT MAKES THIS TRIGGER CREATABLE. Two things changed and the
+# first is the blocker:
+#
+#   1. IT CONSUMES A BUNDLE, NOT A TARBALL. Rev 2 did `gcloud storage cp ${_ARCHIVE}`
+#      then `tar -xzf`. The artifact has been a single-commit git BUNDLE since
+#      [SEC-PROVENANCE-BUNDLE-V1]; `tar` on a bundle fails, so rev 2 could not have
+#      passed against any archive this fleet actually publishes. The fetch step is
+#      now the SAME sequence pipeline/cloudbuild-dev.yaml step 1 uses, which has
+#      been exercised against real bundles.
+#   2. EVERY CHECK NOW CARRIES A NEGATIVE CONTROL THAT RUNS IN THIS SAME JOB. See
+#      the `-- negative control --` blocks. The fleet has shipped four checks that
+#      could never pass or never fail in one night; a check whose ability to
+#      refuse is asserted in a comment is a check nobody has tested.
+#
+# WHY THE ORIGINAL OBJECTION IS DEAD. This trigger was deliberately not created
+# because "it needs oss/ in the archive, and the prod-side export currently tars
+# only control-plane/". The archive is now a bundle of the WHOLE commit tree, so
+# oss/ is present by construction rather than by an export flag. Verified against
+# the real published bundle for e15c0fcb: the producer's own log asserts
+# `test -f oss/release/install.sh` and `test -f oss/release/workstation.sh`
+# over the re-downloaded artifact, and step 0 below asserts them again here.
+#
+# HOW IT IS FIRED. A SECOND Pub/Sub trigger on the SAME topic as the dev build.
+# Cloud Build gives every trigger its own subscription, so fan-out from one message
+# to N builds is free and needs no extra plumbing.
+#
+# THE TRIGGER ALREADY EXISTS, AND shared/state/<your-lane>/pipeline/CREATE-TRIGGERS.sh
+# SECTION 4 IS STALE ABOUT IT. That script still says fleet-release-check was
+# deliberately NOT created. It exists: trigger id <your-release-check-trigger-id>,
+# subscribed to the SAME topic as fleet-dev-on-main (<your-dev-on-main-trigger-id>).
+# The correction is recorded HERE, in git, because the lake copy is not writable from
+# the seat that measured this.
+#
+# WHAT THAT COSTS, AND HOW TO READ THE RESULT. One published build request now fans
+# out to TWO builds, not one. So:
+#   * every publish bills two builds. This one is not a cheap no-op beside the dev
+#     build: it runs a FULL generator cut, and copies oss/ a second time for the
+#     step 2b negative control;
+#   * "the build" is ambiguous in any report. A red here and a green there are not a
+#     contradiction -- they answer different questions (see WHY IT IS SEPARATE
+#     below), so a result must always name its build id AND its trigger;
+#   * both builds log under this file's logsBucket prefix, and this one publishes its
+#     result to devgate/ci/<commit>-release-check.txt, so the dev build's artifacts
+#     are never overwritten.
+#
+# WHY IT IS SEPARATE FROM cloudbuild-dev.yaml. The emitted release tree
+# legitimately lags a source change until the re-cut lands, so this check is
+# allowFailure in the dev build -- reddening every build request for a
+# known-temporary lag would train everyone to ignore a red pipeline. Here it
+# BLOCKS. The dev build answers "can this deploy"; this build answers "is the
+# thing we would hand a downloader still true". Two questions, two verdicts,
+# neither blocking the other.
+#
+# TWO DOLLAR-SIGN RULES, AND THEY ARE OPPOSITE. Measured.
+#   ${_SUB}        ONE dollar -- a Cloud Build substitution.
+#   $$VAR $$(cmd)  TWO        -- anything the SHELL must evaluate.
+
+substitutions:
+  # [SEC-SINGLEPROJ-V2] _DEV_BUCKET named a bucket in a second project. There is one project
+  # and the rehearsal lane is a LANE inside it. The bucket carries a random per-install
+  # token so it cannot be spelled here -- the publish step resolves it through the lane's
+  # install marker, which is the one name that never carries the token.
+  _PROJECT: ""
+  _LANE: dev
+
+# [SEC-SINGLEPROJ-V2] logsBucket IS DELIBERATELY ABSENT, same reason as cloudbuild-dev.yaml:
+# it is resolved before any step runs, so it cannot be derived, and pointing it at a lane
+# bucket makes the build unable to START whenever that lane is not installed -- failing
+# before it can say why. Unset means Cloud Build uses the project's own default logs bucket.
+options:
+  logging: GCS_ONLY
+timeout: 1800s
+
+steps:
+
+  # ------------------------------------------------- 0. the archive, as a bundle
+  # The same fetch-and-verify the dev build uses. The digest is mandatory and is
+  # checked before anything is extracted, and the bundle's own advertised head must
+  # BE the commit that was asked for.
+  #
+  # `git clone` is deliberately absent: a single-commit bundle holds a commit whose
+  # parent resolves to nothing, and clone's connectivity check rejects exactly that
+  # on git 2.47.3 (it succeeds on 2.43.0, which is why proving it locally is not
+  # enough). `bundle unbundle` + `checkout --detach` works on both.
+  - id: fetch-and-verify-bundle
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        test -n "${_COMMIT}"
+        test -n "${_ARCHIVE}"
+        test -n "${_SHA256}"
+        gcloud storage cp ${_ARCHIVE} /workspace/cp.bundle
+        printf '%s  /workspace/cp.bundle\n' "${_SHA256}" > /workspace/want.sha
+        sha256sum -c /workspace/want.sha
+        rm -rf /workspace/work
+        git init -q -b import /workspace/work
+        git -C /workspace/work -c transfer.fsckobjects=true bundle unbundle /workspace/cp.bundle > /workspace/heads.txt
+        cat /workspace/heads.txt
+        BOID=$$(awk 'NR==1{print $$1}' /workspace/heads.txt)
+        if test "$$BOID" != "${_COMMIT}" ; then echo "PROVENANCE FAIL bundle head $$BOID is not the requested commit ${_COMMIT}" ; exit 41 ; fi
+        if ! git -C /workspace/work checkout -q --detach ${_COMMIT} ; then echo "PROVENANCE FAIL bundle does not contain commit ${_COMMIT}" ; exit 42 ; fi
+        BC=$$(git -C /workspace/work rev-parse HEAD)
+        if test "$$BC" != "${_COMMIT}" ; then echo "PROVENANCE FAIL rev-parse HEAD is $$BC not ${_COMMIT}" ; exit 43 ; fi
+        if ! git -C /workspace/work fsck --no-dangling $$(git -C /workspace/work rev-parse HEAD^{tree}) ; then echo "PROVENANCE FAIL tree incomplete at ${_COMMIT}" ; exit 44 ; fi
+        printf '%s\n' "$$BC" > /workspace/BUILD_COMMIT
+        echo "PROVENANCE OK rev-parse HEAD == $$BC"
+        # THE WHOLE REASON THIS TRIGGER CAN EXIST. oss/ is in the archive because the
+        # archive is the commit's whole tree. Asserted, never assumed.
+        test -f /workspace/work/oss/gen.py
+        test -f /workspace/work/oss/check-release-tree.py
+        test -f /workspace/work/oss/release/install.sh
+        test -f /workspace/work/oss/release/workstation.sh
+        test -f /workspace/work/oss/release/uninstall.sh
+        test -f /workspace/work/oss/release/MANIFEST.txt
+        # ---------------------------- negative control, SAME STEP, SAME COMPARISON
+        # A check that has only ever been given a good input has not been shown to
+        # be a check. Two decoys, each aimed at a different half:
+        #   1. an HONEST bundle of the WRONG commit -- proves the head comparison and
+        #      the checkout-by-oid actually discriminate, rather than passing anything
+        #      that unbundles.
+        #   2. the REAL bundle with ONE byte flipped -- proves index-pack's re-hash of
+        #      every object is what stands behind "the bytes are the bytes".
+        rm -rf /workspace/neg && mkdir -p /workspace/neg
+        git init -q -b decoy /workspace/neg/src
+        git -C /workspace/neg/src config user.email neg@invalid
+        git -C /workspace/neg/src config user.name neg
+        printf 'decoy\n' > /workspace/neg/src/decoy.txt
+        git -C /workspace/neg/src add decoy.txt
+        git -C /workspace/neg/src commit -q -m decoy
+        git -C /workspace/neg/src bundle create /workspace/neg/decoy.bundle refs/heads/decoy
+        git init -q -b import /workspace/neg/w1
+        git -C /workspace/neg/w1 bundle unbundle /workspace/neg/decoy.bundle > /workspace/neg/h1.txt
+        NB=$$(awk 'NR==1{print $$1}' /workspace/neg/h1.txt)
+        if test "$${#NB}" != "40" ; then echo "NEGATIVE CONTROL INCONCLUSIVE the decoy bundle advertised no oid (got '$$NB'), so nothing was proven" ; exit 45 ; fi
+        if test "$$NB" = "${_COMMIT}" ; then echo "NEGATIVE CONTROL FAILED a decoy bundle advertised the requested commit" ; exit 45 ; fi
+        if git -C /workspace/neg/w1 checkout -q --detach ${_COMMIT} 2>/dev/null ; then echo "NEGATIVE CONTROL FAILED a decoy bundle yielded ${_COMMIT}" ; exit 46 ; fi
+        echo "NEGATIVE CONTROL OK the provenance comparison refuses a bundle it was not given"
+        cp /workspace/cp.bundle /workspace/neg/tampered.bundle
+        NBYTES=$$(wc -c < /workspace/neg/tampered.bundle)
+        printf 'X' | dd of=/workspace/neg/tampered.bundle bs=1 seek=$$(( NBYTES - 12 )) conv=notrunc 2>/dev/null
+        git init -q -b import /workspace/neg/w2
+        if git -C /workspace/neg/w2 -c transfer.fsckobjects=true bundle unbundle /workspace/neg/tampered.bundle 2>/dev/null ; then echo "NEGATIVE CONTROL FAILED a tampered bundle unbundled cleanly" ; exit 47 ; fi
+        echo "NEGATIVE CONTROL OK index-pack refuses a flipped byte"
+        git -C /workspace/work cat-file --batch-all-objects --batch-check='%(objecttype)' | sort | uniq -c
+
+  # -------------------------------------- 1. the generator still cuts, and cuts clean
+  # gen.py's leak gate refuses a cut containing operator-specific values --
+  # exactly how [SEC-LEAK-COMMENT-V1] was caught, in a // comment, by the gate and
+  # not by the human review that wrote it. It also fails CLOSED on marker damage:
+  # a missing, duplicated or inverted @@PC_SHARED_BEGIN/END@@ fence, or an empty
+  # extracted region, raises SystemExit rather than silently emitting a
+  # workstation.sh whose functions are simply absent.
+  #
+  # THE ARGUMENT CONTRACT IS THREE POSITIONALS AND THERE ARE NO FLAGS. Read off
+  # gen.py:25-27, which is the WHOLE of its argument parsing -- there is no
+  # argparse, no getopt and no option handling anywhere in the file:
+  #
+  #     REPO   = sys.argv[1]                                    the SOURCE ROOT
+  #     OUT    = sys.argv[2]                                    where to emit
+  #     COMMIT = sys.argv[3] if len(sys.argv) > 3 else "unknown"
+  #
+  # Rev 3 invoked this as `--out /workspace/_cut`, so REPO became the literal string
+  # "--out" and OUT became the directory. Every release-check build therefore died
+  # here with `missing source: --out/control-plane/src/index.ts`, whatever the state
+  # of the tree, and never reached the stale-tree verdict in step 2. A flag that does
+  # not exist is not a parse error to a positional CLI -- it is a value, which is
+  # also why `bash -n` could never have caught it.
+  #
+  # OUT MUST STAY OUTSIDE /workspace/work, AND THAT IS LOAD-BEARING. gen.py
+  # rmtree()s OUT before emitting (gen.py:429-431), so cutting into the checkout's
+  # own oss/release would destroy the very tree step 2 compares against and turn
+  # the blocking staleness verdict into a tautology. /workspace/_cut is a sibling of
+  # the checkout. VERIFIED rather than assumed: after cutting twice out-of-tree
+  # against a real checkout, the in-tree oss/release subtree oid was unchanged.
+  #
+  # The commit is passed as the third positional so the emitted MANIFEST records the
+  # real source commit instead of the string "unknown".
+  #
+  # [SEC-CI-CUT-COMPARE-V1] THE CUT IS NOW COMPARED INSTEAD OF DISCARDED. Until this
+  # revision this step took a FULL generator cut into /workspace/_cut, asserted four
+  # files were non-empty, and then threw the whole tree away -- no later step ever
+  # read /workspace/_cut. The expensive half of the check was being paid for and
+  # binned, and the ONLY thing standing between a stale release tree and a green
+  # build was step 2's own second cut inside check-release-tree.py. The cut this step
+  # already takes now answers the question it was paying to be able to answer.
+  #
+  # WHY MANIFEST.txt IS THE ONE EXCLUSION, AND WHY THAT LOSES NOTHING. The commit is
+  # a STAMP, not a derivation. MEASURED over gen.py blob b9d56eaf: COMMIT is used
+  # in exactly four places -- assigned at :27, printed to stdout at :57, written into
+  # oss/leak-baseline.json at :402 behind PC_LEAK_BASELINE_WRITE (a REPO file, never
+  # emitted, and that variable is not set here), and MANIFEST.txt's header at :6960.
+  # So MANIFEST.txt's header line is the ONE byte-difference a healthy tree can have,
+  # because the committed tree legitimately lags head until the re-cut lands and this
+  # step cuts at ${_COMMIT}. Excluding it costs nothing: every file MANIFEST covers is
+  # compared here directly, and step 2's check-release-tree.py still verifies
+  # MANIFEST.txt in full, both against the files beside it and against its own cut.
+  #
+  # THIS IS A SECOND, INDEPENDENT PATH TO THE SAME VERDICT -- ON PURPOSE. Step 2 is
+  # the authority and stays the authority. This is coreutils only (find, sort, xargs,
+  # sha256sum, uniq, wc -- every one already used elsewhere in this file), so it does
+  # not depend on check-release-tree.py being correct, and a future weakening there
+  # still trips here.
+  #
+  # PROVEN TO DISCRIMINATE, not asserted. Driven against fixtures before landing:
+  # an identical tree carrying a DIFFERENT MANIFEST stamp exits 0 (no false red);
+  # the real b572865e drift shape (route-audit.mjs missing --emit-table), the real
+  # gittools.ts truncation, a file emitted but missing from the tree, a file in the
+  # tree the generator does not emit, and ONE byte appended -- all exit 8.
+  - id: generator-cut-and-compare
+    name: python:3.13-slim
+    dir: /workspace/work
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        rm -rf /workspace/_cut
+        python3 oss/gen.py . /workspace/_cut ${_COMMIT}
+        test -s /workspace/_cut/install.sh
+        test -s /workspace/_cut/workstation.sh
+        test -s /workspace/_cut/uninstall.sh
+        test -s /workspace/_cut/MANIFEST.txt
+        sums() { ( cd "$$1" && find . -type f ! -name MANIFEST.txt | sort | xargs sha256sum ) ; }
+        sums /workspace/_cut > /workspace/_cut.sums
+        sums oss/release > /workspace/_tree.sums
+        CN=$$(wc -l < /workspace/_cut.sums)
+        echo "  the cut emits $$CN comparable file(s) beside MANIFEST.txt"
+        test "$$CN" -gt 0
+        sort /workspace/_cut.sums /workspace/_tree.sums | uniq -u > /workspace/_cut.drift || true
+        if test -s /workspace/_cut.drift ; then
+          echo ""
+          echo "=============================================================="
+          echo "THE EMITTED TREE UNDER oss/release/ IS STALE."
+          echo "=============================================================="
+          echo "The cut THIS STEP JUST TOOK does not match the committed tree."
+          echo "Lines present on ONE side only (sha256  path):"
+          cat /workspace/_cut.drift
+          echo ""
+          echo "Re-cut oss/release/ from a FULL checkout and land it -- MANIFEST.txt"
+          echo "LAST. Do NOT hand-edit oss/release/: gen.py rmtree()s it next cut."
+          exit 8
+        fi
+        echo "  ok   the fresh cut is byte-identical to the committed tree ($$CN file(s))"
+
+  # ----------------------------------- 2. the CHECKED-IN tree matches the generator
+  # BLOCKING here. check-release-tree.py compares install.sh and uninstall.sh as
+  # plain literals and re-composes workstation.sh from the fenced regions in the
+  # same order the generator does, then compares byte for byte -- and verifies
+  # every MANIFEST line against the file it names.
+  #
+  # THE IMAGE IS cloud-sdk:slim BECAUSE THIS STEP NEEDS git, NOT ONLY python3.
+  # check-release-tree.py's source_provenance() runs `git -C ROOT status --porcelain`
+  # to establish that the sources it derived its expectation FROM are committed. In
+  # python:3.13-slim that call raised OSError, the function returned False, and a
+  # perfectly current tree was reported INCOMPLETE and then wrapped as STALE. See
+  # the REV 5 note at the top of this file for the measurement.
+  - id: checked-in-tree-matches
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    dir: /workspace/work
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        # THE STEP'S OWN ENVIRONMENT, ASSERTED. check-release-tree.py's source_provenance()
+        # shells out to `git status`; python:3.13-slim has no git, so it returned False and a
+        # CURRENT tree was reported INCOMPLETE and then wrapped as STALE. A missing tool must
+        # announce itself BY NAME, never arrive disguised as a verdict about the release tree.
+        command -v git >/dev/null 2>&1 || { echo "THIS STEP'S IMAGE CARRIES NO git. check-release-tree.py cannot establish source provenance without it and would report INCOMPLETE for a reason that has nothing to do with the release tree. Refusing."; exit 12; }
+        command -v python3 >/dev/null 2>&1 || { echo "THIS STEP'S IMAGE CARRIES NO python3. Refusing."; exit 12; }
+        git --version
+        python3 --version
+        set +e
+        python3 oss/check-release-tree.py
+        RC=$$?
+        set -e
+        echo "check-release-tree.py exited $$RC"
+        case "$$RC" in
+        0)
+          echo "  ok   emitted tree matches the generator"
+          exit 0 ;;
+        1)
+          echo ""
+          echo "THE EMITTED TREE UNDER oss/release/ IS STALE. (exit 1, DRIFT)"
+          echo "A file it re-derived does not match the committed tree; the names are above."
+          echo "A source change landed that the cut has not been re-taken for. Re-cut"
+          echo "oss/release/ from a FULL checkout and land it -- MANIFEST.txt LAST."
+          echo "Do NOT hand-edit oss/release/: gen.py rmtree()s it on the next cut."
+          exit 9 ;;
+        3)
+          echo ""
+          echo "INCOMPLETE. (exit 3) THE TREE IS **NOT** SAID TO BE STALE."
+          echo "It found NO DRIFT -- its output above names every file it verified byte for"
+          echo "byte. What it could not do is establish that the SOURCES behind that"
+          echo "expectation are the committed ones, or the generator refuses to cut at this"
+          echo "ref. The NOTE above says which."
+          echo "RE-CUTTING WOULD CHANGE NOTHING: nothing about the tree was found wrong."
+          echo "Still a RED build on purpose -- an unverifiable provenance is a real gap."
+          echo "It is simply not staleness, and saying so is what this exit code is for."
+          exit 10 ;;
+        2)
+          echo ""
+          echo "CANNOT LOOK. (exit 2) The generator or the tree could not be read at all, so"
+          echo "NO verdict about staleness exists -- neither green nor red. An input problem."
+          exit 11 ;;
+        *)
+          echo ""
+          echo "check-release-tree.py exited $$RC; its documented codes are 0, 1, 2 and 3."
+          echo "Refusing to translate an unknown exit into a verdict."
+          exit 13 ;;
+        esac
+
+  # --------------------------- 2b. THE NEGATIVE CONTROL FOR THE STEP ABOVE
+  # Step 2 is the blocking verdict of this whole build, and on a healthy tree it
+  # only ever runs against an input it passes. This step gives the SAME checker a
+  # tree with ONE byte appended to a file MANIFEST.txt covers, and requires it to
+  # REFUSE. Together the two form a bracket that runs in one job: the honest tree
+  # exits 0 in step 2, the edited copy exits non-zero here, so the check is known
+  # to discriminate rather than merely to have been green.
+  #
+  # The copy is oss/ only -- gen.py, check-release-tree.py and release/ are
+  # everything the checker reads -- so this costs a couple of megabytes and a
+  # second. It never touches /workspace/work, so step 2's subject is unmodified.
+  # The image matches step 2's so the bracket is a like-for-like comparison: the
+  # honest tree and the perturbed one are judged by the same checker in the same
+  # environment. MEASURED in build <build-id>: the one-byte edit still exits 1 here.
+  - id: checked-in-tree-check-can-fail
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    dir: /workspace/work
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        rm -rf /workspace/negtree
+        mkdir -p /workspace/negtree/oss
+        cp oss/gen.py oss/check-release-tree.py /workspace/negtree/oss/
+        cp -r oss/release /workspace/negtree/oss/release
+        test -f /workspace/negtree/oss/release/MANIFEST.txt
+        VICTIM=$$(awk '{print $$3}' /workspace/negtree/oss/release/MANIFEST.txt | grep -m1 '[.]md$$' || true)
+        if test -z "$$VICTIM" ; then VICTIM=$$(awk 'NR==1{print $$3}' /workspace/negtree/oss/release/MANIFEST.txt) ; fi
+        test -n "$$VICTIM"
+        echo "  perturbing $$VICTIM by one byte"
+        printf '\n' >> "/workspace/negtree/oss/release/$$VICTIM"
+        set +e
+        python3 oss/check-release-tree.py /workspace/negtree
+        NRC=$$?
+        set -e
+        echo "  check-release-tree.py over the perturbed tree exited $$NRC"
+        if test "$$NRC" = "0" ; then
+          echo "NEGATIVE CONTROL FAILED: check-release-tree.py passed over a tree whose"
+          echo "$$VICTIM no longer matches its MANIFEST line. The blocking check in the"
+          echo "previous step therefore proves nothing, so this build refuses."
+          exit 48
+        fi
+        echo "NEGATIVE CONTROL OK check-release-tree.py refuses a one-byte edit"
+
+  # ------------------------------------------------- 3. publish, pass or fail
+  - id: publish
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -u
+        echo "release-check ${_COMMIT} build ${BUILD_ID}" > /workspace/rc.txt
+        # [SEC-SINGLEPROJ-V2] Resolve the lane's bucket the one way it can be resolved: via
+        # pc-<lane>-install-marker, whose pc-suffix label carries the per-install token.
+        # BEST-EFFORT BY DESIGN -- this whole copy is `|| true` and always was. A release
+        # check that goes red because it could not file its own receipt would be reporting
+        # on itself instead of on the tree, so an unresolvable lane skips the copy loudly
+        # and the check's verdict is untouched.
+        if [ -n "${_PROJECT}" ] && [ -n "${_LANE}" ] &&
+           TOK=$$(gcloud secrets describe "pc-${_LANE}-install-marker" --project "${_PROJECT}" \
+                    --format='value(labels.pc-suffix)' 2>/dev/null); then
+          TOK=$$(printf '%s' "$$TOK" | tr -d '[:space:]')
+          case "$$TOK" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) INFIX="$${TOK}-" ;;
+            *) INFIX="" ;;
+          esac
+          gcloud storage cp /workspace/rc.txt \
+            "gs://${_PROJECT}-${_LANE}-$${INFIX}datalake/devgate/ci/${_COMMIT}-release-check.txt" || true
+        else
+          echo "NOTE lane '${_LANE}' not resolvable in '${_PROJECT}' -- receipt not filed."
+        fi

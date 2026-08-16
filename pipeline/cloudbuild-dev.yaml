@@ -1,0 +1,837 @@
+# SPDX-License-Identifier: Apache-2.0
+# cloudbuild-dev.yaml -- the dev build. Rev 6, 2026-08-11.
+#
+# REV 6 REFUSES TO BELIEVE AN MCP FIELD THE COLLECTOR COULD NOT PARSE.
+# [SEC-DEVGATE-SSE-V1]. POST /mcp answers text/event-stream, and
+# pipeline/collect-evidence.py's jbody() was a bare json.loads -- so EVERY
+# SUCCESSFUL MCP CALL yielded the empty string and the bundle then made claims
+# about bytes nobody ever received. Measured in a real evidence bundle:
+#   * sha_read was e3b0c442..., the sha256 of the EMPTY STRING;
+#   * write_ok was `200 and "not configured" not in mcp_text(wp)`, which is
+#     VACUOUSLY TRUE over "", so the bundle reported write_ok:true about a write
+#     whose object 404'd;
+#   * roundtrip.error applied refusal_layer() to a 200, describing a SUCCESS as
+#     "refused by application";
+#   * mcp_tools_authed.tools was [] on a 200 carrying content-length 1076 -- the
+#     roster came back and was discarded, which makes F2.3 pass VACUOUSLY today
+#     and would make it FALSELY RED on any install that declares a workstation.
+#
+# Step 4c below runs the collector's own pure parser controls and REFUSES the
+# build if any of them fail. The controls prove BOTH directions -- a real SSE
+# payload parses and yields the roster, and an empty, truncated, errored or
+# unparseable body makes the check FAIL rather than pass -- and one of them
+# reproduces the OLD predicate to show it accepts exactly what the new one
+# refuses, so the negative control is known to bite rather than asserted to.
+#
+# THE STEP IS CAPABILITY-DETECTED, FOR THE SAME REASON step 2b's --emit-table is.
+# The collector travels INSIDE the bundle, so a bundle cut before this landed has
+# no --selftest. Asserting it unconditionally would brick every historical commit.
+# Where it is ABSENT the step says, in the log, that every mcp_* field in this
+# build's bundle is UNPARSED and must not be read as evidence. ABSENT, never passed.
+#
+# REV 5 GIVES THE PROMOTION GATE A NEGATIVE CONTROL THAT RUNS IN THIS SAME JOB.
+# Step 7 decides whether traffic moves. Its nine proven refusal paths were
+# demonstrated in a SEPARATE harness build, which is a claim about a different job
+# on a different day -- and the gate file travels in the bundle, so the bytes that
+# run here are not the bytes that were tested there. Step 7 now drives the SAME
+# gate file over a deliberately red fixture and requires exit 51 before it will
+# believe anything the gate says about the real one. Measured against the real
+# pipeline/promote-gate.sh: a smoke.rc of "10" exits 51 and reaches no gcloud call.
+# The allow path needs no such control -- every green build exercises it end to end.
+#
+# REV 4 CLOSES THE LAST GAP: THE CYCLE NOW JUDGES ITSELF AND THE JUDGEMENT GATES
+# TRAFFIC. Rev 3 verified provenance and deployed at zero traffic, then stopped --
+# every cycle ended with an UNJUDGED revision and a marker that said smoke:"NOT-RUN".
+# Steps 5a/5b/7 are now LIVE:
+#
+#   5a collect-evidence   pipeline/collect-evidence.py -> /workspace/evidence.json
+#   5b smoke              devgate/smoke.py judges it   -> /workspace/smoke-report.txt
+#                                                      -> /workspace/smoke.rc
+#   6  marker             the marker now carries the REAL verdict, not "NOT-RUN"
+#   7  promote-gate       pipeline/promote-gate.sh -- traffic moves ONLY on green
+#
+# WHY 5b EXITS 0 EVEN WHEN THE SMOKE FAILS, AND WHY THAT IS NOT A HOLE. A failing
+# Cloud Build step ABORTS THE BUILD, which would skip the marker and the gate --
+# i.e. a red revision would leave NO artifact saying it was red, which is worse than
+# useless. So 5b records smoke's exit code in /workspace/smoke.rc and exits 0 itself.
+# THE VERDICT IS THE FILE, NOT THE STEP STATUS. Step 7 then refuses on anything but
+# "0" and exits 50-57, so THE BUILD ITSELF GOES RED whenever the promotion was
+# refused. A green build means "deployed AND judged AND promoted"; a red build with
+# a marker means "deployed, judged, refused" -- and the two are told apart by the
+# marker and the transcript, never by the build's colour alone.
+#
+# THE GATE WAS PROVEN TO REFUSE, AGAINST THIS SERVICE, BEFORE IT WAS WIRED.
+# NINE distinct refusal cases against the REAL control-plane service, exit codes
+# 50/51/51/51/52/53/54/54/55, and traffic byte-identical before and after. The green
+# control reached the allow branch under PROMOTE_DRYRUN=1 and named the exact
+# update-traffic command. The build id and the transcript object are recorded in the
+# lane's own notes rather than here.
+#
+# READ THIS BEFORE TRUSTING ANY PROOF IN THIS FILE. The FIRST attempt at that proof
+# reported "SIX REFUSALS, TRAFFIC IDENTICAL" and was WORTHLESS: the base64 payload
+# was mis-assembled, `base64 -d` failed, and bash ran a ZERO-BYTE promote-gate.sh --
+# which exits 0 and moves nothing. Traffic was unchanged because NOTHING RAN. The
+# sha256 of the empty string
+# (e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855) in that
+# transcript is the only thing that gave it away. Step 5b and the proof harness now
+# both ASSERT THE SUBJECT EXISTS AND IS THE RIGHT BYTES before drawing any
+# conclusion from its behaviour. A test whose subject failed to load is not a
+# passing test.
+#
+# REV 3 (kept, unchanged in substance): consume a SINGLE-COMMIT git bundle, import
+# it, and assert `git rev-parse HEAD` equals the commit that was asked for. The
+# sha256 check is KEPT as defence in depth -- the two prove different things.
+#
+# git clone DOES NOT WORK ON THIS BUNDLE AND THAT IS NOT NEGOTIABLE. A bundle cannot
+# express shallowness -- `git fetch --depth=1 <bundle>` prints
+# `warning: option "depth" is ignored` -- so a single-commit bundle holds a commit
+# whose parent pointer resolves to nothing, and git clone's connectivity check
+# rejects it (CLONE_RC 128). MEASURED IN THIS IMAGE, git 2.47.3. It SUCCEEDS on git
+# 2.43.0 in the agent container, so proving it only locally would have shipped a
+# broken build. `git bundle unbundle` + `git checkout --detach <oid>` works on both.
+#
+# TWO DOLLAR-SIGN RULES, AND THEY ARE OPPOSITE. Measured.
+#   ${_SUB}   ONE dollar  -- a Cloud Build substitution. Doubling it stores a
+#                            literal ${_SUB} and the shell dies "unbound variable".
+#   $$VAR $$(cmd)  TWO    -- anything the SHELL must evaluate.
+
+substitutions:
+  # Bound from the Pub/Sub payload by the trigger, UNCHANGED since rev 2:
+  #   _COMMIT  $(body.message.data.commit)   40 hex -- the commit the bundle must carry
+  #   _SHORT   $(body.message.data.short)    8 hex  -- now only cross-checked, never used
+  #   _ARCHIVE $(body.message.data.archive)  gs:// path to the single-commit .bundle
+  #   _SHA256  $(body.message.data.sha256)   digest of the bundle, MANDATORY, still checked
+  _REGION: us-east1
+  # [SEC-SINGLEPROJ-V2] ONE PROJECT. _DEV_PROJECT is gone: dev and prod are LANES of one
+  # project, namespaced by PC_LANE, which is what install.sh has done since that ruling.
+  _PROJECT: ""
+  _LANE: dev
+  # THESE DEFAULTED TO PROD'S SERVICE NAMES AND THAT WAS A LOADED GUN. They were
+  # `paracoding-control-plane` and `paracoding-gate-exec` -- the UNPREFIXED names, which are
+  # the names install.sh gives the PROD lane. Two projects made that survivable because
+  # --project pointed elsewhere; in ONE project a dev build with one missed trigger override
+  # runs `gcloud run deploy paracoding-control-plane` STRAIGHT ONTO THE LIVE CONSOLE. The
+  # file already described a lane build as "a set of trigger overrides", which is precisely
+  # the shape where forgetting one is normal.
+  #
+  # THEY ARE NOW EMPTY AND DERIVED. The resolve-lane step below composes every one of them
+  # from _PROJECT + _LANE + the lane's own install token, so the DEFAULT is correct and a
+  # forgotten override changes nothing. A non-empty value here still WINS, so the escape
+  # hatch survives -- it is just no longer the thing that happens by accident.
+  _CP_SVC: ""
+  _GX_SVC: ""
+  # [SEC-NODEFAULTPROJ-V1] collect-evidence.py's --firestore-db no longer carries a baked
+  # default naming one operator's live database instance. The value moves here, where it is
+  # already a per-fleet substitution alongside _DEV_PROJECT, and step 5a passes it
+  # explicitly -- so this pipeline's behaviour is bit-for-bit what it was.
+  _FIRESTORE_DB: your-firestore-db
+  # ---- LANE ADDRESSING [SEC-LANE-ADDRESSABLE-V1] ----------------------------
+  # ALL THREE DEFAULT TO EMPTY, WHICH IS EXACTLY TODAY'S BEHAVIOUR. They exist so a
+  # trigger pointed at a lane can name that lane's surfaces without a second copy of
+  # this file drifting away from this one. Nothing below reads a project or a bucket
+  # that is not a substitution, so a lane build is a set of trigger overrides.
+  #
+  # [SEC-SINGLEPROJ-V2] ALL THREE ARE NOW DERIVED WHEN EMPTY, NOT LEFT DANGEROUS.
+  # _MC_SVC  the SECOND surface. install.sh deploys paracoding-<lane>-mcp beside the
+  #          console and sets PC_SURFACE on both, so resolve-lane composes it. Empty used
+  #          to mean "no second surface", which on a two-service install made smoke red
+  #          via F6.0 HALF A SPLIT -- an honest red, but one nobody had to earn.
+  # _LAKE    the lake bucket, only needed when DATA_LAKE_BUCKET is absent from the
+  #          deployed revision. The collector's fallback was <project>-datalake, which in
+  #          one project names the NEIGHBOURING LANE -- i.e. prod's lake. resolve-lane
+  #          supplies THIS lane's bucket instead, so the fallback can no longer cross over.
+  # _SMOKE_SA the smoke identity. The old fallback was pc-devgate-smoke@<project>, one
+  #          name for every lane in the project. Now lane-scoped.
+  _MC_SVC: ""
+  _LAKE: ""
+  _SMOKE_SA: ""
+
+# [SEC-SINGLEPROJ-V2] logsBucket IS DELIBERATELY ABSENT. It named a bucket in a project
+# that no longer exists, and it CANNOT be fixed the way the others were: logsBucket is
+# resolved before any step runs, so it cannot be derived from the install marker, and a
+# lane bucket name carries a random per-install token that no substitution can spell. An
+# unset logsBucket makes Cloud Build use the project's own default logs bucket, which is
+# always correct and cannot be misconfigured. GCS_ONLY still holds: logs go to GCS, not
+# Cloud Logging. Setting this to a lane bucket would also make the build unable to START
+# whenever the lane is not installed yet -- failing before it can say why.
+options:
+  machineType: E2_HIGHCPU_8
+  logging: GCS_ONLY
+timeout: 3600s
+
+steps:
+
+  # ---------------------------------------------- 0. RESOLVE THE LANE
+  # [SEC-SINGLEPROJ-V2] EVERY NAME THIS PIPELINE TOUCHES IS COMPOSED HERE, ONCE, AND
+  # WRITTEN TO /workspace/lane.env FOR EVERY LATER STEP TO SOURCE.
+  #
+  # WHY NOT SUBSTITUTIONS. install.sh gives every resource a per-install RANDOM INFIX
+  # (PC_TOK), so `paracoding-<lane>-<tok>control-plane` is not spellable in advance by
+  # anyone -- not by this file, not by a trigger, not by the person editing either. The one
+  # name that never carries the token is the install marker secret pc-<lane>-install-marker:
+  # it is the documented discovery root, and it carries the token on its pc-suffix label.
+  # Read the marker, get the token, compose everything. That is the only way these names can
+  # be right without a human keeping two files in sync, and the previous arrangement -- hand
+  # written defaults that happened to name PROD -- is what this replaces.
+  #
+  # IT FAILS CLOSED. No marker means the lane is not installed and the build stops here,
+  # naming the command that installs it, instead of deploying somewhere plausible.
+  - id: resolve-lane
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        test -n "${_PROJECT}" || { echo "REFUSE _PROJECT is empty. There is ONE project now; name it."; exit 9; }
+        test -n "${_LANE}"    || { echo "REFUSE _LANE is empty. A lane build must say which lane."; exit 9; }
+        PROJECT="${_PROJECT}"
+        LANE="${_LANE}"
+        REGION="${_REGION}"
+
+        MARK="pc-$${LANE}-install-marker"
+        if ! TOK=$$(gcloud secrets describe "$$MARK" --project "$$PROJECT" \
+                      --format='value(labels.pc-suffix)' 2>/dev/null); then
+          echo "REFUSE cannot read the install marker $$MARK in $$PROJECT."
+          echo "  Lane '$$LANE' is not installed there. Install it -- SAME PROJECT as prod:"
+          echo "      PC_LANE=$$LANE bash install.sh $$PROJECT $$REGION"
+          exit 9
+        fi
+        TOK=$$(printf '%s' "$$TOK" | tr -d '[:space:]')
+        case "$$TOK" in
+          "") INFIX="" ;;
+          [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) INFIX="$${TOK}-" ;;
+          *) echo "REFUSE the pc-suffix label on $$MARK is not six lowercase hex characters."
+             echo "  This build will not guess a resource name."; exit 9 ;;
+        esac
+
+        # A non-empty substitution still WINS -- the escape hatch survives, it just is not
+        # the default any more.
+        CP_SVC="${_CP_SVC}"; [ -n "$$CP_SVC" ] || CP_SVC="paracoding-$${LANE}-$${INFIX}control-plane"
+        MC_SVC="${_MC_SVC}"; [ -n "$$MC_SVC" ] || MC_SVC="paracoding-$${LANE}-$${INFIX}mcp"
+        GX_SVC="${_GX_SVC}"; [ -n "$$GX_SVC" ] || GX_SVC="paracoding-$${LANE}-$${INFIX}gate-exec"
+        LANE_BUCKET="$${PROJECT}-$${LANE}-$${INFIX}datalake"
+        LAKE="${_LAKE}";     [ -n "$$LAKE" ]   || LAKE="$$LANE_BUCKET"
+        SMOKE_SA="${_SMOKE_SA}"
+        [ -n "$$SMOKE_SA" ] || SMOKE_SA="pc-$${LANE}-$${INFIX}devgate-smoke@$${PROJECT}.iam.gserviceaccount.com"
+
+        # THE LANE'S FIRESTORE DATABASE IS ALSO RANDOM-SUFFIXED, and install.sh finds it the
+        # same way: list, match ^paracoding-<lane>-<12 hex>$. An explicit substitution wins.
+        FIRESTORE_DB="${_FIRESTORE_DB}"
+        if [ -z "$$FIRESTORE_DB" ]; then
+          FIRESTORE_DB=$$(gcloud firestore databases list --project "$$PROJECT" \
+              --format='value(name)' 2>/dev/null | sed 's#.*/##' \
+              | grep -E "^paracoding-$${LANE}-[0-9a-f]{12}$$" | head -1 || true)
+        fi
+        test -n "$$FIRESTORE_DB" || { echo "REFUSE could not find lane '$$LANE' Firestore database in $$PROJECT, and none was passed as _FIRESTORE_DB."; exit 9; }
+
+        {
+          echo "PROJECT=$$PROJECT"
+          echo "LANE=$$LANE"
+          echo "CP_SVC=$$CP_SVC"
+          echo "MC_SVC=$$MC_SVC"
+          echo "GX_SVC=$$GX_SVC"
+          echo "LANE_BUCKET=$$LANE_BUCKET"
+          echo "LAKE=$$LAKE"
+          echo "SMOKE_SA=$$SMOKE_SA"
+          echo "FIRESTORE_DB=$$FIRESTORE_DB"
+        } > /workspace/lane.env
+        echo "--- lane resolved -------------------------------------------"
+        cat /workspace/lane.env
+        echo "-------------------------------------------------------------"
+
+
+  # ---------------------------------------------------------------- 1. LIVE
+  # BELT AND BRACES, IN THIS ORDER.
+  #   sha256sum -c        the bytes are the bytes the message named   (transit)
+  #   bundle unbundle     every object re-hashed by index-pack        (integrity)
+  #   advertised head     the bundle's own ref must BE the commit     (no bait-and-switch)
+  #   checkout --detach   the object must exist, or git refuses       (possession)
+  #   rev-parse HEAD      what is on disk IS that commit              (provenance)
+  #   fsck <tree>         tree and every blob present and hash-correct(completeness)
+  #
+  # fsck is given the TREE OID, never HEAD: fsck from the commit would chase the
+  # absent parent and report `broken link` on a perfectly good bundle.
+  #
+  # PROVEN CAPABLE OF FAILING, in this image:
+  #   honest bundle, right oid  -> UNBUNDLE_RC 0, ASSERT_PASS, TREE_FSCK_RC 0
+  #   attacker's own bundle     -> EVIL_HEAD_MISMATCH_DETECTED, EVIL_CHECKOUT_RC 128
+  #   one flipped byte          -> pack has bad object, TAMPERED_UNBUNDLE_RC 1
+  - id: fetch-and-verify-bundle
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        . /workspace/lane.env
+        test -n "${_COMMIT}"
+        test -n "${_ARCHIVE}"
+        test -n "${_SHA256}"
+        gcloud storage cp ${_ARCHIVE} /workspace/cp.bundle
+        printf '%s  /workspace/cp.bundle\n' "${_SHA256}" > /workspace/want.sha
+        sha256sum -c /workspace/want.sha
+        rm -rf /workspace/work
+        git init -q -b import /workspace/work
+        git -C /workspace/work -c transfer.fsckobjects=true bundle unbundle /workspace/cp.bundle > /workspace/heads.txt
+        cat /workspace/heads.txt
+        BOID=$$(awk 'NR==1{print $$1}' /workspace/heads.txt)
+        if test "$$BOID" != "${_COMMIT}" ; then echo "PROVENANCE FAIL bundle head $$BOID is not the requested commit ${_COMMIT}" ; exit 41 ; fi
+        if ! git -C /workspace/work checkout -q --detach ${_COMMIT} ; then echo "PROVENANCE FAIL bundle does not contain commit ${_COMMIT}" ; exit 42 ; fi
+        BC=$$(git -C /workspace/work rev-parse HEAD)
+        if test "$$BC" != "${_COMMIT}" ; then echo "PROVENANCE FAIL rev-parse HEAD is $$BC not ${_COMMIT}" ; exit 43 ; fi
+        if ! git -C /workspace/work fsck --no-dangling $$(git -C /workspace/work rev-parse HEAD^{tree}) ; then echo "PROVENANCE FAIL tree incomplete at ${_COMMIT}" ; exit 44 ; fi
+        printf '%s\n' "$$BC" > /workspace/BUILD_COMMIT
+        echo "PROVENANCE OK rev-parse HEAD == $$BC"
+        git -C /workspace/work cat-file --batch-all-objects --batch-check='%(objecttype)' | sort | uniq -c
+        test -f /workspace/work/control-plane/src/index.ts
+        test -f /workspace/work/control-plane/Dockerfile
+        # REV 4 PRECONDITION. The judge and the collector both travel INSIDE the
+        # bundle. If either is missing the cycle cannot judge itself, and a cycle
+        # that cannot judge itself must not proceed to deploy-and-promote.
+        test -f /workspace/work/devgate/smoke.py
+        test -f /workspace/work/pipeline/collect-evidence.py
+        test -f /workspace/work/pipeline/promote-gate.sh
+        test -f /workspace/work/control-plane/route-baseline.json
+        test -f /workspace/work/oss/release/install.sh
+        test -f /workspace/work/gate-exec/exec_server.py
+        # pcmint.py IS AN INPUT TO THE COLLECTOR, NOT A DETAIL OF THE IMAGE.
+        # collect_source() scans EVERY gate-exec python source for os.environ reads,
+        # because scanning exec_server.py alone reported PC_CREDS_SECRET as
+        # set-but-unread on every install -- pcmint.load_creds() is what reads it.
+        # A missing pcmint.py would abort the collector, so it is asserted here where
+        # the failure names the file instead of arriving as a traceback.
+        test -f /workspace/work/gate-exec/pcmint.py
+        wc -c /workspace/work/control-plane/src/index.ts
+
+  # ---------------------------------------------------------------- 2. LIVE
+  # BUILD_COMMIT IS NOT TYPED OR PASSED THROUGH. It is read from
+  # /workspace/BUILD_COMMIT, which step 1 wrote from `git rev-parse HEAD` of the
+  # verified working tree. The message's _COMMIT is only the expectation step 1
+  # asserts against; it never reaches the deploy line.
+  #
+  # --no-traffic is not negotiable. --update-env-vars, not --set-env-vars: it must
+  # not drop PC_REQUIRE_PASSKEY.
+  - id: deploy-notraffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        . /workspace/lane.env
+        BC=$$(cat /workspace/BUILD_COMMIT)
+        test -n "$$BC"
+        TAG=c$$(cut -c1-8 /workspace/BUILD_COMMIT)
+        printf '%s\n' "$$TAG" > /workspace/TAG
+        gcloud run deploy $$CP_SVC \
+          --source /workspace/work/control-plane \
+          --region ${_REGION} --project $$PROJECT \
+          --no-traffic --tag $$TAG \
+          --update-env-vars BUILD_COMMIT=$$BC --quiet
+
+  # --------------------------------------------------------------- 2b. LIVE
+  # EMIT route-audit.mjs's OWN full route table. [SEC-ONE-SCANNER-V2] THIS IS NO
+  # LONGER A CROSS-CHECK, IT IS THE MEASUREMENT. collect-evidence.py's python port of
+  # the route scanner has been DELETED, so this table is the only thing in the whole
+  # build that knows what routes index.ts registers: smoke F7.1's counts, F7.2's
+  # partition, F7.3's visibility check and F2.5's public-route set are all rebuilt
+  # from the file this step writes.
+  #
+  # THE PORT IS WHY. It read the word oaBearerRole out of a COMMENT and called
+  # POST /api/jobs/fire guarded, reporting 85/70/15 against this scanner's 85/69/16,
+  # and smoke F7.1 called that route drift for four days. Its sibling
+  # control-plane/gen-baseline.py had the identical defect and was deleted at
+  # 1eb65ef5. Cross-checking two copies of an algorithm was the emergency repair;
+  # having one copy is the fix.
+  #
+  # THIS STEP FAILING IS NOW A BUILD FAILURE WITH TEETH, and it already was one:
+  # `set -eux` plus `test -s` means no table, or an empty one, and the build stops
+  # here. That is deliberate and unchanged. What changed is the cost of the SKIP path
+  # below -- read it.
+  #
+  # IT HAS TO BE ITS OWN STEP BECAUSE THE TWO SCANNERS SHARE NO RUNTIME.
+  # route-audit.mjs is node; collect-evidence.py runs in cloud-sdk:slim, which has
+  # python3 and NO node. /workspace is what survives between steps, so the table
+  # crosses the boundary as a FILE. That is the whole mechanism.
+  #
+  # THE CAPABILITY IS DETECTED IN THE BUNDLE, NEVER ASSUMED OF IT. --emit-table landed
+  # in aa688c6f9. An OLDER bundle has a route-audit.mjs whose process.argv.find()
+  # simply does not match the flag: it emits nothing AND EXITS 0. Asserting the file
+  # unconditionally would therefore brick the build for every historical commit over a
+  # capability that tree never had. Grepping for the flag literal tells the two cases
+  # apart.
+  #
+  # IT CAN STILL FAIL, AND THAT IS THE POINT. Where the flag IS present the emission is
+  # MANDATORY -- no file, or an empty one, and this step is RED. The skip path is
+  # reachable only by a tree that provably cannot emit, and it says so in the log
+  # rather than leaving a silent hole.
+  #
+  # THE SKIP PATH STAYS NON-FATAL, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+  # [SEC-ONE-SCANNER-V2] It is tempting to make it fatal now that the table is the
+  # only measurement -- but the case it covers is exactly a tree that never had the
+  # capability, and failing there bricks every historical commit over something that
+  # tree could not have done. So it stays a skip, and the CONSEQUENCE moved instead:
+  # the bundle now carries NO anchored, tolerant, hidden, registered, public_routes,
+  # unmapped or dead_map_entries at all -- routes.table_source.ran is false with the
+  # reason -- and smoke F7.1, F7.2, F7.3 and F2.5 go RED on the absence. Before this
+  # commit that same tree collected a full, GREEN route section out of the unverified
+  # python port. Trading a confident unverified green for an honest red is the whole
+  # point of the change; it is not a regression to be worked around by restoring a
+  # scanner.
+  #
+  # RUNNING THE AUDIT TWICE IS SAFE. The image build in step 2 already runs it -- the
+  # marker records route_audit "passed-inside-image-build" -- so a tree that would fail
+  # the audit has already failed it there and never reaches this step.
+  - id: route-table
+    name: node:24-slim
+    dir: /workspace/work/control-plane
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        . /workspace/lane.env
+        rm -f /workspace/route-table-js.json
+        test -s route-audit.mjs
+        if grep -q -- '--emit-table=' route-audit.mjs ; then
+          node route-audit.mjs src/index.ts route-baseline.json --emit-table=/workspace/route-table-js.json
+          test -s /workspace/route-table-js.json
+          echo "ROUTE TABLE EMITTED $$(wc -c < /workspace/route-table-js.json) bytes"
+        else
+          echo "ROUTE TABLE NOT EMITTED: this bundle's route-audit.mjs predates --emit-table"
+          echo "(aa688c6f9), so it ignores the flag and writes nothing. collect-evidence.py"
+          echo "records routes.table_source.ran=false with that reason and OMITS every route"
+          echo "field derived from the table. smoke F7.1/F7.2/F7.3/F2.5 will be RED on the"
+          echo "absence: nothing scanned the routes on this build. ABSENT, never passed."
+        fi
+
+  # ------------------------------------------------------------- 3. PENDING
+  # PRECONDITION REMOVED BY REV 3. oss/, deploy/ and pipeline/ are now always
+  # present, because a bundle carries the commit's whole tree. Blocked only on being
+  # exercised once against a real bundle.
+  #
+  # BOTH STEPS BELOW WERE WRITTEN AGAINST A DEAD INTERFACE AND ARE FIXED IN PLACE.
+  # [SEC-CI-DRYCUT-V1]. A step nobody runs is exactly where an interface rots, so
+  # these were re-checked against the tree rather than against memory. They STAY
+  # COMMENTED OUT: this makes them correct if armed, it does not arm them.
+  #
+  # 1. gen.py TAKES THREE POSITIONALS AND HAS NO FLAGS AT ALL. Its whole
+  #    argument parsing is gen.py:25-27 -- no argparse, no getopt, no option
+  #    handling anywhere in the file:
+  #
+  #        REPO   = sys.argv[1]      the SOURCE ROOT
+  #        OUT    = sys.argv[2]      where to emit
+  #        COMMIT = sys.argv[3] if len(sys.argv) > 3 else "unknown"
+  #
+  #    Confirmed independently at this commit by the only other caller in the
+  #    tree: oss/check-release-tree.py's run_generator() spawns
+  #    [sys.executable, GEN, ROOT, out, commit].
+  #
+  #    The old line passed --out, which makes REPO the literal string "--out" and
+  #    never supplies OUT at all. To a positional CLI a flag that does not exist
+  #    is not a parse error, it is a VALUE -- which is why bash -n and a yaml lint
+  #    could never have caught this. The IDENTICAL bug was live in
+  #    cloudbuild-release-check.yaml rev 3 and killed every build of it with
+  #    "missing source: --out/control-plane/src/index.ts".
+  #
+  #    OUT MUST STAY OUTSIDE /workspace/work. gen.py rmtree()s OUT before it
+  #    emits, so cutting into the checkout's own oss/release would destroy the
+  #    very tree the next step compares against.
+  #
+  # 2. check-release-tree.py NEEDS git, NOT ONLY python3. Its interface is fine --
+  #    an optional positional root -- but source_provenance() shells out to
+  #    `git -C ROOT status --porcelain`. python:3.13-slim carries no git, the
+  #    OSError branch returns False, and a PERFECTLY CURRENT tree is reported
+  #    INCOMPLETE (exit 3). With allowFailure: true that is a PERMANENT AMBER for
+  #    a reason that has nothing to do with the release tree, which is worse than
+  #    a red. See [SEC-DEVGATE-RCEXIT-V1], build <build-id>: zero drift printed,
+  #    exit 3 anyway. cloud-sdk:slim carries git 2.47.3 and Python 3.13.5.
+  #
+  # - id: leak-gate
+  #   name: python:3.13-slim
+  #   dir: /workspace/work
+  #   entrypoint: bash
+  #   args: ['-c', 'set -eux; rm -rf /workspace/_drycut; python3 oss/gen.py . /workspace/_drycut ${_COMMIT}']
+  #
+  # - id: release-tree-check
+  #   name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+  #   dir: /workspace/work
+  #   allowFailure: true          # amber in dev ON PURPOSE; BLOCKS in cloudbuild-release-check.yaml
+  #   entrypoint: bash
+  #   args: ['-c', 'python3 oss/check-release-tree.py']
+
+  # ------------------------------------------------------------- 4. PENDING
+  # esbuild TRANSPILES; it does not typecheck. tsc was clean on 2026-08-02 and has
+  # not been enforced since, and it hid three real errors then.
+  #
+  # - id: typecheck
+  #   name: node:24-slim
+  #   dir: /workspace/work/control-plane
+  #   allowFailure: true          # <-- DELETE THIS LINE TO ARM IT
+  #   entrypoint: bash
+  #   args: ['-c', 'set -eux; npm install --no-audit --no-fund; npx tsc --noEmit']
+
+  # ---------------------------------------------------------------- 4c. LIVE
+  # THE COLLECTOR'S MCP RESPONSE PARSER MUST BE SHOWN TO WORK BEFORE ITS OUTPUT IS
+  # BELIEVED. Pure: no cloud, no credentials, no clock, no network. It runs the
+  # controls that live in collect-evidence.py itself, so the SAME bytes the next
+  # step runs are the bytes under test -- not a paraphrase of them.
+  #
+  # IT RUNS BEFORE 5a ON PURPOSE. A parser that cannot read a successful response
+  # does not produce a WORSE bundle, it produces a CONFIDENTLY WRONG one, and the
+  # judge downstream cannot tell the difference. Catching it here costs a second;
+  # catching it downstream costs a night, which is what it cost.
+  - id: mcp-parser-selftest
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        . /workspace/lane.env
+        CE=/workspace/work/pipeline/collect-evidence.py
+        test -s $$CE
+        if grep -q -- '--selftest' $$CE ; then
+          set +e
+          python3 $$CE --selftest > /workspace/sse-selftest.txt 2>&1
+          SRC=$$?
+          set -e
+          cat /workspace/sse-selftest.txt
+          gcloud storage cp /workspace/sse-selftest.txt \
+            gs://$$LANE_BUCKET/devgate/sse-selftest-$$(cat /workspace/BUILD_COMMIT).txt || true
+          if test "$$SRC" != "0" ; then
+            echo ""
+            echo "=============================================================="
+            echo "THE MCP RESPONSE PARSER FAILED ITS OWN CONTROLS."
+            echo "=============================================================="
+            echo "collect-evidence.py --selftest exited $$SRC. Every mcp_* field it"
+            echo "would write -- roundtrip, mcp_roundtrip, mcp_tools_list and"
+            echo "mcp_tools_authed -- is therefore unsafe to read, INCLUDING a green"
+            echo "one, because the failure mode of this defect is a check that cannot"
+            echo "fail. This build collects nothing and judges nothing."
+            exit 62
+          fi
+          echo "  ok   the MCP/SSE parser controls hold in BOTH directions"
+        else
+          echo "MCP PARSER SELF-TEST NOT AVAILABLE IN THIS BUNDLE."
+          echo "This tree's pipeline/collect-evidence.py predates --selftest"
+          echo "([SEC-DEVGATE-SSE-V1]), so its jbody() is a bare json.loads while"
+          echo "POST /mcp answers text/event-stream. CONSEQUENCE, stated plainly so"
+          echo "nobody reads this build's bundle as though it measured the MCP surface:"
+          echo "  * roundtrip.write_ok is VACUOUS -- true over the empty string;"
+          echo "  * roundtrip.sha_read will be e3b0c442..., the sha256 of \"\";"
+          echo "  * roundtrip.error may describe a 200 as refused by the application;"
+          echo "  * mcp_tools_authed.tools / mcp_tools_list.tools will be [] even on a"
+          echo "    200 that carried the whole roster, so F2.3 passes VACUOUSLY."
+          echo "ABSENT, never passed. Re-cut the bundle at a commit that carries the"
+          echo "fix to get a real verdict on F1.4 / F1.5 / F1.MCP_WRITE_FILE_HANDLER."
+        fi
+
+  # ---------------------------------------------------------------- 5a. LIVE
+  # COLLECT. Only cloud reads; it never judges.
+  #
+  # WHAT IT MUTATES IN DEV, AND WHY. It toggles iapEnabled false -> true around the
+  # HTTP probes and restores it in a finally, because IAP here refuses EVERY machine
+  # ID-token audience (four measured, all "401 Invalid JWT audience") and that is not
+  # an IAM gap -- the build SA already holds roles/iap.httpsResourceAccessor. The
+  # restore is CONFIRMED BY RE-READING the service AND by re-probing unauthenticated
+  # and requiring the IAP-generated header back, never by the exit code of the
+  # restore command. DEV ONLY. Never prod. Never a shipped default.
+  #
+  # --no-mint-session-key is NOT passed, so the collector will mint a short-lived
+  # session key through the console route and REVOKE it in a finally. Without a key
+  # there is no sealed lake round-trip and F1.4/F1.5 FAIL honestly rather than being
+  # faked -- see the collector header. Pass --no-mint-session-key to opt out and
+  # accept those two failures.
+  - id: collect-evidence
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -u
+        . /workspace/lane.env
+        TAG=$$(cat /workspace/TAG)
+        # THE SMOKE'S OWN IDENTITY. The metadata default here is the BUILD service
+        # account, and no strain binds it -- pcResolveIdentity answers 401, which is
+        # why F1.4/F1.5/F2.2 were red. A DEDICATED service account is impersonated
+        # instead; binding the builder itself would give every build in the project a
+        # fleet role. The audience is the BASE service url even though the probes go
+        # to the revision TAG url: oaStrainFromOidc pins it to MCP_PUBLIC_URL and
+        # accepts only that or that + "/mcp". It is read off the deployed service
+        # rather than guessed, because MCP_PUBLIC_URL is literally what the app
+        # compares against. --include-email is NOT optional: without it an
+        # impersonated ID token carries no email claim and the sa_email lookup can
+        # never match.
+        gcloud run services describe $$CP_SVC --region ${_REGION} --project $$PROJECT --format=json > /workspace/cpsvc.json
+        AUD=$$(python3 -c "import json;d=json.load(open('/workspace/cpsvc.json'));e={x['name']:x.get('value','') for x in d['spec']['template']['spec']['containers'][0].get('env',[])};print(e.get('MCP_PUBLIC_URL') or d['status']['url'])")
+        # [SEC-SINGLEPROJ-V2] SMOKE_SA comes from /workspace/lane.env now. The fallback it
+        # replaces was pc-devgate-smoke@<project> -- ONE identity for every lane in the
+        # project, which in a single-project install is the neighbouring lane's smoke
+        # identity. resolve-lane composes a lane-scoped one, or honours _SMOKE_SA if set.
+        echo "SMOKE IDENTITY $$SMOKE_SA"
+        echo "SMOKE AUDIENCE $$AUD"
+        if T=$$(gcloud auth print-identity-token --impersonate-service-account=$$SMOKE_SA --audiences="$$AUD" --include-email 2>/workspace/idtok.err) && test -n "$$T" ; then
+          export PC_SMOKE_ID_TOKEN="$$T"
+          echo "SMOKE ID TOKEN OK"
+        else
+          echo "SMOKE ID TOKEN MINT FAILED -- leaving PC_SMOKE_ID_TOKEN unset on purpose."
+          echo "F1.4/F1.5/F2.2 stay red and HONEST rather than green on the builder."
+          cat /workspace/idtok.err || true
+        fi
+        # [SEC-ONE-SCANNER-V2] PC_ROUTE_TABLE_REQUIRED IS GONE AND IS NOT REPLACED. It
+        # existed to escalate "collect-evidence.py's port of the route scanner is
+        # UNVERIFIED" into a refusal. There is no port left to verify: the collector
+        # reads this table or it reports no routes at all, so absence is ALWAYS a
+        # refusal to report and a variable that switches that on would be a switch for
+        # honesty. Exporting it here would also have been the tautology it already was
+        # -- it was only ever set inside the branch that had just proved the file
+        # exists. PC_ROUTE_TABLE_JS stays: it NAMES the file, which is a real choice.
+        if test -s /workspace/route-table-js.json ; then
+          export PC_ROUTE_TABLE_JS=/workspace/route-table-js.json
+          echo "ROUTE TABLE present: it is the ONLY route measurement in this build"
+        else
+          echo "ROUTE TABLE absent: routes.table_source records why, every route field"
+          echo "derived from it is OMITTED, and smoke F7.1/F7.2/F7.3/F2.5 go RED."
+        fi
+        collect() {
+          python3 /workspace/work/pipeline/collect-evidence.py \
+            --project $$PROJECT --region ${_REGION} \
+            --service $$CP_SVC --gate-exec $$GX_SVC \
+            --tag "$$TAG" --tree /workspace/work \
+            --out /workspace/evidence.json --mcp-service "$$MC_SVC" --lake "$$LAKE" \
+            --iap-toggle-projects $$PROJECT --firestore-db $$FIRESTORE_DB
+        }
+        # PERSIST THE COLLECTOR'S EXIT CODE. [SEC-CI-COLLECTRC-V1]
+        # This step used to run the collect line and then `echo "collect rc=$$?"` --
+        # which reads the code CORRECTLY and then throws it away, because the step's own
+        # success is decided by `test -s evidence.json` alone. On 2026-08-12 the collector
+        # was refused by every Cloud Run read, exited 2, and this build went green: the
+        # refusal was in the log and in the bundle and NOTHING IN THE PIPELINE ACTED ON IT,
+        # so devgate/smoke.py rendered 21 confident reds against a lane that was configured
+        # correctly. The code is now a FILE, and pipeline/promote-gate.sh refuses on it
+        # BEFORE it reads smoke.rc.
+        #
+        #   0  the collector read what it needed
+        #   1  it DIED -- an exception; the bundle carries _collect_aborted
+        #   2  it RAN AND WAS REFUSED -- a read did not answer 200, so the bundle is not
+        #      evidence about this deployment and no verdict over it is a verdict
+        #
+        # CRC IS ASSIGNED ON THE VERY NEXT LINE, BEFORE ANY OTHER COMMAND RUNS. An echo, a
+        # tail or a gcloud in between replaces $$? with its own status; that is exactly how
+        # this code was lost the first time.
+        #
+        # THIS STEP STILL EXITS 0 ON A REFUSAL AND STILL ENDS ON `test -s evidence.json`.
+        # Same doctrine as 5b, stated in this file's header: a failing step ABORTS the
+        # build, which would skip the marker and the gate and leave a refused cycle with no
+        # artifact saying it was refused. THE VERDICT IS THE FILE, NOT THE STEP STATUS.
+        # Publishing below stays unconditional for the same reason.
+        collect > /workspace/collect.log 2>&1
+        CRC=$$?
+        echo "$$CRC" > /workspace/collect.rc
+        echo "collect rc=$$CRC"
+        tail -40 /workspace/collect.log
+        # PUBLISH UNCONDITIONALLY, BEFORE THE STEP CAN DIE.
+        gcloud storage cp /workspace/collect.log \
+          gs://$$LANE_BUCKET/devgate/collect-$$(cat /workspace/BUILD_COMMIT).log || true
+        gcloud storage cp /workspace/evidence.json \
+          gs://$$LANE_BUCKET/devgate/evidence-$$(cat /workspace/BUILD_COMMIT).json || true
+        gcloud storage cp /workspace/collect.rc gs://$$LANE_BUCKET/devgate/collect-rc-$$(cat /workspace/BUILD_COMMIT).txt || true
+        test -s /workspace/evidence.json
+
+  # ---------------------------------------------------------------- 5b. LIVE
+  # JUDGE. smoke.py is a PURE JUDGE and is not modified here.
+  #
+  # THE STEP EXITS 0 ON PURPOSE. See the header: a failing step aborts the build and
+  # would skip the marker and the gate, leaving a red revision with no artifact
+  # saying it was red. The verdict is /workspace/smoke.rc; step 7 is what turns a bad
+  # verdict into a red build.
+  #
+  # THE SUBJECT IS ASSERTED BEFORE ITS BEHAVIOUR IS BELIEVED. A missing or empty
+  # smoke.py would otherwise "succeed" at judging nothing. The zero-byte gate proof
+  # named in the header is the cautionary tale.
+  #
+  # NEVER A `tee` PIPELINE. Measured 2026-08-09: tee produced a ZERO-BYTE log and a
+  # SUCCESS build in five seconds. A function redirected as a whole is the pattern
+  # that works.
+  - id: smoke
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -u
+        . /workspace/lane.env
+        test -s /workspace/work/devgate/smoke.py || { echo "smoke.py missing or empty"; echo 12 > /workspace/smoke.rc; exit 0; }
+        test -s /workspace/evidence.json || { echo "evidence.json missing or empty"; echo 12 > /workspace/smoke.rc; exit 0; }
+        wc -l /workspace/work/devgate/smoke.py
+        judge() {
+          SMOKE_EVIDENCE=/workspace/evidence.json \
+          SMOKE_REPORT=/workspace/smoke-report.txt \
+          SMOKE_INSTALL_EXIT=20 \
+          python3 /workspace/work/devgate/smoke.py
+        }
+        judge > /workspace/smoke-stdout.txt 2>&1
+        RC=$$?
+        printf '%s\n' "$$RC" > /workspace/smoke.rc
+        echo "SMOKE EXIT $$RC"
+        # 0 ok | 10 functional failure | 11 coverage lost | 12 evidence missing
+        sed -n '/CENSUS/,$$p' /workspace/smoke-report.txt || true
+        # PUBLISH BOTH UNCONDITIONALLY, BEFORE THE STEP CAN DIE.
+        BC=$$(cat /workspace/BUILD_COMMIT)
+        gcloud storage cp /workspace/smoke-report.txt gs://$$LANE_BUCKET/devgate/smoke-$$BC.txt || true
+        gcloud storage cp /workspace/smoke-stdout.txt gs://$$LANE_BUCKET/devgate/smoke-stdout-$$BC.txt || true
+        exit 0
+
+  # ---------------------------------------------------------------- 6. LIVE
+  # THE BUILT MARKER. smoke is no longer hardcoded "NOT-RUN": it carries the REAL
+  # verdict, and cloudbuild-prod.yaml still refuses to promote anything whose marker
+  # does not say smoke:"pass". The marker is written BEFORE the gate so that a
+  # REFUSED cycle still leaves a durable record of why.
+  - id: readback-and-marker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        . /workspace/lane.env
+        BC=$$(cat /workspace/BUILD_COMMIT)
+        SRC=$$(cat /workspace/smoke.rc 2>/dev/null || echo "")
+        case "$$SRC" in
+          0)  SMOKE=pass ;;
+          10) SMOKE=functional-failed ;;
+          11) SMOKE=coverage-lost ;;
+          12) SMOKE=evidence-missing ;;
+          "") SMOKE=NOT-RUN ;;
+          *)  SMOKE=exit-$$SRC ;;
+        esac
+        # [SEC-CI-COLLECTRC-V1] THE MARKER RECORDS WHETHER THE INPUT WAS EVIDENCE, beside
+        # the verdict computed from it. A marker that says smoke:"pass" over a bundle the
+        # collector refused is the artifact that would let a later reader -- or
+        # cloudbuild-prod.yaml step 1, which promotes on smoke:"pass" -- believe a green
+        # that was computed over nothing. Empty means this bundle predates step 5a
+        # persisting the code: NOT-RUN, never "ok".
+        CRC=$$(cat /workspace/collect.rc 2>/dev/null || echo "")
+        case "$$CRC" in
+          0)  COLLECT=ok ;;
+          1)  COLLECT=aborted ;;
+          2)  COLLECT=refused ;;
+          "") COLLECT=NOT-RUN ;;
+          *)  COLLECT=exit-$$CRC ;;
+        esac
+        if test "${_SHORT}" != "$$(cut -c1-8 /workspace/BUILD_COMMIT)" ; then echo "WARN message _SHORT ${_SHORT} disagrees with the verified commit $$BC" ; fi
+        gcloud run services describe $$CP_SVC --region ${_REGION} \
+          --project $$PROJECT --format=json > /workspace/svc.json
+        python3 -c "import json;d=json.load(open('/workspace/svc.json'));s=d['status'];print('LATEST_CREATED',s.get('latestCreatedRevisionName'));print('LATEST_READY',s.get('latestReadyRevisionName'));[print('TRAFFIC',t.get('revisionName'),t.get('percent'),t.get('tag'),t.get('url')) for t in s.get('traffic',[])]"
+        REV=$$(python3 -c "import json;print(json.load(open('/workspace/svc.json'))['status'].get('latestCreatedRevisionName',''))")
+        printf '{"commit":"%s","archive":"%s","archive_sha256":"%s","build":"%s","revision":"%s","deployed":"no-traffic","provenance":"git-bundle-revparse","route_audit":"passed-inside-image-build","collect":"%s","collect_exit":"%s","smoke":"%s","smoke_exit":"%s","evidence":"gs://%s/devgate/evidence-%s.json","smoke_report":"gs://%s/devgate/smoke-%s.txt"}\n' \
+          "$$BC" "${_ARCHIVE}" "${_SHA256}" "${BUILD_ID}" "$$REV" "$$COLLECT" "$$CRC" "$$SMOKE" "$$SRC" \
+          "$$LANE_BUCKET" "$$BC" "$$LANE_BUCKET" "$$BC" > /workspace/marker.json
+        cat /workspace/marker.json
+        gcloud storage cp /workspace/marker.json \
+          gs://$$LANE_BUCKET/devbuilt/$$BC.json
+
+  # ---------------------------------------------------------------- 7. LIVE
+  # THE PROMOTION GATE. Traffic moves ONLY on a green judgement.
+  #
+  # This step exits 50-57 on refusal, so A REFUSED PROMOTION IS A RED BUILD. That is
+  # deliberate: a green build must mean "deployed AND judged AND promoted", and a
+  # cycle that ends with an unpromoted revision is something a human should see in
+  # the build list without opening a transcript.
+  #
+  # The gate is a FILE FROM THE VERIFIED BUNDLE, not inline yaml, so the exact bytes
+  # that run here are the exact bytes that were tested. Its five conditions and its
+  # nine proven refusal paths are documented in the file itself.
+  - id: promote-gate
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -u
+        . /workspace/lane.env
+        test -s /workspace/work/pipeline/promote-gate.sh || { echo "promote-gate.sh missing or empty -- REFUSING to promote on a gate that did not load"; exit 58; }
+        bash -n /workspace/work/pipeline/promote-gate.sh || { echo "promote-gate.sh does not parse -- REFUSING"; exit 59; }
+        # ---- NEGATIVE CONTROL. THE SAME GATE FILE, OVER A FIXTURE IT MUST REFUSE ----
+        # `test -s` proves the file is there and `bash -n` proves it parses. NEITHER
+        # proves it can still say no -- a gate rewritten to `exit 0` passes both, and this
+        # fleet has shipped a gate that could not refuse more than once. So the gate is run
+        # FIRST over a scratch WORK directory holding a RED verdict, and it must exit 51
+        # (REFUSED-NOT-ZERO) before anything it says about the real artifacts is believed.
+        #
+        # NOTHING HERE CAN MOVE TRAFFIC. Every refusal path in promote-gate.sh exits before
+        # its first gcloud call -- measured, not assumed, by running this exact fixture
+        # against this exact file: exit 51, zero gcloud invocations. The fixture lives in
+        # its own directory, so the real smoke.rc, report and BUILD_COMMIT are untouched.
+        #
+        # 51 EXACTLY, NOT MERELY NON-ZERO. "Non-zero" is also what a gate replaced by a stub
+        # returning 1 produces, and a gate that refuses everything is a different broken,
+        # not a working one.
+        rm -rf /workspace/negctl && mkdir -p /workspace/negctl
+        printf '10\n' > /workspace/negctl/smoke.rc
+        printf 'VERDICT 10 negative-control fixture, not a real report\n' > /workspace/negctl/smoke-report.txt
+        cp /workspace/BUILD_COMMIT /workspace/negctl/BUILD_COMMIT
+        negctl() {
+          SVC=$$CP_SVC REGION=${_REGION} PROJECT=$$PROJECT WORK=/workspace/negctl \
+            bash /workspace/work/pipeline/promote-gate.sh
+        }
+        negctl > /workspace/negctl.log 2>&1
+        NRC=$$?
+        echo "negative control: the gate over a RED fixture exited $$NRC (want 51)"
+        if test "$$NRC" != "51" ; then
+          echo "NEGATIVE CONTROL FAILED -- the promotion gate did not refuse a non-zero smoke"
+          echo "verdict with exit 51. A gate that has not been shown to refuse cannot be"
+          echo "trusted to have allowed anything, so this build promotes nothing."
+          cat /workspace/negctl.log
+          exit 60
+        fi
+        echo "NEGATIVE CONTROL OK the promotion gate refuses a non-zero smoke verdict"
+        # -- SECOND NEGATIVE CONTROL: A REFUSED COLLECTOR UNDER A GREEN SMOKE --------
+        # [SEC-CI-COLLECTRC-V1]. The fixture above writes ONLY smoke.rc, so it proves the
+        # gate refuses a RED SMOKE and NOTHING WHATEVER about the collect refusal: a gate
+        # that had never learned to read collect.rc still exits 51 on it and this step
+        # still says OK. That would leave the refusal path ASSERTED rather than PROVEN,
+        # which is the exact thing this step exists to prevent.
+        #
+        # So the second fixture is the DANGEROUS shape, not another red one: smoke.rc says
+        # 0 and the report is green, while the collector says it was REFUSED. This is what
+        # the night of 2026-08-12 would have looked like once smoke.py stopped calling a
+        # starved bundle a failure. A gate that reads smoke.rc first PROMOTES it. MEASURED
+        # against the pre-change gate over this exact fixture: exit 0, it promotes.
+        #
+        # 64 EXACTLY, and it must reach NO gcloud call -- both verified before this was
+        # wired: every condition-0 refusal exits ahead of the first gcloud line.
+        rm -rf /workspace/negctl2 && mkdir -p /workspace/negctl2
+        printf '2\n' > /workspace/negctl2/collect.rc
+        printf '0\n' > /workspace/negctl2/smoke.rc
+        printf 'VERDICT 0 negative-control fixture, not a real report\n' > /workspace/negctl2/smoke-report.txt
+        cp /workspace/BUILD_COMMIT /workspace/negctl2/BUILD_COMMIT
+        cp /workspace/TAG /workspace/negctl2/TAG
+        negctl2() {
+          SVC=$$CP_SVC REGION=${_REGION} PROJECT=$$PROJECT WORK=/workspace/negctl2 \
+            bash /workspace/work/pipeline/promote-gate.sh
+        }
+        negctl2 > /workspace/negctl2.log 2>&1
+        NRC2=$$?
+        echo "negative control 2: the gate over a REFUSED-COLLECT fixture exited $$NRC2 (want 64)"
+        if test "$$NRC2" != "64" ; then
+          echo "NEGATIVE CONTROL 2 FAILED -- the promotion gate did not refuse a bundle that"
+          echo "the collector reported as REFUSED. A smoke verdict computed over a bundle"
+          echo "nobody could read is not a verdict, and 21 confident reds over an unmeasured"
+          echo "deployment is worse than no report. This build promotes nothing."
+          cat /workspace/negctl2.log
+          exit 66
+        fi
+        echo "NEGATIVE CONTROL 2 OK the promotion gate refuses a REFUSED collect bundle"
+        gate() {
+          SVC=$$CP_SVC REGION=${_REGION} PROJECT=$$PROJECT WORK=/workspace \
+            bash /workspace/work/pipeline/promote-gate.sh
+        }
+        gate > /workspace/promote.log 2>&1
+        RC=$$?
+        cat /workspace/promote.log
+        gcloud storage cp /workspace/promote.log \
+          gs://$$LANE_BUCKET/devgate/promote-$$(cat /workspace/BUILD_COMMIT).log || true
+        exit $$RC

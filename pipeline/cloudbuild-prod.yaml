@@ -1,0 +1,600 @@
+# SPDX-License-Identifier: Apache-2.0
+# cloudbuild-prod.yaml -- the prod promotion. Rev 2, 2026-08-10.
+#
+# ============================================================================
+# THIS IS NOT A TRIGGER, AND THAT IS THE WHOLE POINT OF REV 2.
+# ============================================================================
+# Rev 1 made this a Cloud Build trigger on a push to the `prod` branch and argued
+# it needed no approval "because the tap already happened: git_push to prod is a
+# gated operation."
+#
+# THAT WAS AN ASSUMPTION, NOT A FACT. git_push is an ordinary MCP tool on the
+# write surface. Nothing in it knows the name `prod`. A trigger on a `prod` ref
+# move would therefore have been an UNGATED PROD DEPLOY PATH REACHABLE BY ANY
+# AGENT HOLDING git_push -- which is precisely the top risk rev 1 named for
+# itself, arrived at by a different road.
+#
+# So there is no prod trigger, no prod Pub/Sub topic, and NO PROD BUILD SERVICE
+# ACCOUNT is created by this design. This file is submitted BY the gated prod
+# deploy job the operator already approves:
+#
+#     gcloud builds submit --no-source --config=cloudbuild-prod.yaml \
+#       --project=your-prod-project \
+#       --substitutions=_COMMIT=<sha>,_SHORT=<8hex>,_ARCHIVE=<gs://...>,_SHA256=<...>
+#
+# --no-source because there is no repository to submit. It runs as the job's own
+# credential; nothing new is granted to anything. The tap stays exactly where it
+# is today. Alternatively the steps below can be inlined as the run_cmd body --
+# the config form exists so the operator can read the steps as a diff.
+#
+# Prod promotion by moving a `prod` ref, with a trigger, becomes available only
+# after branch protection lands inside git_push -- a refusal to move `prod`
+# without an approval token. That is Phase C in the lane's migration notes. Until
+# it exists, NOTHING may auto-deploy prod.
+
+substitutions:
+  _REGION: us-east1
+  _PROD_PROJECT: your-prod-project
+  # ^^ REV 1 SAID `<your-repo-id>`. THERE IS NO SUCH PROJECT. The prod project
+  #    is your-prod-project and the prod lake is
+  #    gs://your-prod-project-datalake. Rev 1 had the wrong name in four
+  #    places.
+  # [SEC-SINGLEPROJ-V2] THERE IS NO SECOND PROJECT. These two used to be _DEV_PROJECT and
+  # _DEV_BUCKET, naming a whole separate GCP project, and that was WRONG about the product
+  # this pipeline promotes: install.sh namespaces every resource it creates by PC_LANE so a
+  # rehearsal lane and the real thing share ONE project. The rehearsal lane is a LANE, so
+  # that is what this substitution names. Everything else about the promotion gate is
+  # unchanged -- a commit still has to have been built, deployed and smoked in the rehearsal
+  # lane before prod will take it. It is checked against a lane instead of a project.
+  #
+  # THE LANE'S BUCKET IS NOT WRITTEN HERE AND MUST NOT BE. Bucket names carry PC_TOK, the
+  # per-install random infix (${PROJECT}-${LANE}-${TOK}datalake), so no substitution can
+  # spell one correctly. The install marker secret pc-${LANE}-install-marker is deliberately
+  # the one name that NEVER carries the token -- it is the discovery root -- and it holds the
+  # token on its pc-suffix label. The preconditions step resolves the bucket through it and
+  # writes /workspace/lane_bucket.txt. Hardcoding a bucket here is how this file came to name
+  # a project that no longer exists.
+  _LANE: dev
+  _CP_SVC: paracoding-control-plane
+  _MC_SVC: paracoding-control-plane-mcp
+  # ^^ CONFIRMED, 2026-08-11, and rev 2's outstanding instruction is now DONE.
+  #    Rev 2 guessed `paracoding-mcp` and said so. THERE IS NO SUCH SERVICE.
+  #    MEASURED by the blessed read rev 2 asked for -- run.googleapis.com/v2
+  #    services.list on your-prod-project/us-east1 -- which returns 12
+  #    services. `paracoding-mcp` is not one of them; the second surface is
+  #    `paracoding-control-plane-mcp` (generation 4, serving
+  #    <a-revision-of-your-mcp-surface>, PC_SURFACE=mcp, 40 env vars).
+  #    The first surface, paracoding-control-plane, is generation 280 serving
+  #    <a-revision-of-your-control-plane> and carries NO PC_SURFACE, so it
+  #    registers the full route table. Prod is NOT single-service, so the
+  #    _MC_SVC steps stay.
+  #
+  #    Left unfixed, every run died at step 6b: `gcloud run deploy paracoding-mcp`
+  #    against a service that does not exist CREATES ONE -- a third, unwanted
+  #    prod service carrying the full image -- or fails on the deploy, and either
+  #    way step 7 then describes a service that has never served this fleet.
+  _REPO: us-east1-docker.pkg.dev/your-prod-project/fleet/control-plane
+
+logsBucket: gs://your-prod-project-datalake/devdeploy/logs
+options:
+  machineType: E2_HIGHCPU_8
+  logging: GCS_ONLY
+timeout: 1800s
+
+steps:
+
+  # ------------------------------------------------- 1. THE PRECONDITIONS
+  # Any one failing means nothing is built and nothing is deployed.
+  #
+  # NOTE ON WHAT CHANGED FROM REV 1: rev 1 checked "reachable from main" with
+  # `git fetch -q origin main`. THERE IS NO GIT REMOTE. The build has no
+  # repository, in prod or anywhere. Commit identity is established instead by
+  # the archive, which the prod exporter produced by `git checkout <oid>` against
+  # the real store followed by `test "$H" = "<oid>"` -- an oid that resolves in
+  # the store is by construction a real commit of this repo. Reachability of that
+  # oid from main is asserted by the STAGING AGENT with git_log before staging,
+  # and the batch it enumerates is printed at step 3.
+  - id: preconditions
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        echo "=============================================================="
+        echo "PROMOTION PRECONDITIONS for ${_COMMIT}"
+        echo "=============================================================="
+
+        test -n "${_COMMIT}"
+        test -n "${_ARCHIVE}"
+        test -n "${_SHA256}"
+        test -n "${_LANE}"
+
+        # (0) RESOLVE THE REHEARSAL LANE, FAIL CLOSED. Everything below that reads a dev
+        #     marker reads it out of THIS bucket, and the name is recoverable only through
+        #     the lane's install marker -- see the substitutions block. A lane that is not
+        #     installed has no marker, and this refuses rather than composing a plausible
+        #     bucket name and reporting "no dev marker", which would blame the commit for a
+        #     configuration fault.
+        LANE_MARK="pc-${_LANE}-install-marker"
+        if ! LANE_TOK=$$(gcloud secrets describe "$$LANE_MARK" --project ${_PROD_PROJECT} \
+                           --format='value(labels.pc-suffix)' 2>/dev/null); then
+          echo "REFUSE cannot read the install marker $$LANE_MARK in ${_PROD_PROJECT}."
+          echo "  The rehearsal lane '${_LANE}' is not installed there, or this build cannot"
+          echo "  describe its marker secret. THIS IS NOT A COMMIT PROBLEM. Install the lane:"
+          echo "      PC_LANE=${_LANE} bash install.sh ${_PROD_PROJECT}"
+          exit 9
+        fi
+        LANE_TOK=$$(printf '%s' "$$LANE_TOK" | tr -d '[:space:]')
+        case "$$LANE_TOK" in
+          "") LANE_INFIX="" ;;
+          [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) LANE_INFIX="$${LANE_TOK}-" ;;
+          *) echo "REFUSE the pc-suffix label on $$LANE_MARK is not six lowercase hex characters."
+             echo "  This build cannot compose the lane's bucket name from it and will not guess."
+             exit 9 ;;
+        esac
+        LANE_BUCKET="${_PROD_PROJECT}-${_LANE}-$${LANE_INFIX}datalake"
+        printf '%s' "$$LANE_BUCKET" > /workspace/lane_bucket.txt
+        echo "  ok   rehearsal lane '${_LANE}' resolves to gs://$$LANE_BUCKET"
+
+        # (1) The tree being promoted is the tree that was rehearsed, proven by
+        #     digest before anything is extracted.
+        #
+        # [SEC-CI-PRODBUNDLE-V1] THE ARTIFACT IS A git BUNDLE, NOT A TARBALL, AND
+        # THIS STEP UNTARRED IT. pipeline/publish-build-request.sh publishes the
+        # archive as fleet-<commit>.bundle, and both other pipelines consume it
+        # with "git bundle unbundle". "tar -xzf" on a bundle fails outright, so
+        # this step could never have passed against any archive this fleet
+        # actually publishes. Same defect, same file family, already fixed once:
+        # cloudbuild-release-check.yaml rev 3.
+        #
+        # THE BUNDLE DISCIPLINE. Every line of it is load-bearing:
+        #   sha256sum -c       the bytes are the bytes the message named
+        #   bundle unbundle    every object re-hashed by index-pack
+        #   advertised head    the bundle's own ref must BE the commit
+        #   checkout --detach  the object must exist, or git refuses
+        #   rev-parse HEAD     what is on disk IS that commit
+        #   fsck <TREE oid>    tree and every blob present and hash-correct
+        #
+        # NEVER "git clone". A bundle cannot express shallowness, so a
+        # single-commit bundle holds a commit whose parent resolves to nothing
+        # and clone's connectivity check rejects it with 128 on git 2.47.3.
+        # NEVER fsck from the COMMIT: it chases the absent parent and reports
+        # "broken link" on a perfectly good bundle. Give it the TREE oid.
+        gcloud storage cp ${_ARCHIVE} /workspace/cp.bundle
+        echo "${_SHA256}  /workspace/cp.bundle" > /workspace/want.sha
+        sha256sum -c /workspace/want.sha
+        rm -rf /workspace/work
+        git init -q -b import /workspace/work
+        git -C /workspace/work -c transfer.fsckobjects=true bundle unbundle /workspace/cp.bundle > /workspace/heads.txt
+        cat /workspace/heads.txt
+        BOID=$$(awk 'NR==1{print $$1}' /workspace/heads.txt)
+        test "$$BOID" = "${_COMMIT}" || { echo "REFUSE bundle head $$BOID is not the requested commit ${_COMMIT}"; exit 9; }
+        git -C /workspace/work checkout -q --detach ${_COMMIT} || { echo "REFUSE bundle does not contain commit ${_COMMIT}"; exit 9; }
+        BC=$$(git -C /workspace/work rev-parse HEAD)
+        test "$$BC" = "${_COMMIT}" || { echo "REFUSE rev-parse HEAD is $$BC not ${_COMMIT}"; exit 9; }
+        git -C /workspace/work fsck --no-dangling $$(git -C /workspace/work rev-parse HEAD^{tree}) || { echo "REFUSE tree incomplete at ${_COMMIT}"; exit 9; }
+        test -f /workspace/work/control-plane/src/index.ts
+        test -f /workspace/work/control-plane/Dockerfile
+        echo "  ok   bundle digest verified, provenance proven, tree complete"
+
+        # (2) It ran in dev AND PASSED SMOKE. No marker, no promotion.
+        if ! gcloud storage cat \
+               gs://$$LANE_BUCKET/devbuilt/${_COMMIT}.json \
+               > /workspace/devbuilt.json 2>/dev/null; then
+          echo "REFUSE no dev marker for ${_COMMIT}."
+          echo "  This commit has never been built and deployed in lane '${_LANE}'."
+          echo "  Publish a build request to fleet-main-moved and let the dev"
+          echo "  pipeline write the marker. THIS IS NOT A PIN PROBLEM."
+          exit 9
+        fi
+        cat /workspace/devbuilt.json
+
+        # (3) THE MARKER MUST SAY smoke:"pass". Before pipeline/collect-evidence.py
+        #     landed, the dev pipeline could only write smoke:"NOT-RUN" -- smoke.py
+        #     is a PURE JUDGE with no collect() -- and this line refused every
+        #     promotion outright. That was deliberate, and the direction of failure
+        #     is unchanged now that the collector exists: a cycle that did not
+        #     judge itself still cannot promote. The gap fails CLOSED, loudly, at
+        #     the boundary that matters, instead of quietly promoting an unsmoked
+        #     tree.
+        SM=$$(python3 -c "import json;print(json.load(open('/workspace/devbuilt.json')).get('smoke',''))")
+        MC=$$(python3 -c "import json;print(json.load(open('/workspace/devbuilt.json')).get('commit',''))")
+        AS=$$(python3 -c "import json;print(json.load(open('/workspace/devbuilt.json')).get('archive_sha256',''))")
+        CO=$$(python3 -c "import json;print(json.load(open('/workspace/devbuilt.json')).get('collect',''))")
+        test "$$MC" = "${_COMMIT}"  || { echo "REFUSE marker commit $$MC != ${_COMMIT}"; exit 9; }
+        test "$$AS" = "${_SHA256}"  || { echo "REFUSE marker archive digest $$AS != ${_SHA256}"; exit 9; }
+        # (4) THE MARKER MUST ALSO SAY collect:"ok", AND IT IS READ BEFORE THE SMOKE
+        #     VERDICT. [SEC-CI-COLLECTRC-V1] pipeline/collect-evidence.py returns 2 when
+        #     one or more Cloud Run reads did not answer 200 -- it marks the bundle with
+        #     "_collect_refused" and hands over empty app/gate_exec/lake/kms/firestore/
+        #     install sections -- and cloudbuild-dev.yaml step 6 records that as
+        #     collect:"refused" (1 -> "aborted", 0 -> "ok"). A smoke verdict computed over
+        #     a bundle nobody could read is NOT A VERDICT whatever colour it is, which is
+        #     why pipeline/promote-gate.sh numbers the same check condition 0 and reads it
+        #     ahead of smoke.rc. Prod had no equivalent: a starved collector could promote
+        #     on a smoke run that measured nothing.
+        #
+        #     FAILS CLOSED. An absent field, a marker written before the field existed
+        #     (collect:"NOT-RUN"), an unexpected value and an unparseable marker all leave
+        #     $$CO something other than "ok" -- or kill the assignment above under set -e --
+        #     and every one of those refuses. Same direction of failure as smoke:"NOT-RUN".
+        test "$$CO" = "ok"          || { echo "REFUSE dev marker says collect=$${CO:-<absent>}, not ok."; echo "  The evidence bundle this commit was judged over was not collected, so the smoke verdict over it is not a verdict. Read gs://$$LANE_BUCKET/devgate/collect-${_COMMIT}.log."; exit 9; }
+        test "$$SM" = "pass"        || { echo "REFUSE dev marker says smoke=$$SM, not pass."; exit 9; }
+        echo "  ok   dev marker present, same commit, same archive, evidence collected, smoke passed"
+
+  # ------------------------------------------- 2. the deploy invariant self-test
+  #
+  # [SEC-CI-PRODPIN-V1] THIS STEP IS DISARMED, NOT DELETED, AND THE FILE IT WANTS
+  # IS DELIBERATELY NOT COMMITTED YET. Read this before re-arming it.
+  #
+  # WHAT WAS WRONG: it ran "test -f /workspace/work/deploy/pin-invariant.py"
+  # under set -eux and then executed it. deploy/pin-invariant.py HAS NEVER
+  # EXISTED IN THIS REPOSITORY -- git_log on that path returns PATH_NOT_FOUND
+  # across the whole history, and deploy/ holds only BUILD-FROM-THE-STORE.md,
+  # control-plane-scaffold/ and loader/. So this step aborted every prod
+  # promotion, unconditionally, at the second step.
+  #
+  # THE TOOL IS REAL AND IT LIVES IN THE LAKE, at
+  # shared/state/<your-lane>/deploy/pin-invariant.py (24,334 bytes, 2026-08-10,
+  # [SEC-PIN-TREEBLOB-INV-V2]). It was read and reviewed. It is not junk. It is
+  # also NOT READY TO BE COMMITTED HERE, for three reasons:
+  #
+  #   1. IT WOULD VERY LIKELY REFUSE THE RELEASE CUT. oss/leak-baseline.json
+  #      sets the repository-wide ceiling for the "bare 40-hex oid" category at
+  #      15. This one file carries 18 occurrences (8 distinct) across its header
+  #      and its self-test fixtures. Landing it plausibly trips the
+  #      [SEC-REPOLEAK-RATCHET-V1] repo gate in gen.py and makes the
+  #      generator REFUSE TO CUT, blocking the release being shipped right now.
+  #      MEASURED: the 18 and the 15. ASSUMED: that the repo gate scans deploy/.
+  #      Settle that before committing the file, not after.
+  #
+  #   2. ITS DECLARED PINS ARE ALREADY STALE -- the exact failure its own
+  #      docstring says V2 exists to end, recurring a fourth time. DEPLOYABLE
+  #      pins control-plane/src/index.ts at bf9708fb and the tree holds
+  #      708959dd today. PINS_MEASURED_AT is 2026-08-10 with PIN_MAX_AGE_DAYS 3,
+  #      so the declared fallback EXPIRES 2026-08-13 and the tool then refuses
+  #      unless --accept-stale-pins is passed. A check landed today that refuses
+  #      tomorrow is a time bomb, not a gate.
+  #
+  #   3. AS INVOKED IT PROVED NOTHING ABOUT THE PROMOTION. --self-test is
+  #      HERMETIC: it builds throwaway repositories in a tempdir and drives
+  #      pure functions. It never reads the tree being promoted. Running only
+  #      the negative control, with no positive check beside it, is the mirror
+  #      of the defect this fleet refuses everywhere else.
+  #
+  # WHAT A CORRECT ARMED VERSION LOOKS LIKE. Note --refs main: after
+  # "bundle unbundle" of a SINGLE-COMMIT bundle the workspace holds exactly one
+  # ref, so the default "main,memory-v1" parity mode refuses on a
+  # materialization failure that is not a real divergence -- and the tool says
+  # so in its own output. The --expect-blob pins must be measured by the STAGING
+  # AGENT at the commit being promoted and passed in: a pin measured three
+  # seconds ago cannot be stale, which is the whole point of V2.
+  #
+  # - id: pin-invariant
+  #   name: python:3.13-slim
+  #   entrypoint: bash
+  #   args:
+  #     - -c
+  #     - |
+  #       set -eux
+  #       apt-get update -qq && apt-get install -y -qq git
+  #       test -f /workspace/work/deploy/pin-invariant.py
+  #       python3 /workspace/work/deploy/pin-invariant.py --self-test
+  #       python3 /workspace/work/deploy/pin-invariant.py --repo /workspace/work --refs main --expect-blob control-plane/src/index.ts=OID --expect-blob gate-exec/exec_server.py=OID
+
+  # --------------------------------------------------------- 3. the batch, read
+  # One tap can carry many commits. The batch must at least be enumerable. The
+  # staging agent writes it with git_log into the job; this step prints whatever
+  # was handed to it, and prints a loud line if it was handed nothing.
+  - id: enumerate-batch
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        echo "--- commits being promoted -----------------------------------"
+        # [SEC-SINGLEPROJ-V2] A DIFFERENT STEP, SO THE VARIABLE IS GONE AND THE FILE IS THE
+        # CHANNEL. /workspace survives between steps; shell variables do not. The
+        # preconditions step already refused if this file could not be written, so a missing
+        # file here means the step order was edited, not that the lane is unresolvable.
+        test -s /workspace/lane_bucket.txt || { echo "REFUSE /workspace/lane_bucket.txt is absent or empty -- the preconditions step did not run before this one."; exit 9; }
+        LANE_BUCKET=$$(cat /workspace/lane_bucket.txt)
+        if gcloud storage cat gs://$$LANE_BUCKET/devbuilt/${_COMMIT}.batch.txt 2>/dev/null; then
+          :
+        else
+          echo "  (NO BATCH FILE. The staging agent did not enumerate prod..${_COMMIT}"
+          echo "   with git_log. This tap is approving an UNREAD list.)"
+        fi
+        echo "--------------------------------------------------------------"
+
+  # --------------------------------------------------------- 4. rebuild from source
+  # GATES ARE NOT INHERITED. route-audit.mjs and blob-audit.mjs run again here,
+  # from scratch, inside control-plane/Dockerfile, before the first esbuild. The
+  # dev build passing is a necessary condition, never a substitute.
+  - id: build-image
+    name: gcr.io/cloud-builders/docker
+    dir: /workspace/work/control-plane
+    args: ['build', '-t=${_REPO}:${_COMMIT}', '.']
+
+  - id: push-image
+    name: gcr.io/cloud-builders/docker
+    args: ['push', '${_REPO}:${_COMMIT}']
+
+  # ------------------------------- 5. the promoted artifact IS the rehearsed one
+  # HONEST CAVEAT, unchanged from rev 1: control-plane/Dockerfile's npm install is
+  # UNPINNED, so digests can legitimately differ if a dependency floated between
+  # the dev build and this one. That is why this WARNS rather than refuses. Pin
+  # the dependency tree (npm ci + committed lockfile) and then uncomment the
+  # exit 9. Do not leave it a warning forever.
+  #
+  # It also cannot compare against the dev digest today, because the dev pipeline
+  # deploys with `run deploy --source` and does not record an image digest. When
+  # the dev build starts pushing a named image, record its digest in the marker
+  # and compare here. Until then this step compares NOTHING and says so.
+  - id: digest-match
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        WANT=$$(python3 -c "import json;print(json.load(open('/workspace/devbuilt.json')).get('image_digest',''))")
+        GOT=$$(gcloud container images describe ${_REPO}:${_COMMIT} --format='value(image_summary.digest)')
+        echo "  rehearsed digest $${WANT:-<none recorded>}"
+        echo "  promoted  digest $$GOT"
+        if [ -z "$$WANT" ]; then
+          echo "WARN the dev marker records no image digest, so 'the promoted"
+          echo "     artifact is the rehearsed artifact' is NOT checked here."
+          echo "     This is a real gap, not a formality."
+        elif [ "$$WANT" != "$$GOT" ]; then
+          echo "WARN digests differ. npm install is UNPINNED in control-plane/"
+          echo "     Dockerfile, so this can be an honest float. Read the two"
+          echo "     builds before believing it is drift."
+          # exit 9   # <-- UNCOMMENT once npm ci + a committed lockfile land.
+        else
+          echo "  ok   promoted artifact is byte-identical to the rehearsed one"
+        fi
+
+  # ------------------------------------------------- 6. deploy prod, NO TRAFFIC
+  - id: deploy-console-notraffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        gcloud run deploy ${_CP_SVC} --image=${_REPO}:${_COMMIT} \
+          --region=${_REGION} --project=${_PROD_PROJECT} \
+          --no-traffic --tag=p${_SHORT} \
+          --update-env-vars=BUILD_COMMIT=${_COMMIT} --quiet \
+          --format='value(status.latestCreatedRevisionName)' > /workspace/cp.rev
+        # THE REVISION IS RECORDED BY THE DEPLOY THAT CREATED IT, never re-derived
+        # later. "latest" read back in step 7 is a DIFFERENT CLAIM: a concurrent
+        # deploy between here and there makes them diverge, and step 7 would then
+        # verify one revision and promote another. Empty means the deploy did not
+        # tell us what it made, which is a refusal, not something to guess past.
+        test -s /workspace/cp.rev
+        cat /workspace/cp.rev
+
+  # Delete this step if _MC_SVC could not be confirmed. Do not run it on a guess.
+  - id: deploy-mcp-notraffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eux
+        gcloud run deploy ${_MC_SVC} --image=${_REPO}:${_COMMIT} \
+          --region=${_REGION} --project=${_PROD_PROJECT} \
+          --no-traffic --tag=p${_SHORT} \
+          --update-env-vars=BUILD_COMMIT=${_COMMIT} --quiet \
+          --format='value(status.latestCreatedRevisionName)' > /workspace/mc.rev
+        test -s /workspace/mc.rev
+        cat /workspace/mc.rev
+
+  # ------------------------------------------- 6c. the rollback marker, DURABLE
+  # [GCP-ROLLBACK-RAIL-V1] Written BEFORE any traffic shift, where refusal is
+  # still cheap: at this point both new revisions exist at ZERO traffic and
+  # nothing serving has changed. The CP_OLD/MC_OLD lookup in step 7 is cosmetic
+  # (`|| true`, feeds a printed hint); THIS step is the load-bearing record. If
+  # the serving pair cannot be read, the promotion REFUSES here rather than
+  # shifting traffic with no recorded way back.
+  #
+  # The marker is what the lane's rollback script consumes:
+  # one call returns prod to cp_prev/mc_prev by name; --forward re-promotes
+  # cp_new/mc_new. The first prod promotion after this lands doubles as the
+  # tested drill: promote, verify, roll back, roll forward.
+  - id: record-rollback-marker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        CP_NEW=$$(cat /workspace/cp.rev)
+        MC_NEW=$$(cat /workspace/mc.rev)
+        test -n "$$CP_NEW"
+        test -n "$$MC_NEW"
+        prev() {
+          gcloud run services describe "$$1" --region=${_REGION} \
+            --project=${_PROD_PROJECT} \
+            --format='value(status.traffic.filter("percent:100").revisionName)'
+        }
+        prevcommit() {
+          gcloud run revisions describe "$$1" --region=${_REGION} \
+            --project=${_PROD_PROJECT} \
+            --format='value(spec.containers[0].env.filter("name:BUILD_COMMIT").value)' 2>/dev/null || true
+        }
+        CP_PREV=$$(prev ${_CP_SVC})
+        MC_PREV=$$(prev ${_MC_SVC})
+        if [ -z "$$CP_PREV" ] || [ -z "$$MC_PREV" ]; then
+          echo "REFUSE cannot read the currently-serving revision pair, so there"
+          echo "  would be no recorded rollback target. Nothing has shifted."
+          exit 9
+        fi
+        CP_PREV_BC=$$(prevcommit "$$CP_PREV")
+        MC_PREV_BC=$$(prevcommit "$$MC_PREV")
+        TS=$$(date -u +%Y-%m-%dT%H-%M-%SZ)
+        python3 - "$$TS" "$$CP_NEW" "$$MC_NEW" "$$CP_PREV" "$$MC_PREV" "$$CP_PREV_BC" "$$MC_PREV_BC" <<'PY'
+        import json, sys
+        ts, cp_new, mc_new, cp_prev, mc_prev, cp_bc, mc_bc = sys.argv[1:8]
+        json.dump({
+            "ts": ts,
+            "commit": "${_COMMIT}",
+            "archive": "${_ARCHIVE}",
+            "archive_sha256": "${_SHA256}",
+            "cp_new": cp_new, "mc_new": mc_new,
+            "cp_prev": cp_prev, "mc_prev": mc_prev,
+            "cp_prev_build_commit": cp_bc, "mc_prev_build_commit": mc_bc,
+        }, open("/workspace/marker.json", "w"), indent=1)
+        PY
+        cat /workspace/marker.json
+        gcloud storage cp /workspace/marker.json \
+          gs://${_PROD_PROJECT}-datalake/deploys/$$TS-${_SHORT}.json
+        echo "  ok   rollback marker written before any traffic shift"
+
+  # ------------------------------------------------------------ 7. readback, then cut
+  # [SEC-PROD-PROMOTE-COMPOSE-V1] REV 2's GATE HERE ASSERTED A FACT THAT IS FALSE,
+  # AND IT WOULD HAVE REFUSED EVERY PROMOTION AT THE MOST EXPENSIVE POSSIBLE PLACE.
+  #
+  # It required the console to answer with `x-goog-iap-generated-response`, i.e. it
+  # asserted IAP IS ON for ${_CP_SVC}. IAP IS NOT ON. Measured 2026-08-11 on
+  # run.googleapis.com/v2: NEITHER prod surface carries iapEnabled, ${_CP_SVC} is
+  # publicly invokable, and it is what <your-mcp-host> maps to. The assertion is
+  # also unreachable by construction quite apart from that: this step probes the URL
+  # gcloud reports for the SERVICE, which is the *.run.app origin. IAP fronts a load
+  # balancer; a request straight to the run.app origin bypasses it and can never
+  # carry an IAP header even on a service that really is behind one. So the loop
+  # would have burned 10 attempts and exited 9 AFTER building and deploying BOTH
+  # services -- the latest and costliest point at which this build can fail.
+  #
+  # WHAT REPLACES IT IS A DIFFERENT QUESTION, AND IT IS THE ONE THAT MATTERS HERE.
+  # This gate cannot prove a network topology it does not sit in. It CAN prove the
+  # thing a promotion actually risks: that each new revision BOOTED and is answering
+  # AS ITS OWN SURFACE. MEASURED discriminators:
+  #
+  #   a live app response         carries  x-powered-by: Express
+  #   the protected MCP surface   answers  www-authenticate: Bearer   (on /mcp)
+  #   a cold-start BOOT FAILURE   is a Google Frontend 5xx with NEITHER header
+  #
+  # A STATUS CODE ALONE WOULD BE WRONG and that is why it is not used: both surfaces
+  # legitimately answer 401 and 404 on some paths, so a 2xx-or-bust check fails on
+  # healthy revisions and a not-5xx check passes on plenty of broken ones. The
+  # headers separate "the app is up" from "the frontend is apologising for it".
+  # `both: 0` in control-plane/route-baseline.json -- no route is registered on both
+  # surfaces -- is why each surface must be probed for ITS OWN header rather than
+  # one probe being assumed to speak for the pair.
+  #
+  # AND IT PROBES THE REVISION IT IS ABOUT TO PROMOTE, BY TAG URL, NOT THE SERVICE
+  # URL. The service URL answers from whatever holds traffic today -- i.e. the OLD
+  # revision -- so probing it would have verified the previous release and then
+  # promoted the new one on the strength of it.
+  #
+  # THE RETRY IS REAL AND IS NOT A WAY TO WAIT OUT A FAILURE. A new revision cold
+  # starts on first request, so a single shot lies. Ten attempts, 10s apart; on
+  # exhaustion the last response line and headers are printed and the step REFUSES.
+  - id: readback-and-traffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        TAG="p${_SHORT}"
+        CP_REV=$$(cat /workspace/cp.rev)
+        MC_REV=$$(cat /workspace/mc.rev)
+        test -n "$$CP_REV"
+        test -n "$$MC_REV"
+
+        # The URL that addresses ONE named revision: the tag URL, matched on the
+        # revision this build recorded at deploy time AND on this build's tag.
+        # Refusing when it is absent is deliberate -- without it there is no way to
+        # reach the new revision while it holds no traffic, and probing anything
+        # else would be probing the old release.
+        tag_url() {
+          gcloud run services describe "$$1" --region=${_REGION} \
+            --project=${_PROD_PROJECT} --format=json > /workspace/svc.json
+          python3 - "$$2" "$$TAG" <<'PY'
+        import json, sys
+        rev, tag = sys.argv[1], sys.argv[2]
+        d = json.load(open('/workspace/svc.json'))
+        for block in (d.get('status') or {}, d.get('spec') or {}, d):
+            for t in (block.get('traffic') or []):
+                if t.get('tag') == tag and t.get('revisionName') == rev and t.get('url'):
+                    print(t['url'])
+                    sys.exit(0)
+        sys.exit(1)
+        PY
+        }
+
+        # Probe ONE surface until its own discriminator header appears.
+        # $$1 service  $$2 revision  $$3 path  $$4 extended-regex the headers must match
+        probe() {
+          U=$$(tag_url "$$1" "$$2") || {
+            echo "REFUSE no tag URL for revision $$2 of $$1 (tag $$TAG)."
+            echo "  The revision this build deployed cannot be addressed, so it"
+            echo "  cannot be verified, so it will not be promoted."
+            exit 9
+          }
+          echo "  probing $$1 revision $$2 at $$U$$3"
+          i=1
+          while [ "$$i" -le 10 ]; do
+            curl -sS -o /dev/null -D /workspace/h.txt --max-time 30 "$$U$$3" || true
+            if grep -qiE "$$4" /workspace/h.txt; then
+              echo "  ok   $$1 revision $$2 answered with its own discriminator"
+              return 0
+            fi
+            echo "  attempt $$i: not yet -- $$(head -n 1 /workspace/h.txt || echo '<no response>')"
+            i=$$((i + 1))
+            sleep 10
+          done
+          echo "REFUSE $$1 revision $$2 never answered with $$4 after 10 attempts."
+          echo "  A Google Frontend 5xx with neither x-powered-by nor www-authenticate"
+          echo "  is a COLD-START BOOT FAILURE. Read the revision logs before retrying."
+          echo "  --- last response ---"
+          cat /workspace/h.txt || true
+          exit 9
+        }
+
+        probe "${_CP_SVC}" "$$CP_REV" "/"     '^x-powered-by:[[:space:]]*express'
+        probe "${_MC_SVC}" "$$MC_REV" "/mcp"  '^www-authenticate:[[:space:]]*bearer'
+
+        # Record what is serving NOW, so the rollback line names a real revision
+        # instead of telling the operator to go and find one mid-incident.
+        #
+        # `|| true` IS LOAD-BEARING, NOT SLOPPINESS. This is a COSMETIC lookup that
+        # only feeds the rollback hint printed below, and it runs AFTER both
+        # surfaces have already been proved. Under `set -e` a bare assignment from
+        # a failing gcloud would abort the build between the proof and the traffic
+        # shift -- blocking a promotion that has been verified, on the strength of
+        # a message. The fallback is handled by ${CP_OLD:-<previous>} at the echo.
+        CP_OLD=$$(gcloud run services describe ${_CP_SVC} --region=${_REGION} \
+                   --project=${_PROD_PROJECT} \
+                   --format='value(status.traffic.filter("percent:100").revisionName)') || true
+        MC_OLD=$$(gcloud run services describe ${_MC_SVC} --region=${_REGION} \
+                   --project=${_PROD_PROJECT} \
+                   --format='value(status.traffic.filter("percent:100").revisionName)') || true
+
+        # PROMOTE WHAT WAS PROVED, BY NAME. `--to-latest` was a DIFFERENT CLAIM: it
+        # promotes whatever is newest at the moment it runs, which a concurrent
+        # deploy makes something other than the revision verified above. Naming the
+        # revision makes the thing shipped and the thing verified the same object.
+        gcloud run services update-traffic ${_CP_SVC} --region=${_REGION} \
+          --project=${_PROD_PROJECT} --to-revisions="$$CP_REV=100"
+        gcloud run services update-traffic ${_MC_SVC} --region=${_REGION} \
+          --project=${_PROD_PROJECT} --to-revisions="$$MC_REV=100"
+
+        echo ""
+        echo "PROMOTED  ${_CP_SVC} -> $$CP_REV"
+        echo "PROMOTED  ${_MC_SVC} -> $$MC_REV"
+        echo ""
+        echo "ROLLBACK, if you need it, is one command per surface:"
+        echo "  gcloud run services update-traffic ${_CP_SVC} --region=${_REGION} \\"
+        echo "    --project=${_PROD_PROJECT} --to-revisions=$${CP_OLD:-<previous>}=100"
+        echo "  gcloud run services update-traffic ${_MC_SVC} --region=${_REGION} \\"
+        echo "    --project=${_PROD_PROJECT} --to-revisions=$${MC_OLD:-<previous>}=100"
+
+images:
+  - ${_REPO}:${_COMMIT}
