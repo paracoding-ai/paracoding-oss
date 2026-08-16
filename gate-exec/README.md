@@ -1,38 +1,42 @@
-# gate-exec -- the gated execution engine
+# gate-exec — the gated execution engine
 
-Runs jobs a human approved at the Autoclave. NEVER committed until 2026-08-01; it lived only
-in the data lake at shared/gate-exec/. That is how CRIT-2 (deferred RCE via a writable exec
-prefix) and the cmd-shaped-job 403 brick both reached production bytes no diff ever showed.
+A private Cloud Run service. It runs a job only after a human approved that exact job in the
+console, and it verifies that approval itself rather than trusting the caller.
 
-POST /run {job_id, access_token, script_b64}
- 1 load pending_confirms/{job_id}; refuse unless status is confirmed or executing
- 2 read the approved command as arguments.command || arguments.cmd -- IDENTICAL precedence to
-   waJobCommand() in the control plane. They drifted once and every cmd-shaped job 403d.
- 3 if script_b64 was presented, sha256-compare it to the approved command; refuse on mismatch
- 4 [EXEC-BIN-JAIL-V82] PATH JAIL: the child runs with PATH restricted to symlinks of an
-   enumerated binary set, so an unlisted binary does not resolve. Builtins/keywords do not
-   use PATH, so `set -uo pipefail` -- which broke production when the old first-token text
-   scan was armed -- cannot be affected. That scan survives as telemetry only and its
-   EXEC_BINARY_ALLOWLIST_ENFORCE switch is DELETED. Gap: absolute paths still run.
-   Disable with EXEC_BIN_JAIL=0.
- 5 bound the AGE of a confirmed approval (EXEC_APPROVAL_MAX_AGE_SECONDS, default 3600)
- 6 consume the approval atomically (exec_claim_id) BEFORE running anything: one approval =
-   one run, and a crash mid-run cannot leave it spendable
- 7 run as the approver via CLOUDSDK_AUTH_ACCESS_TOKEN, keep the last 8KB of stdout/stderr,
-   write the result back, journal completion
-GET /healthz -> ok
+    POST /run {job_id, access_token, script_b64}
+    GET  /healthz -> ok
 
-OPEN DEFECT, recorded next to the code instead of in a lake note nobody reads: the sha-pin in
-step 3 compares arguments.command RE-READ FROM FIRESTORE AT EXECUTION TIME, not a digest taken
-when the human approved. fleet-gate-exec-sa holds project-level roles/datastore.user, so
-anything able to write the job document moves BOTH sides together and the pin still passes.
-Fix = approval-time approved_sha256 with a fallback for older documents. WRITER (control
-plane) FIRST, ENFORCEMENT SECOND, and the enforcement MUST fall back: an enforcement-only
-landing 403s every gated job forever, including its own undo.
+What `/run` does, in order:
 
-A SECOND PATH REACHES THIS SERVICE AND MUST NOT: waLegacyApply and the legacy REST
-/api/confirm/verify write status confirmed and then either execute nothing or POST /run with
-no Authorization header, which our own edge drops. A human tap spent there is marked refused
-and the job never runs. See the gate-loop work item.
+1. Load `pending_confirms/{job_id}`. Refuse unless the status is `confirmed` or `executing`.
+2. Read the approved command as `arguments.command || arguments.cmd` — identical precedence to
+   `waJobCommand()` in the control plane, so the two cannot disagree about what was approved.
+3. **Verify the approval signature.** The control plane signs the approval with a Cloud KMS
+   asymmetric key over a length-prefixed canonical message (`PC-APPROVAL-CANON-V2`, nine
+   fields: algorithm, job id, command digest, command type, argument digest, key version,
+   approver, issued-at, expiry). This service holds only the public half — it can verify a
+   signature without being able to produce one. `approved_sha256` remains on the document and
+   is checked, but with a signature present it is a duplicate of a value the signature already
+   pins, so a writer with database access can no longer move both sides together.
+4. If `script_b64` was presented, SHA-256 compare it to the approved command and refuse on
+   mismatch.
+5. **PATH jail.** The child runs with `PATH` restricted to a directory of symlinks to an
+   enumerated binary set, so an unlisted binary does not resolve. Shell builtins and keywords
+   do not consult `PATH`, so `set -uo pipefail` and friends are unaffected — the earlier
+   first-token text scan survives as telemetry only and its enforcement switch is deleted. The
+   jail narrows what an approved script can reach for; what authorises the script in the first
+   place is step 3. Set `EXEC_BIN_JAIL=0` if an install needs a binary that is not on the list.
+6. Bound the age of the approval (`EXEC_APPROVAL_MAX_AGE_SECONDS`, default 3600), read from the
+   signed `approval_sig_iat` rather than from an unsigned timestamp.
+7. Consume the approval atomically (`exec_claim_id`) **before** running anything: one approval
+   is one run, and a crash mid-run cannot leave it spendable.
+8. Run as the approver via `CLOUDSDK_AUTH_ACCESS_TOKEN`, keep the last 8KB of stdout and
+   stderr, write the result back, and journal completion.
 
-DEPLOY: gcloud run deploy fleet-gate-exec --source gate-exec --region us-east1 --no-allow-unauthenticated
+An approve that arrives with no Google access token cannot execute, and the control plane
+refuses it with `412 google_not_connected` **before** touching the job — nothing written,
+nothing consumed, the queue unchanged. Reconnect Google and approve once.
+
+Deploy:
+
+    gcloud run deploy fleet-gate-exec --source gate-exec --region us-east1 --no-allow-unauthenticated
