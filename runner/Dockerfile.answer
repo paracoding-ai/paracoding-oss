@@ -1,0 +1,12 @@
+# fleet-answer-runner image. Deployed digest-pinned (the Cloud Run service runs
+# only that @sha256). Base python:3.12-slim (base digest-pin is a follow-up).
+FROM python:3.12-slim
+RUN pip install --no-cache-dir flask gunicorn google-cloud-firestore anthropic
+# fleet_mode.py is the ONE implementation of the fleet-mode switch that answer_runner.py imports.
+# It is copied in beside it; without it the service does not start, which is the correct
+# direction for a runner that cannot read its own spend switch.
+COPY fleet_mode.py /app/fleet_mode.py
+COPY answer_runner.py /app/answer_runner.py
+WORKDIR /app
+ENV PORT=8080
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 4 --timeout 300 answer_runner:app

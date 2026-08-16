@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir flask gunicorn google-cloud-firestore
+# fleet_mode.py is the ONE implementation of the fleet-mode switch that sweep_runner.py imports.
+COPY fleet_mode.py .
+COPY sweep_runner.py .
+ENV PORT=8080
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 4 --timeout 110 sweep_runner:app

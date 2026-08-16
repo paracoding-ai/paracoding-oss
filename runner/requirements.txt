@@ -1,0 +1,7 @@
+flask
+gunicorn
+google-cloud-firestore
+google-cloud-storage
+anthropic
+google-genai
+google-auth
