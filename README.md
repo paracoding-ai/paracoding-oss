@@ -116,7 +116,7 @@ Built the way it runs: Claude Max plans through Cowork, subagents fanned out acr
 engineering work in parallel, moving between plans when one ran hot — and never losing the
 thread, because the state was never in the chat.
 
-![Launch day. On the left the Paracoding console, with the publisher strain listing the 48 MCP tools available to it and the full strain collection down the side. On the right Claude Max in Cowork, working through three open defects in this release and recording them to fleet memory for the next cut](docs/screenshots/04-built-with-claude.png)
+[![Launch day. On the left the Paracoding console, with the publisher strain listing the 48 MCP tools available to it and the full strain collection down the side. On the right Claude Max in Cowork, working through three open defects in this release and recording them to fleet memory for the next cut](docs/screenshots/04-built-with-claude.png)](docs/screenshots/04-built-with-claude.png)
 
 Launch day, unretouched. Left is this fleet's own console; right is Claude Max in Cowork — and
 the strains listed in one are the strains doing the work in the other. What Claude is working
@@ -133,18 +133,18 @@ Ask a strain in the console chat for a service, and it builds the container and 
 to Cloud Run in your project — then verifies the result anonymously and reports the HTTP
 code back.
 
-![The console chat on the left, where Fleet GCP has built and deployed a calculator app to Cloud Run and reported a 200 OK; on the right, the deployed calculator running in a browser window](docs/screenshots/03-build-a-calculator.png)
+[![The console chat on the left, where Fleet GCP has built and deployed a calculator app to Cloud Run and reported a 200 OK; on the right, the deployed calculator running in a browser window](docs/screenshots/03-build-a-calculator.png)](docs/screenshots/03-build-a-calculator.png)
 
 Left is the chat, right is the app it just deployed. The strain list down the side is a fleet
 that has been running for a while — the release ships three strains and you grow the rest.
 
-![The console chat asking Fleet GCP to build and deploy a hello-world app to Cloud Run, with the build and deployment summary and a 200 OK verification](docs/screenshots/01-build-and-deploy.png)
+[![The console chat asking Fleet GCP to build and deploy a hello-world app to Cloud Run, with the build and deployment summary and a 200 OK verification](docs/screenshots/01-build-and-deploy.png)](docs/screenshots/01-build-and-deploy.png)
 
 Everything configurable lives on one panel: theme, the model substrate (Claude or Gemini,
 3.7 Flash or 3.1 Pro), key rotation, the per-strain session pastes that give a chat its
 identity, and the Google accounts allowed to authorise an MCP connector.
 
-![The settings panel showing appearance, model substrate selection, API key rotation, per-strain session pastes and allowed Google accounts](docs/screenshots/02-strain-settings.png)
+[![The settings panel showing appearance, model substrate selection, API key rotation, per-strain session pastes and allowed Google accounts](docs/screenshots/02-strain-settings.png)](docs/screenshots/02-strain-settings.png)
 
 ---
 

@@ -1,16 +1,16 @@
 # release manifest v10.2
-# generated from source commit 0efc8d20ecc15e20665774acfdaa9b582b6712ce
+# generated from source commit ab61b01a830c56203e43974a217b87bbd2c9a01f
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 d793f1efae3654cf     16302  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 b2feedda8e7894e9      4074  NOTICE
-17cfc151e593e690     18966  README.md
+f3827031b3ca54c4     19144  README.md
 7c4dc19905d92da6     12021  SECURITY.md
-743abbc898c708e0    398444  install.sh
+62808aa6283ed03c    398444  install.sh
 d026c02745cfd8ae     45586  uninstall.sh
-00eef184c990af61     14689  upgrade.sh
+9bcc6b7f2352b709     14689  upgrade.sh
 1a2c35f49245f087    120055  workstation.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
