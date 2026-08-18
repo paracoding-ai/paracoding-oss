@@ -5191,10 +5191,24 @@ function harModelLabel(api: string): string {
 // CHAT_API_OPUS or from a hand-written CHAT_MODELS JSON is force-upgraded, so stale configuration
 // can never pin the chat back to an older Opus. Same literal id as the bus: 'claude-opus-5'.
 const HAR_OPUS5 = 'claude-opus-5';
+// [CHAT-OPUS5-FLOOR-NARROW-V104] THE PREFIX MATCH SWALLOWED MODELS NEWER THAN THE ONES IT WAS
+// PROTECTING AGAINST. `s.indexOf('claude-opus-4') === 0` was written when opus-4 meant 4.0 and 4.1
+// and the only risk was stale config pinning the chat backwards. The family kept gaining members:
+// it now also catches claude-opus-4-5, claude-opus-4-6 and claude-opus-4-8, which POSTDATE this
+// floor. MEASURED 2026-08-18 on a real project: 4-5 and 4-6 are the two Anthropic models with the
+// LARGEST regional quota there (6,000,000 input tokens/min in each of us-east5, europe-west1 and
+// asia-southeast1) while claude-opus-5 has no regional bucket at all. So the operator could not
+// pin the only models that would actually serve -- CHAT_API_OPUS was silently rewritten to
+// claude-opus-5 and the chat kept failing for a reason the setting appeared to have addressed.
+// Now it names the ids it actually means. A version suffix (@20250805) still matches.
 function harOpus5(m: string): string {
   const s = String(m || '').trim();
   if (!s) return HAR_OPUS5;
-  return (s.indexOf('claude-opus-4') === 0 || s.indexOf('claude-opus-3') === 0) ? HAR_OPUS5 : s;
+  // the opus-3 family is stale end to end; there is no opus-3-x that postdates opus-5.
+  if (s.indexOf('claude-opus-3') === 0) return HAR_OPUS5;
+  // opus-4: ONLY bare 4 and 4-1, optionally version-suffixed. NOT 4-5, 4-6, 4-8 or anything later.
+  if (/^claude-opus-4(-1)?(@|$)/.test(s)) return HAR_OPUS5;
+  return s;
 }
 function harModelEntry(api: string): any {
   const a = harOpus5(String(api || ''));
@@ -5967,8 +5981,33 @@ function harVertexHost(region: string): string { return region === 'global' ? 'a
 // CLAUDE region. Mirrors the bus: VERTEX_LOCATION, default us-east5 (where the Anthropic publisher
 // models are actually served). DELIBERATELY NOT GCP_REGION -- that is the Cloud Run region
 // (default us-east1) and Vertex serves no Anthropic model there.
-function harVertexClaudeRegion(): string {
-  return String(process.env.CHAT_VERTEX_REGION || process.env.VERTEX_LOCATION || 'us-east5').trim() || 'us-east5';
+// [CHAT-CLAUDE-GLOBAL-V104] CLAUDE HAD NO GLOBAL-ENDPOINT HANDLING AND GEMINI HAS HAD IT FOR
+// MONTHS -- the same bug, on the other provider, found the same way. harVertexHost() already maps
+// 'global' to aiplatform.googleapis.com; nothing could ever ASK for it, because this function
+// could only return a regional value. So a model Vertex serves only on the global endpoint was
+// unreachable on a default install.
+//
+// AND THE FAILURE POINTS AT THE WRONG FIX, WHICH IS WHY IT COST A DAY. A regional host asked for a
+// global-only model does not 404. It answers HTTP 429 "Quota exceeded ... base model:
+// anthropic-claude-opus-5", which reads as "ask Google for more quota" -- and the per-region quota
+// metric backs that story up, because online_prediction_input_tokens_per_minute_per_base_model
+// enumerates REGIONAL buckets only and has no row for a global-only model. Measured 2026-08-18:
+// 21 anthropic buckets across three regions, none for opus-5 or opus-4-8, while the operator was
+// running both against the same project from his own client.
+function harClaudeGlobalOnly(apiModel: string): boolean {
+  const m = String(apiModel || '').toLowerCase();
+  return /^claude-opus-5/.test(m) || /^claude-opus-4-8/.test(m);
+}
+// Same shape as harVertexGeminiRegion, deliberately: when the configured region and the model
+// disagree, prefer the one that can actually serve and SAY which was chosen. apiModel is optional
+// so an existing caller that has no model in hand still gets the configured region.
+function harVertexClaudeRegion(apiModel?: string): string {
+  const raw = String(process.env.CHAT_VERTEX_REGION || process.env.VERTEX_LOCATION || 'us-east5').trim() || 'us-east5';
+  if (raw !== 'global' && apiModel && harClaudeGlobalOnly(apiModel)) {
+    console.log('[chat/claude] region "' + raw + '" ignored for global-only model ' + apiModel + '; using global');
+    return 'global';
+  }
+  return raw;
 }
 // GEMINI region. Mirrors the bus (run_gemini: vertex_region || 'global'). Its own env var, because
 // GCP_REGION meant the Cloud Run region and pointed the chat at us-east1-aiplatform, which 404s for
@@ -6025,7 +6064,7 @@ function harChatResolved(provider: string, key: string): any {
       alt_blocker: transport === 'vertex' && !real ? 'no real Gemini API key is stored' : '' };
   }
   const transport = harClaudeProvider();
-  const region = transport === 'vertex' ? harVertexClaudeRegion() : '';
+  const region = transport === 'vertex' ? harVertexClaudeRegion(model) : '';
   return { provider: 'claude', transport, region, host: transport === 'vertex' ? harVertexHost(region) : 'api.anthropic.com', model, effort: HAR_CHAT_EFFORT, key_present: !!key,
     // [CHAT-CLAUDE-BOTH-TRANSPORTS-V1] The OTHER transport, resolved HERE and nowhere else, so the
     // log line, /api/keys/status and a failing chat all name the same escape hatch. alt_ready is a
@@ -6127,7 +6166,7 @@ async function harClaudePost(apiModel: string, key: string, body: any): Promise<
   let headers: any = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
   const out: any = Object.assign({}, body);
   if (harClaudeProvider() === 'vertex') {
-    const region = harVertexClaudeRegion();
+    const region = harVertexClaudeRegion(String(out.model || apiModel));
     const tok = await waAccessToken();
     url = 'https://' + harVertexHost(region) + '/v1/projects/' + harVertexProject() + '/locations/' + region +
       '/publishers/anthropic/models/' + encodeURIComponent(String(out.model || apiModel)) + ':rawPredict';

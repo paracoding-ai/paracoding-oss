@@ -742,8 +742,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="ab61b01a830c56203e43974a217b87bbd2c9a01f"
-PC_VERSION="10.2"
+PC_RELEASE="161db682a66d9b32ba2015b94e2e9b758548eb38"
+PC_VERSION="10.4"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -5748,7 +5748,17 @@ else
   # Location header any more -- the console answers 401 and serves the locked page AT the requested
   # URL -- so the check reads the BODY for that page's title instead. A redirect target was only
   # ever a proxy for "an anonymous caller gets the unlock page"; this asserts it directly.
-  chk_has "console serves the locked page" "The Autoclave" "$(curl -s --max-time 30 "$CP_URL/harness")"
+  # [SEC-SELFTEST-NEEDLE-V1] THE NEEDLE IS THE LOCKED STAGE'S STRUCTURAL MARKER, NOT A BRAND WORD.
+  # This grepped for a page TITLE, and it was wrong twice over. (1) There are two locked-stage
+  # documents -- locked.html for the passkey posture, login.html for PC_REQUIRE_PASSKEY=0 -- and
+  # this installer ships PC_REQUIRE_PASSKEY=0 unconditionally, so every install it produces serves
+  # login.html, which does not contain that title at all. The check was RED on a working console on
+  # any install where IAP did not come up, which is precisely the install whose self-test matters.
+  # (2) A self-test that fails when somebody renames a brand word is a self-test people learn to
+  # ignore, and this release makes the brand surface configurable. pc-locked-stage is on the card
+  # element of BOTH documents: it asserts an anonymous caller gets the locked stage without
+  # asserting which posture is deployed.
+  chk_has "console serves the locked page" "pc-locked-stage" "$(curl -s --max-time 30 "$CP_URL/harness")"
   chk     "dashboard data refuses anonymous" 401 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/api/dash/summary")"
 fi
 # [SEC-SELFTEST-FUNCTIONAL-V1] THE OLD LINE HERE WAS `chk "MCP requires a token" 401`, and it

@@ -7,21 +7,85 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="theme-color" content="#123a56">
 <title>Paracoding Agentic Harness — Chat</title>
+<script>
+/* [BRAND-WHIMSY-V1] ONE ANSWER TO "IS WHIMSY AVAILABLE", READ BY ALL FOUR CONTROLS.
+   Mushroom mode is a product feature, not a brand accident, and stock ships it ON. But a brand
+   that does not want it had, until now, no switch: the only way to remove it was to DELETE the
+   code, which is what rebranding this console has meant in practice and a large part of why a
+   rebranded install then cannot take an upgrade.
+   THIS CANNOT BE A DEFAULT. Every operator who has ever clicked the toggle carries pc_mush=1 in
+   localStorage, so changing only the default leaves whimsy ON for exactly the people who already
+   use the product. The flag therefore OVERRIDES the stored value rather than seeding it.
+   With no brand document present this returns true, which is today's behaviour exactly -- so
+   this block is a no-op until something sets PC_BRAND.whimsy to false. */
+window.pcWhimsyOn = function(){
+  try { return !(window.PC_BRAND && window.PC_BRAND.whimsy === false); } catch(e){ return true; }
+};
+</script>
 <style>
   :root{
     --g1:#123a56;--g2:#0f4a47;--g3:#175339;
-    --ink:#ffffff;--ink-soft:rgba(255,255,255,.82);--ink-dim:rgba(255,255,255,.62);
-    --glass:rgba(255,255,255,.12);--glass-2:rgba(255,255,255,.18);--glass-line:rgba(255,255,255,.28);
+    --ink:#ffffff;--ink-soft:rgba(var(--ink-rgb),.82);--ink-dim:rgba(var(--ink-rgb),.62);
+    --glass:rgba(var(--ink-rgb),.12);--glass-2:rgba(var(--ink-rgb),.18);--glass-line:rgba(var(--ink-rgb),.28);
     --gold:#ffd77a;--shadow:0 10px 30px rgba(10,40,60,.28);
+    /* [BRAND-TOKENS-V1] THE HUE IS A TOKEN; THE ALPHA STAYS AT THE CALL SITE, AND THAT SPLIT IS
+       THE WHOLE DESIGN. Measured on this file before writing a line: the accent glow appears at
+       FIVE distinct alphas, the recessed-surface wash at EIGHT, and the white ink at TWENTY-ONE.
+       Collapsing each family to one or two flat tokens -- the obvious move, and the one taken
+       downstream -- cannot preserve those alphas, so it silently restyles panel depth and border
+       weight all over the app while claiming to be a refactor. A bare `r,g,b` triplet consumed as
+       rgba(var(--x-rgb),.28) keeps every alpha exactly where it was and still leaves ONE value to
+       change when the brand changes. Every token below is seeded with the literal it replaces, so
+       this block is a no-op on the stock palette by construction. */
+    --acc-rgb:240,194,74;      /* the accent glow hue: rgba(var(--acc-rgb),<alpha>) */
+    --sunk-rgb:6,18,26;        /* recessed surfaces -- darker than the page on a dark theme */
+    --ink-rgb:255,255,255;     /* the ink hue, so 49 white-alpha rules stop assuming a dark page */
+    --acc1:#ffe9a8;--acc2:#e0982e;               /* the accent gradient pair, 8 copies of it */
+    --acc-ink:#3a2a06;--acc-ink-2:#241a00;       /* ink ON the accent. Two, because there are two */
+    /* the selected-state chip. TWO gradients, not one: #eaf7ff and #dff6ff are both in use and
+       collapsing them would move pixels on five controls to save one token. */
+    --chip-bg:linear-gradient(135deg,#fff,#eaf7ff);
+    --chip-bg-2:linear-gradient(135deg,#fff,#dff6ff);
+    --chip-ink:#0e3a52;
+    --msg-ag:rgba(var(--sunk-rgb),.30);--msg-me:rgba(var(--ink-rgb),.22);  /* the two chat surfaces */
+    /* [BRAND-TOKENS-V1] The surfaces the #pcslim override block still paints in literals. Each is
+       seeded with the exact literal it replaces, so this is a no-op on every shipped palette.
+       --ttl-* is the one worth explaining: the product name is painted as a CLIPPED GRADIENT with
+       color:transparent and no fallback, so if the accent ever nears the page colour the name is
+       simply not on screen. Rather than restyle it here -- which would change stock -- the two
+       halves become tokens, and a brand that wants flat legible text sets --ttl-bg:none and
+       --ttl-ink:var(--ink) as DATA. Measured on a light palette before writing this: the name
+       renders as coral-on-grey and is the least legible string in the header. */
+    --hdr-bg:rgba(9,4,20,.5);
+    --hbtn-ink:rgba(233,246,241,.78);
+    --ttl-bg:linear-gradient(90deg,var(--acc1),var(--acc2));
+    --ttl-ink:transparent;
+    /* [BRAND-LOGO-V1] THE CONSOLE REPAINTS AND CROPS WHATEVER LOGO IT IS GIVEN, and that is only
+       invisible because the shipped asset happens to be a 96x96 square whose colour the chain was
+       tuned for. Measured: object-fit:cover with a 1:1 box, border-radius:50%, and a
+       grayscale->sepia->saturate->hue-rotate chain that exists to paint a BLUE-GREEN source gold.
+       Hand a 2.65:1 lockup to those rules and it is cropped to two letters and recoloured away.
+       Nothing is deleted here: every value below is the one the renderer computes today, so stock
+       is unchanged, and a brand that ships a finished asset sets --logo-filter:none,
+       --logo-radius:0, --logo-w-*:auto and a --logo-maxw as DATA. */
+    --logo-filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05);
+    --logo-radius:50%;
+    --logo-fit-hdr:cover;--logo-fit-empty:contain;
+    --logo-h-hdr:30px;--logo-w-hdr:30px;
+    --logo-h-empty:84px;--logo-w-empty:84px;
+    --logo-h-mobile:26px;--logo-w-mobile:26px;
+    --logo-maxw:none;
+    --logo-shadow-hdr:0 0 12px 2px rgba(var(--acc-rgb),.5);
+    --logo-shadow-empty:0 0 26px 5px rgba(var(--acc-rgb),.4);
   }
   *{box-sizing:border-box}
   html,body{height:100%}
   body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);
     background:linear-gradient(135deg,var(--g1) 0%,var(--g2) 52%,var(--g3) 100%) fixed;
     display:flex;flex-direction:column;height:100dvh;overflow:hidden;}
-  a{color:#fff;text-decoration:none}
-  .hdr{display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;background:rgba(6,18,26,.22);border-bottom:1px solid var(--glass-line);backdrop-filter:blur(8px)}
-  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 10px rgba(240,194,74,.45));mix-blend-mode:screen}
+  a{color:var(--ink);text-decoration:none}
+  .hdr{display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;background:rgba(var(--sunk-rgb),.22);border-bottom:1px solid var(--glass-line);backdrop-filter:blur(8px)}
+  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45));mix-blend-mode:screen}
   .hdr .ttl{font-weight:800;letter-spacing:.02em;font-size:1.02rem}
   .hdr .sub{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-dim)}
   /* [HARNESSUI-THINKING-V75] THE WAIT USED TO LOOK LIKE A CRASH. The pending bubble was the single
@@ -32,13 +96,13 @@
   .pcdots{display:inline-block;min-width:3.2em;font-weight:700;letter-spacing:.12em;color:var(--ink-dim);animation:pcpulse 1.6s ease-in-out infinite}
   @keyframes pcpulse{0%,100%{opacity:.45}50%{opacity:1}}
   .hdr .rt{margin-left:auto;display:flex;gap:.4rem}
-  .hbtn{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.45rem .7rem;font-size:.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.4rem}
+  .hbtn{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:10px;padding:.45rem .7rem;font-size:.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.4rem}
   .hbtn:hover{background:var(--glass-2)}
   .hbtn:disabled{opacity:.45;cursor:default}
   .vmlight{width:12px;height:12px;border-radius:50%;flex:none;box-shadow:0 0 10px currentColor;align-self:center}
   .vmlight.on{color:#4df5b0;background:#4df5b0}
   .vmlight.off{color:#ff8f86;background:#ff8f86}
-  .vmlight.prov{color:rgba(255,255,255,.4);background:rgba(255,255,255,.4);box-shadow:none}
+  .vmlight.prov{color:rgba(var(--ink-rgb),.4);background:rgba(var(--ink-rgb),.4);box-shadow:none}
   /* [GCP-VMBTN-ACTS-V1] Where a refused start/stop is SAID. It has no resting appearance -- it is
      display:none until vmNote() is given a reason, so the header is unchanged when the VM is
      behaving and carries the Compute status code when it is not. */
@@ -53,18 +117,18 @@
   .splitter::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:2px;height:30px;background:var(--glass-line);border-radius:2px}
   .splitter:hover::after{background:#fff}
   .splitter.hidden{display:none}
-  .rail{flex:none;width:24px;display:none;align-items:center;justify-content:center;cursor:pointer;font-weight:900;color:var(--ink-soft);background:rgba(6,18,26,.30)}
-  .rail:hover{background:var(--glass);color:#fff}
+  .rail{flex:none;width:24px;display:none;align-items:center;justify-content:center;cursor:pointer;font-weight:900;color:var(--ink-soft);background:rgba(var(--sunk-rgb),.30)}
+  .rail:hover{background:var(--glass);color:var(--ink)}
   .rail.show{display:flex}
   .railL{border-right:1px solid var(--glass-line)}
   .railR{border-left:1px solid var(--glass-line)}
   .sidetop{display:flex;justify-content:flex-end;padding:.35rem .4rem 0}
-  .collapseBtn{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:7px;cursor:pointer;font-size:.85rem;font-weight:900;line-height:1;padding:.12rem .45rem}
+  .collapseBtn{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:7px;cursor:pointer;font-size:.85rem;font-weight:900;line-height:1;padding:.12rem .45rem}
   .collapseBtn:hover{background:var(--glass-2)}
-  .side{width:270px;flex:none;display:flex;flex-direction:column;min-height:0;background:rgba(6,18,26,.18);border-right:1px solid var(--glass-line);backdrop-filter:blur(8px)}
+  .side{width:270px;flex:none;display:flex;flex-direction:column;min-height:0;background:rgba(var(--sunk-rgb),.18);border-right:1px solid var(--glass-line);backdrop-filter:blur(8px)}
   .side .sec{padding:.7rem .8rem}
   .side .lbl{font-size:.64rem;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-dim);margin:.2rem 0 .5rem}
-  .toggle{display:flex;background:rgba(6,18,26,.28);border:1px solid var(--glass-line);border-radius:12px;padding:.22rem;gap:.22rem}
+  .toggle{display:flex;background:rgba(var(--sunk-rgb),.28);border:1px solid var(--glass-line);border-radius:12px;padding:.22rem;gap:.22rem}
   .toggle button{flex:1;border:0;background:transparent;color:var(--ink-soft);font-weight:700;font-size:.86rem;padding:.5rem;border-radius:9px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.4rem}
   .toggle button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;box-shadow:0 2px 10px rgba(0,0,0,.18)}
   .toggle .dotc{width:8px;height:8px;border-radius:50%}
@@ -72,25 +136,25 @@
   .subtoggle{display:flex;gap:.3rem;margin-top:.4rem}
   .subtoggle button{flex:1;border:1px solid var(--glass-line);background:var(--glass);color:var(--ink-soft);font-weight:700;font-size:.76rem;padding:.4rem .3rem;border-radius:9px;cursor:pointer;line-height:1.15;text-align:center}
   .subtoggle button:hover{background:var(--glass-2)}
-  .subtoggle button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;border-color:#fff}
+  .subtoggle button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;border-color:var(--ink)}
   .subtoggle button small{display:block;font-weight:600;font-size:.62rem;opacity:.7;margin-top:.05rem}
   .agents{flex:1;overflow-y:auto;padding:0 .55rem .5rem}
   .agent{display:flex;align-items:center;gap:.55rem;padding:.5rem .55rem;border-radius:11px;cursor:pointer;border:1px solid transparent;margin:.16rem 0}
   .agent:hover{background:var(--glass)}
   .agent.sel{background:var(--glass-2);border-color:var(--glass-line)}
   .agent .st{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 7px currentColor}
-  .s-working{color:#c6ffe4}.s-waiting{color:#ffe6a6}.s-idle{color:rgba(255,255,255,.4)}
+  .s-working{color:#c6ffe4}.s-waiting{color:#ffe6a6}.s-idle{color:rgba(var(--ink-rgb),.4)}
   .agent .nm{font-weight:600;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .agent .rl{font-size:.68rem;color:var(--ink-dim);white-space:nowrap}
   .agent .meta{margin-left:auto;text-align:right}
-  .provision{display:flex;align-items:center;gap:.5rem;padding:.55rem;margin:.25rem .1rem;border-radius:11px;border:1px dashed var(--glass-line);color:#fff;font-weight:600;font-size:.85rem;cursor:pointer}
+  .provision{display:flex;align-items:center;gap:.5rem;padding:.55rem;margin:.25rem .1rem;border-radius:11px;border:1px dashed var(--glass-line);color:var(--ink);font-weight:600;font-size:.85rem;cursor:pointer}
   .provision:hover{background:var(--glass)}
   .keys{border-top:1px solid var(--glass-line);padding:.6rem .8rem;display:flex;align-items:center;gap:.55rem;cursor:pointer}
   .keys:hover{background:var(--glass)}
   .keys .ic{font-size:1.05rem}.keys .k{font-size:.82rem;font-weight:600}.keys .state{margin-left:auto;font-size:.68rem}
   .ok{color:#c6ffe4}.miss{color:#ffd7d0}
   .chat{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
-  .chat .cbar{display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--glass-line);background:rgba(255,255,255,.06)}
+  .chat .cbar{display:flex;align-items:center;gap:.6rem;padding:.7rem 1rem;border-bottom:1px solid var(--glass-line);background:rgba(var(--ink-rgb),.06)}
   .chat .cbar .who{font-weight:800}
   .chat .cbar .via{margin-left:auto;font-size:.72rem;color:var(--ink-soft);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:.2rem .6rem}
   /* [HARNESSUI-PROVSW-V1] The bar pill used to print the model VERSION ("3.1 Pro"). It is a
@@ -99,31 +163,31 @@
      Layers > Settings. The version moved onto each message (.msg .nmtag .mdl below), which is
      where it has to be for a window that mixes both to be readable after the fact. */
   .chat .cbar .via.provsw{display:inline-flex;align-items:center;gap:.34rem;cursor:pointer;user-select:none;padding:.16rem .3rem}
-  .chat .cbar .via.provsw:hover{background:var(--glass-2,rgba(255,255,255,.12))}
+  .chat .cbar .via.provsw:hover{background:var(--glass-2,rgba(var(--ink-rgb),.12))}
   .chat .cbar .via.provsw:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
   .chat .cbar .via.provsw b{font-weight:700;opacity:.42;padding:.04rem .3rem;border-radius:999px;transition:opacity .12s}
-  .chat .cbar .via.provsw b.on{opacity:1;color:#fff;background:rgba(255,255,255,.13)}
+  .chat .cbar .via.provsw b.on{opacity:1;color:var(--ink);background:rgba(var(--ink-rgb),.13)}
   .chat .cbar .via.provsw b[data-p="claude"].on{box-shadow:inset 0 0 0 1px rgba(217,119,87,.65)}
   .chat .cbar .via.provsw b[data-p="gemini"].on{box-shadow:inset 0 0 0 1px rgba(75,139,245,.65)}
   .chat .cbar .via.provsw i{font-style:normal;opacity:.4;font-size:.7rem}
   .chat .cbar .meter{font-size:.66rem;color:var(--ink-dim);background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;padding:.2rem .55rem;margin-left:.35rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44ch;flex:0 1 auto}
   .stream{flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.7rem}
   .msg{max-width:76%;padding:.65rem .85rem;border-radius:15px;line-height:1.45;font-size:.94rem;white-space:pre-wrap;word-wrap:break-word;box-shadow:var(--shadow)}
-  .msg.me{align-self:flex-end;background:rgba(255,255,255,.22);border:1px solid var(--glass-line);border-bottom-right-radius:5px}
-  .msg.ag{align-self:flex-start;background:rgba(6,18,26,.30);border:1px solid var(--glass-line);border-bottom-left-radius:5px}
+  .msg.me{align-self:flex-end;background:rgba(var(--ink-rgb),.22);border:1px solid var(--glass-line);border-bottom-right-radius:5px}
+  .msg.ag{align-self:flex-start;background:rgba(var(--sunk-rgb),.30);border:1px solid var(--glass-line);border-bottom-left-radius:5px}
   .msg .nmtag{display:block;font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:.25rem}
   /* [HARNESSUI-PROVSW-V1] the per-message model stamp: "FLEET ADVISOR - Gemini 3.1 Pro". Dimmer
      than the strain name so the name still reads first, but present on every assistant turn we
      know the model for, because that is the only way a switched history stays legible. */
   .msg .nmtag .mdl{opacity:.62;font-weight:600;letter-spacing:.06em}
   .empty{margin:auto;text-align:center;color:var(--ink-soft);max-width:340px}
-  .empty img{width:64px;height:64px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 16px rgba(240,194,74,.45));mix-blend-mode:screen;margin-bottom:.6rem}
-  .composer{padding:.7rem 1rem;border-top:1px solid var(--glass-line);background:rgba(255,255,255,.06)}
+  .empty img{width:64px;height:64px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 16px rgba(var(--acc-rgb),.45));mix-blend-mode:screen;margin-bottom:.6rem}
+  .composer{padding:.7rem 1rem;border-top:1px solid var(--glass-line);background:rgba(var(--ink-rgb),.06)}
   .cin{display:flex;gap:.5rem;align-items:flex-end}
-  textarea{flex:1;resize:none;max-height:140px;background:rgba(6,18,26,.28);border:1px solid var(--glass-line);color:#fff;border-radius:12px;padding:.7rem .8rem;font:inherit;font-size:.95rem}
+  textarea{flex:1;resize:none;max-height:140px;background:rgba(var(--sunk-rgb),.28);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;padding:.7rem .8rem;font:inherit;font-size:.95rem}
   textarea::placeholder{color:var(--ink-dim)}
-  textarea:focus{outline:none;border-color:#fff}
-  .mic{background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:12px;padding:.7rem .8rem;font-size:1rem;cursor:pointer;flex:none}
+  textarea:focus{outline:none;border-color:var(--ink)}
+  .mic{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;padding:.7rem .8rem;font-size:1rem;cursor:pointer;flex:none}
   .mic:hover{background:var(--glass-2)}
   .mic.rec{background:rgba(255,80,80,.4);border-color:#ff8f86;animation:pulse 1s infinite}
   @keyframes pulse{50%{opacity:.55}}
@@ -137,24 +201,24 @@
   .kfield{margin:.7rem 0}
   .kfield label{display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:700;margin-bottom:.3rem}
   .kfield .row{display:flex;gap:.45rem}
-  .kfield input{flex:1;background:rgba(6,18,26,.30);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.6rem .7rem;font:inherit}
+  .kfield input{flex:1;background:rgba(var(--sunk-rgb),.30);border:1px solid var(--glass-line);color:var(--ink);border-radius:10px;padding:.6rem .7rem;font:inherit}
   .kfield input::placeholder{color:var(--ink-dim)}
   .kfield .save{background:#fff;color:#0e3a52;border:0;border-radius:10px;padding:.6rem .8rem;font-weight:800;cursor:pointer}
   .tag{font-size:.66rem;padding:.12rem .45rem;border-radius:999px;border:1px solid var(--glass-line)}
-  .sheet .close{margin-top:.6rem;width:100%;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:10px;padding:.6rem;font-weight:700;cursor:pointer}
+  .sheet .close{margin-top:.6rem;width:100%;background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:10px;padding:.6rem;font-weight:700;cursor:pointer}
   .hint{color:var(--ink-dim);font-size:.7rem;margin-top:.3rem}
-  .rdp{width:400px;flex:none;display:flex;flex-direction:column;min-height:0;padding:.55rem;background:rgba(6,18,26,.14);border-left:1px solid var(--glass-line)}
+  .rdp{width:400px;flex:none;display:flex;flex-direction:column;min-height:0;padding:.55rem;background:rgba(var(--sunk-rgb),.14);border-left:1px solid var(--glass-line)}
   .rdpwrap{flex:1;min-height:0;border-radius:15px;padding:2px;background:linear-gradient(135deg,var(--g1),var(--g2) 55%,var(--g3));box-shadow:var(--shadow)}
   .rdpinner{height:100%;display:flex;flex-direction:column;min-height:0;background:#04121b;border-radius:13px;overflow:hidden}
-  .rdpbar{display:flex;align-items:center;gap:.5rem;padding:.45rem .6rem;background:rgba(6,18,26,.55);border-bottom:1px solid var(--glass-line)}
+  .rdpbar{display:flex;align-items:center;gap:.5rem;padding:.45rem .6rem;background:rgba(var(--sunk-rgb),.55);border-bottom:1px solid var(--glass-line)}
   .rdpbar .rdplight{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 7px currentColor}
   .rdpbar .t{font-size:.68rem;font-weight:800;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:linear-gradient(90deg,#eafaff,#bfeee0);-webkit-background-clip:text;background-clip:text;color:transparent}
-  .rdpbar .exp{margin-left:auto;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:8px;padding:.25rem .55rem;cursor:pointer;font-size:.74rem;font-weight:700;white-space:nowrap}
+  .rdpbar .exp{margin-left:auto;background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:8px;padding:.25rem .55rem;cursor:pointer;font-size:.74rem;font-weight:700;white-space:nowrap}
   .rdpbar .exp:hover{background:var(--glass-2)}
-  .rdptabs{display:none;gap:.3rem;padding:.4rem .5rem;background:rgba(6,18,26,.35);border-bottom:1px solid var(--glass-line)}
+  .rdptabs{display:none;gap:.3rem;padding:.4rem .5rem;background:rgba(var(--sunk-rgb),.35);border-bottom:1px solid var(--glass-line)}
   .rdptabs button{flex:1;background:var(--glass);border:1px solid var(--glass-line);color:var(--ink-soft);border-radius:8px;padding:.35rem .2rem;font-size:.73rem;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.25rem}
   .rdptabs button:hover{background:var(--glass-2)}
-  .rdptabs button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;border-color:#fff}
+  .rdptabs button.on{background:linear-gradient(135deg,#fff,#eaf7ff);color:#0e3a52;border-color:var(--ink)}
   .rdpbody{flex:1;position:relative;background:#04121b;min-height:0}
   .rdpbody iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
   .rdpph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.55rem;text-align:center;padding:1.2rem;color:var(--ink-soft)}
@@ -164,8 +228,8 @@
   .rdp.full .rdpwrap{border-radius:18px}
   @media(max-width:480px){ .side{width:210px} .msg{max-width:88%} }
   #rdpPanel,#split,#railR,#rdpBtn,.mtab button[data-p="desktop"]{display:none!important}
-  .vmlight.starting{background:transparent!important;border:2px solid rgba(255,255,255,.35);border-top-color:#ffe08a;box-shadow:none;animation:vmspin .7s linear infinite}
-  .btnspin{display:inline-block;width:.8em;height:.8em;border:2px solid rgba(255,255,255,.3);border-top-color:#ffe08a;border-radius:50%;animation:vmspin .7s linear infinite;margin-right:.35rem;vertical-align:-1px}
+  .vmlight.starting{background:transparent!important;border:2px solid rgba(var(--ink-rgb),.35);border-top-color:#ffe08a;box-shadow:none;animation:vmspin .7s linear infinite}
+  .btnspin{display:inline-block;width:.8em;height:.8em;border:2px solid rgba(var(--ink-rgb),.3);border-top-color:#ffe08a;border-radius:50%;animation:vmspin .7s linear infinite;margin-right:.35rem;vertical-align:-1px}
   @keyframes vmspin{to{transform:rotate(360deg)}}
   .term{position:absolute;inset:0;display:flex;flex-direction:column;background:#030e16;font-family:ui-monospace,Menlo,Consolas,monospace}
   .termout{flex:1;overflow-y:auto;padding:.55rem .65rem;font-size:.78rem;line-height:1.4}
@@ -173,8 +237,8 @@
   .tl.cmd{color:#eafaff;font-weight:700}
   .tl.out{color:#bfe6d4}
   .tl.err{color:#ff9a90}
-  .tl.sys{color:rgba(255,255,255,.5);font-size:.7rem}
-  .termin{display:flex;align-items:center;gap:.4rem;padding:.4rem .55rem;border-top:1px solid var(--glass-line);background:rgba(6,18,26,.6)}
+  .tl.sys{color:rgba(var(--ink-rgb),.5);font-size:.7rem}
+  .termin{display:flex;align-items:center;gap:.4rem;padding:.4rem .55rem;border-top:1px solid var(--glass-line);background:rgba(var(--sunk-rgb),.6)}
   .termps{color:#5fd0c4;font-weight:800}
   .termin input{flex:1;background:transparent;border:0;color:#eafaff;font-family:inherit;font-size:.8rem;outline:none}
 </style>
@@ -213,7 +277,7 @@
     <main class="chat">
       <div class="cbar">
         <span class="st s-idle" id="cWhoDot" style="width:9px;height:9px;border-radius:50%">●</span>
-        <span class="who" id="cWho" onclick="pickStrainNav()" style="cursor:pointer" title="Pick a strain">Select an agent</span><button id="pcStatusBtn" onclick="pcStatus()" title="Status - reads this strain's identity, its last journal actions and its work-item backlog. Local read, NO model call, no API credit." style="margin-left:.6rem;background:var(--glass);border:1px solid var(--glass-line);color:#fff;border-radius:8px;padding:.2rem .55rem;font-size:.74rem;font-weight:700;cursor:pointer">&#9679; Status</button>
+        <span class="who" id="cWho" onclick="pickStrainNav()" style="cursor:pointer" title="Pick a strain">Select an agent</span><button id="pcStatusBtn" onclick="pcStatus()" title="Status - reads this strain's identity, its last journal actions and its work-item backlog. Local read, NO model call, no API credit." style="margin-left:.6rem;background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:8px;padding:.2rem .55rem;font-size:.74rem;font-weight:700;cursor:pointer">&#9679; Status</button>
         <!-- [HARNESSUI-PROVSW-V1] This pill printed the model version and nothing else. It is the
              provider toggle now. It does NOT own the selection: every click goes through
              setProvider(), the same function the Layers > Settings substrate buttons call, so
@@ -266,10 +330,21 @@
     <p>Gemini rotates automatically (no key). Claude you rotate yourself — recommended every 30 days: go to console → API keys → Create → copy → paste here → Update. Dot goes back green.</p>
     <div class="kfield"><label><span class="dotc dotClaude"></span> Claude (Anthropic) <span class="tag" id="tagClaude">—</span></label>
       <div class="row"><input id="inClaude" type="password" placeholder="your Anthropic API key"><button class="save" onclick="saveKey('claude')">Rotate</button></div>
-      <div class="hint">Paste new key -> verifies -> auto-disables old via Admin API -> saves to Secret Manager.</div></div>
+      <div class="hint">Paste new key -> verifies -> auto-disables old via Admin API -> saves to Secret Manager.</div>
+      <!-- [CHAT-TRANSPORT-VISIBLE-V104] WHAT THE CHAT ACTUALLY RESOLVED TO, not what this box
+           implies. An empty key field reads as "Claude is unconfigured, paste a key" -- and on a
+           default install that is WRONG, because Vertex is the default transport and needs no key
+           at all. An operator lost a day to exactly that reading: the chat was already on Vertex,
+           failing on something else entirely, while this panel showed him a blank box and a
+           Rotate button. /api/keys/status has carried the answer since [CHAT-OBSERVABLE-V1] -- the
+           resolved transport, region, host and the blocker -- and nothing rendered it. Static
+           markup on the same grounds as the GitHub field below: only the TEXT depends on a fetch,
+           and it degrades to a dash rather than removing the line. -->
+      <div class="hint" id="chatClaudeState">&mdash;</div></div>
     <div class="kfield" style="opacity: 0.7"><label><span class="dotc dotGemini"></span> Gemini (Google AI) <span class="tag" id="tagGemini">—</span></label>
       <div class="row"><input id="inGemini" type="password" placeholder="No static key needed (token auth)" disabled><button class="save" disabled>Token</button></div>
-      <div class="hint">Token-only via Vertex AI OAuth.</div></div>
+      <div class="hint">Token-only via Vertex AI OAuth.</div>
+      <div class="hint" id="chatGeminiState">&mdash;</div></div>
     <!-- [GH-TOOLS-V1] GITHUB LIVES HERE, WITH THE OTHER CREDENTIALS, AND IT IS STATIC MARKUP.
          It was first built as a section of the dashboard Settings panel and the operator could
          not find it, which is two separate defects worth naming. (1) WRONG PLACE: this console
@@ -515,7 +590,7 @@
   function refreshHistory(){ if(!SEL) return; loadHistory(SEL.id,true); }
   function md(t){
     t=String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    t=t.replace(/`([^`]+)`/g,'<code style="background:rgba(255,255,255,.1);padding:.05rem .3rem;border-radius:4px;font-size:.86em">$1</code>');
+    t=t.replace(/`([^`]+)`/g,'<code style="background:rgba(var(--ink-rgb),.1);padding:.05rem .3rem;border-radius:4px;font-size:.86em">$1</code>');
     t=t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
     var lines=t.split(/\n/), out=[], i=0;
     while(i<lines.length){
@@ -649,6 +724,24 @@
     $('tagGemini').innerHTML= gDot + gText; $('tagGemini').className='tag ok';
     
     $('keyState').innerHTML = gDot + cDot;
+    paintChatTransport(st && st.chat);
+  }
+  /* [CHAT-TRANSPORT-VISIBLE-V104] One sentence per provider, built from harChatResolved's OWN
+     fields, so this line, the [chat/resolve] log and a failing chat can never disagree about what
+     was chosen. Never renders a key value -- key_present is a boolean and that is all it is. */
+  function paintChatTransport(chat){
+    ['claude','gemini'].forEach(function(p){
+      var el=$('chat'+p.charAt(0).toUpperCase()+p.slice(1)+'State'); if(!el) return;
+      var c=chat&&chat[p];
+      if(!c){ el.innerHTML='&mdash;'; return; }
+      var where = c.transport==='vertex' ? ('Vertex'+(c.region?' ('+c.region+')':'')) : c.transport;
+      var line  = 'Chat uses '+where+' \u2192 '+(c.model||'?');
+      line += c.transport==='vertex' ? ' \u00b7 no key needed' : (c.key_present?' \u00b7 key stored':' \u00b7 NO KEY STORED');
+      /* the blocker is the whole point: say what is wrong and the one setting that moves you. */
+      if(c.alt_blocker) line += ' \u2014 other transport ('+c.alt_transport+') not ready: '+c.alt_blocker;
+      else if(c.alt_switch) line += ' \u00b7 to switch: '+c.alt_switch;
+      el.textContent=line;
+    });
   }
   async function loadKeys(){ try{ paintKeyState(await api('/api/keys/status')); }catch(e){ if(DEMO) paintKeyState({claude:false,gemini:false}); else $('keyState').innerHTML='<span class="miss">—</span>'; } }
   /* [GH-TOOLS-V1] Presence AND the resolved login, never the token. Which account a stored token
@@ -760,7 +853,7 @@
 .agent .st{box-shadow:none!important}
 </style>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png">
-<style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(240,194,74,.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style><script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js"></script>
+<style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(var(--acc-rgb),.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style><script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js"></script>
 
 <script id="pcdecor">
 (function(){
@@ -911,6 +1004,31 @@
 <style id="pctheme">
   /* palette themes (override the 3 gradient stops + accent). data-theme wins over :root + pcfungi. */
   html[data-theme="purple"]{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30;--gold:#ffd77a}
+  /* [BRAND-LIGHT-V1] THE SIXTH PALETTE, AND THE FIRST ONE THAT IS NOT DARK. The five above set
+     only --g1/--g2/--g3 and --gold; every other token stayed white-alpha, which is exactly why a
+     pale palette was never a matter of picking paler stops -- 50 white-alpha rules and 32
+     color:#fff sites would have gone invisible at once. Those are tokens now, so a light theme is
+     a list of VALUES rather than a rewrite, and this block is the proof of that claim.
+     ADDITIVE ON PURPOSE: purple remains the default, the other five are untouched, and mushroom
+     mode is unaffected. An operator gets a light option; nobody is moved onto it. */
+  html[data-theme="light"]{
+    --g1:#e8ebec;--g2:#eceff0;--g3:#e4e8e9;
+    --ink:#1a1c1c;--ink-rgb:26,28,28;
+    --ink-soft:rgba(26,28,28,.86);--ink-dim:rgba(26,28,28,.60);
+    --glass:rgba(255,255,255,.86);--glass-2:#ffffff;--glass-line:rgba(26,28,28,.13);
+    --sunk-rgb:255,255,255;
+    --gold:#b8860b;--acc1:#ffd77a;--acc2:#c8860e;--acc-rgb:200,134,14;
+    --acc-ink:#3a2a06;--acc-ink-2:#241a00;
+    --chip-bg:linear-gradient(135deg,#2b2f30,#1a1c1c);
+    --chip-bg-2:linear-gradient(135deg,#2b2f30,#1a1c1c);--chip-ink:#ffffff;
+    --msg-ag:#ffffff;--msg-me:#dfe6ea;
+    --shadow:0 10px 30px rgba(26,28,28,.10);
+    --hdr-bg:rgba(255,255,255,.86);
+    --hbtn-ink:rgba(26,28,28,.86);
+    /* the clipped-gradient product name has no fallback, so on a pale header it is the least
+       legible string on screen. Flat ink here -- the token exists for exactly this. */
+    --ttl-bg:none;--ttl-ink:var(--ink);
+  }
   html[data-theme="green"]{--g1:#123a56;--g2:#0f4a47;--g3:#175339;--gold:#ffd77a}
   html[data-theme="orange"]{--g1:#7a3a12;--g2:#5a260e;--g3:#2a1206;--gold:#ffcf8a}
   html[data-theme="blue"]{--g1:#123a6a;--g2:#12306a;--g3:#0a1430;--gold:#9ec7ff}
@@ -918,15 +1036,15 @@
   /* mushroom OFF: drop the gold logo glow (plainer, professional look) */
   body.nomush .brand img,body.nomush .hdr img,body.nomush .empty img{filter:none!important;box-shadow:none!important}
   /* floating theme control */
-  #pcThemeBtn{position:fixed;right:12px;bottom:14px;z-index:200;width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.16);backdrop-filter:blur(8px);color:#fff;font-size:1.2rem;line-height:1;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
-  #pcThemePanel{position:fixed;right:12px;bottom:66px;z-index:201;display:none;flex-direction:column;gap:.7rem;padding:.85rem .9rem;border-radius:14px;border:1px solid rgba(255,255,255,.22);background:linear-gradient(150deg,var(--g1),var(--g2) 70%,var(--g3));backdrop-filter:blur(14px);box-shadow:0 16px 44px rgba(0,0,0,.55);min-width:212px}
+  #pcThemeBtn{position:fixed;right:12px;bottom:14px;z-index:200;width:44px;height:44px;border-radius:50%;border:1px solid rgba(var(--ink-rgb),.28);background:rgba(var(--ink-rgb),.16);backdrop-filter:blur(8px);color:var(--ink);font-size:1.2rem;line-height:1;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
+  #pcThemePanel{position:fixed;right:12px;bottom:66px;z-index:201;display:none;flex-direction:column;gap:.7rem;padding:.85rem .9rem;border-radius:14px;border:1px solid rgba(var(--ink-rgb),.22);background:linear-gradient(150deg,var(--g1),var(--g2) 70%,var(--g3));backdrop-filter:blur(14px);box-shadow:0 16px 44px rgba(0,0,0,.55);min-width:212px}
   #pcThemePanel.show{display:flex}
-  #pcThemePanel .hd{font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.6);font-weight:800}
-  #pcThemePanel .row{display:flex;align-items:center;justify-content:space-between;gap:.6rem;color:#fff;font-size:.84rem;font-weight:700}
+  #pcThemePanel .hd{font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(var(--ink-rgb),.6);font-weight:800}
+  #pcThemePanel .row{display:flex;align-items:center;justify-content:space-between;gap:.6rem;color:var(--ink);font-size:.84rem;font-weight:700}
   #pcThemePanel .sw{display:flex;gap:.5rem;flex-wrap:wrap}
-  #pcThemePanel .sw button{width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
-  #pcThemePanel .sw button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
-  .pcsw{position:relative;width:46px;height:26px;border-radius:999px;background:rgba(255,255,255,.25);cursor:pointer;flex:none;transition:background .15s;border:0;padding:0}
+  #pcThemePanel .sw button{width:30px;height:30px;border-radius:50%;border:2px solid rgba(var(--ink-rgb),.3);cursor:pointer;padding:0}
+  #pcThemePanel .sw button.on{border-color:var(--ink);box-shadow:0 0 0 3px rgba(var(--ink-rgb),.3)}
+  .pcsw{position:relative;width:46px;height:26px;border-radius:999px;background:rgba(var(--ink-rgb),.25);cursor:pointer;flex:none;transition:background .15s;border:0;padding:0}
   .pcsw.on{background:#5fce9a}
   .pcsw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s}
   .pcsw.on i{left:23px}
@@ -935,17 +1053,17 @@
 <script id="pcthemejs">
 (function(){
   if(window.__pctheme)return; window.__pctheme=true;
-  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e']];
+  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e'],['light','#f2f4f4','#dfe3e4']];
   function g(k,d){ try{ var v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }
   function s(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
-  var theme=g('pc_theme','purple'), mush=g('pc_mush','1')==='1', btn;
+  var theme=g('pc_theme','purple'), mush=pcWhimsyOn()&&g('pc_mush','1')==='1', btn;
   function applyTheme(t){ document.documentElement.setAttribute('data-theme',t); }
   function applyMush(on){ document.body.classList.toggle('nomush',!on); if(btn) btn.textContent=on?'🍄':'◉'; }
   applyTheme(theme);
   btn=document.createElement('button'); btn.id='pcThemeBtn'; btn.type='button'; btn.title='Theme';
   var panel=document.createElement('div'); panel.id='pcThemePanel';
   var hd=document.createElement('div'); hd.className='hd'; hd.textContent='Theme'; panel.appendChild(hd);
-  var r1=document.createElement('div'); r1.className='row'; var l1=document.createElement('span'); l1.textContent='Mushroom'; var sw=document.createElement('button'); sw.type='button'; sw.className='pcsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(l1); r1.appendChild(sw); panel.appendChild(r1);
+  var r1=document.createElement('div'); r1.className='row'; var l1=document.createElement('span'); l1.textContent='Mushroom'; var sw=document.createElement('button'); sw.type='button'; sw.className='pcsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(l1); r1.appendChild(sw); if(pcWhimsyOn()) panel.appendChild(r1);
   var r2=document.createElement('div'); r2.className='row'; var l2=document.createElement('span'); l2.textContent='Color'; r2.appendChild(l2); panel.appendChild(r2);
   var sws=document.createElement('div'); sws.className='sw';
   function markSw(){ [].forEach.call(sws.children,function(c){ c.classList.toggle('on', c.getAttribute('data-t')===theme); }); }
@@ -971,29 +1089,29 @@
   #rdpPanel .rdpbar,#rdpPanel .rdptabs{display:none!important}
   .dpwrap{display:flex;flex-direction:column;height:100%;min-height:0;overflow-y:auto;padding:.7rem .75rem;gap:.75rem}
   .dphd{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
-  .dphd .t{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:#fff;font-weight:800}
-  .dphd .x{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.28);color:#fff;border-radius:9px;padding:.25rem .6rem;font-weight:900;cursor:pointer}
-  .dpsec{border:1px solid rgba(255,255,255,.16);border-radius:13px;background:rgba(255,255,255,.07);padding:.7rem .8rem;position:relative}
-  .dpsec>h4{margin:0 0 .55rem;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.62);font-weight:800}
-  .dprow{display:flex;align-items:center;justify-content:space-between;gap:.6rem;color:#fff;font-size:.85rem;font-weight:700;margin:.35rem 0}
-  .dpsw{position:relative;width:46px;height:26px;border-radius:999px;background:rgba(255,255,255,.25);cursor:pointer;flex:none;border:0;padding:0;transition:background .15s}
+  .dphd .t{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--ink);font-weight:800}
+  .dphd .x{background:rgba(var(--ink-rgb),.14);border:1px solid rgba(var(--ink-rgb),.28);color:var(--ink);border-radius:9px;padding:.25rem .6rem;font-weight:900;cursor:pointer}
+  .dpsec{border:1px solid rgba(var(--ink-rgb),.16);border-radius:13px;background:rgba(var(--ink-rgb),.07);padding:.7rem .8rem;position:relative}
+  .dpsec>h4{margin:0 0 .55rem;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(var(--ink-rgb),.62);font-weight:800}
+  .dprow{display:flex;align-items:center;justify-content:space-between;gap:.6rem;color:var(--ink);font-size:.85rem;font-weight:700;margin:.35rem 0}
+  .dpsw{position:relative;width:46px;height:26px;border-radius:999px;background:rgba(var(--ink-rgb),.25);cursor:pointer;flex:none;border:0;padding:0;transition:background .15s}
   .dpsw.on{background:#5fce9a}
   .dpsw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s}
   .dpsw.on i{left:23px}
   .dpsm{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.3rem}
-  .dpsm button{width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
-  .dpsm button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
-  .dpag{display:flex;align-items:center;gap:.55rem;padding:.4rem .2rem;border-top:1px solid rgba(255,255,255,.08)}
+  .dpsm button{width:30px;height:30px;border-radius:50%;border:2px solid rgba(var(--ink-rgb),.3);cursor:pointer;padding:0}
+  .dpsm button.on{border-color:var(--ink);box-shadow:0 0 0 3px rgba(var(--ink-rgb),.3)}
+  .dpag{display:flex;align-items:center;gap:.55rem;padding:.4rem .2rem;border-top:1px solid rgba(var(--ink-rgb),.08)}
   .dpag:first-of-type{border-top:0}
   .dpdot{width:11px;height:11px;border-radius:50%;flex:none;box-shadow:0 0 8px currentColor}
   .dpdot.g{background:#4fd08a;color:#4fd08a}.dpdot.y{background:#f4c04e;color:#f4c04e}.dpdot.r{background:#ff6b6b;color:#ff6b6b}
-  .dpag .nm{font-weight:700;font-size:.84rem;color:#fff}
-  .dpag .wt{font-size:.64rem;color:rgba(255,255,255,.6);margin-top:.05rem}
-  .dpag .meta{margin-left:auto;text-align:right;font-size:.64rem;color:rgba(255,255,255,.6);white-space:nowrap}
+  .dpag .nm{font-weight:700;font-size:.84rem;color:var(--ink)}
+  .dpag .wt{font-size:.64rem;color:rgba(var(--ink-rgb),.6);margin-top:.05rem}
+  .dpag .meta{margin-left:auto;text-align:right;font-size:.64rem;color:rgba(var(--ink-rgb),.6);white-space:nowrap}
   .dpstat{display:flex;gap:.5rem;flex-wrap:wrap}
-  .dpstat .cell{flex:1;min-width:88px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.16);border-radius:10px;padding:.5rem .6rem}
-  .dpstat .cell .n{font-size:1.05rem;font-weight:800;color:#fff}
-  .dpstat .cell .l{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase;color:rgba(255,255,255,.6);font-weight:700}
+  .dpstat .cell{flex:1;min-width:88px;background:rgba(var(--ink-rgb),.08);border:1px solid rgba(var(--ink-rgb),.16);border-radius:10px;padding:.5rem .6rem}
+  .dpstat .cell .n{font-size:1.05rem;font-weight:800;color:var(--ink)}
+  .dpstat .cell .l{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase;color:rgba(var(--ink-rgb),.6);font-weight:700}
   /* ---- right dashboard DRAWER: inline, mirrors the left nav drawer ---- */
   /* override the legacy hard-hide of the workstation panel/rail; the old splitter stays off */
   #rdpPanel{display:flex!important}
@@ -1001,20 +1119,20 @@
   #railR{display:none}
   #railR.show{display:flex!important}
   /* right-edge rail = mirror of the left railL chevron (inline; reflows the center chat) */
-  #railR{position:static!important;width:24px!important;height:auto!important;border-radius:0!important;box-shadow:none!important;border:0!important;border-left:1px solid var(--glass-line)!important;background:rgba(6,18,26,.30)!important;color:var(--ink-soft)!important;font-size:1.05rem!important;font-weight:900!important;z-index:auto!important}
-  #railR.show:hover{background:var(--glass)!important;color:#fff!important}
+  #railR{position:static!important;width:24px!important;height:auto!important;border-radius:0!important;box-shadow:none!important;border:0!important;border-left:1px solid var(--glass-line)!important;background:rgba(var(--sunk-rgb),.30)!important;color:var(--ink-soft)!important;font-size:1.05rem!important;font-weight:900!important;z-index:auto!important}
+  #railR.show:hover{background:var(--glass)!important;color:var(--ink)!important}
   /* mobile: mirror the left overlay drawer, flipped to the right edge (kills the old slide-over) */
   @media(max-width:768px){
     body.mobile #rdpPanel{position:absolute!important;top:0;right:0;bottom:0;left:auto!important;z-index:40;width:230px!important;max-width:84vw!important;
       background:linear-gradient(180deg,var(--g1) 0%,var(--g3) 100%)!important;border-left:1px solid rgba(150,110,220,.28)!important;box-shadow:-6px 0 26px rgba(0,0,0,.45)!important;border-radius:0!important}
     body.mobile #rdpPanel.collapsed{width:0!important;box-shadow:none!important;border:0!important;overflow:hidden!important}
-    body.mobile #railR{position:absolute!important;right:0;top:0;bottom:0;left:auto!important;height:auto!important;width:22px!important;z-index:41;border-radius:0!important;background:linear-gradient(180deg,var(--g1),var(--g3))!important;box-shadow:none!important;border-left:1px solid rgba(255,255,255,.18)!important}
+    body.mobile #railR{position:absolute!important;right:0;top:0;bottom:0;left:auto!important;height:auto!important;width:22px!important;z-index:41;border-radius:0!important;background:linear-gradient(180deg,var(--g1),var(--g3))!important;box-shadow:none!important;border-left:1px solid rgba(var(--ink-rgb),.18)!important}
   }
 </style>
 <script id="pcdashpaneljs">
 (function(){
   if(window.__pcdash)return; window.__pcdash=true;
-  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e']];
+  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e'],['light','#f2f4f4','#dfe3e4']];
   function $(id){return document.getElementById(id);}
   function g(k,d){try{var v=localStorage.getItem(k);return v==null?d:v;}catch(e){return d;}}
   function s(k,v){try{localStorage.setItem(k,v);}catch(e){}}
@@ -1029,10 +1147,10 @@
     return ['g', a.last_action?('idle · last: '+a.last_action):'idle until you need it'];}
 
   function themeSection(){
-    var mush=g('pc_mush','1')==='1', theme=g('pc_theme','purple');
+    var mush=pcWhimsyOn()&&g('pc_mush','1')==='1', theme=g('pc_theme','purple');
     var sec=document.createElement('div'); sec.className='dpsec'; sec.innerHTML='<h4>Settings</h4>';
     var r1=document.createElement('div'); r1.className='dprow'; r1.innerHTML='<span>Mushroom theme</span>';
-    var sw=document.createElement('button'); sw.type='button'; sw.className='dpsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); sec.appendChild(r1);
+    var sw=document.createElement('button'); sw.type='button'; sw.className='dpsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); if(pcWhimsyOn()) sec.appendChild(r1);
     var r2=document.createElement('div'); r2.className='dprow'; r2.style.display='block'; r2.innerHTML='<span>Color</span>';
     var sm=document.createElement('div'); sm.className='dpsm';
     function markSm(){[].forEach.call(sm.children,function(c){c.classList.toggle('on',c.getAttribute('data-t')===theme);});}
@@ -1048,8 +1166,8 @@
     var wrap=document.createElement('div'); wrap.className='dpwrap';
     var hd=document.createElement('div'); hd.className='dphd'; hd.innerHTML='<span class="t">⚙️ Settings</span>';
     var x=document.createElement('button'); x.className='x'; x.textContent='✕'; x.title='Close'; x.onclick=closeDash; hd.appendChild(x); wrap.appendChild(hd);
-    var fl=document.createElement('a'); fl.href='/flow'; fl.textContent='🍄 Open Fleet Flow'; fl.style.cssText='display:block;text-align:center;background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;font-weight:800;border-radius:11px;padding:.6rem;text-decoration:none;margin:.1rem 0 .3rem'; wrap.appendChild(fl);
-    var wk=document.createElement('a'); wk.href='/wiki'; wk.textContent='📖 Docs · internal wiki'; wk.style.cssText='display:block;text-align:center;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.22);color:#fff;font-weight:700;border-radius:11px;padding:.5rem;text-decoration:none;margin:0 0 .35rem;font-size:.82rem'; wk.title='Internal system wiki — every page carries a computed freshness badge'; wrap.appendChild(wk);
+    var fl=document.createElement('a'); fl.href='/flow'; fl.textContent='🍄 Open Fleet Flow'; fl.style.cssText='display:block;text-align:center;background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);font-weight:800;border-radius:11px;padding:.6rem;text-decoration:none;margin:.1rem 0 .3rem'; wrap.appendChild(fl);
+    var wk=document.createElement('a'); wk.href='/wiki'; wk.textContent='📖 Docs · internal wiki'; wk.style.cssText='display:block;text-align:center;background:rgba(var(--ink-rgb),.10);border:1px solid rgba(var(--ink-rgb),.22);color:var(--ink);font-weight:700;border-radius:11px;padding:.5rem;text-decoration:none;margin:0 0 .35rem;font-size:.82rem'; wk.title='Internal system wiki — every page carries a computed freshness badge'; wrap.appendChild(wk);
     wrap.appendChild(themeSection());
     var sum=await api('/api/dash/summary');
     var asec=document.createElement('div'); asec.className='dpsec'; asec.innerHTML='<h4>Strains</h4>';
@@ -1102,7 +1220,7 @@
 <!-- ===== Paracoding in-Flow-Hood Approvals drawer (advisor) — inject before </body> ===== -->
 <!-- LAYERS panel: Settings | Flow — resizable left slide-out -->
 <style id="pcl-css">
-#pcl-btn{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:99996;background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;font-weight:800;border:0;border-radius:11px 0 0 11px;padding:.85rem .32rem;cursor:pointer;box-shadow:0 3px 14px rgba(0,0,0,.45);font-size:.72rem;letter-spacing:.12em;writing-mode:vertical-rl;text-orientation:mixed;display:flex;align-items:center;gap:.35rem}
+#pcl-btn{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:99996;background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);font-weight:800;border:0;border-radius:11px 0 0 11px;padding:.85rem .32rem;cursor:pointer;box-shadow:0 3px 14px rgba(0,0,0,.45);font-size:.72rem;letter-spacing:.12em;writing-mode:vertical-rl;text-orientation:mixed;display:flex;align-items:center;gap:.35rem}
 #pcl-btn .dotp{width:8px;height:8px;border-radius:50%;background:#c0392b;display:none;box-shadow:0 0 7px #ff6b5b}
 #pcl-btn.hasjobs .dotp{display:inline-block}
 #pcl-ov{position:fixed;inset:0;background:rgba(5,3,15,.42);opacity:0;pointer-events:none;transition:opacity .18s;z-index:99997}
@@ -1112,7 +1230,7 @@
 #pcl .tabs{display:flex;gap:.2rem;padding:.4rem .4rem;border-bottom:1px solid #3a2864;background:#160e2b;align-items:stretch}
 #pcl .tabs button.tb{flex:1;background:#241748;border:1px solid #3a2864;color:#bcaee6;border-radius:9px;padding:.4rem .1rem;font-size:.66rem;font-weight:700;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.1rem;line-height:1.05}
 #pcl .tabs button.tb .ic{font-size:1rem}
-#pcl .tabs button.tb.on{background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border-color:#ffe9a8}
+#pcl .tabs button.tb.on{background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);border-color:var(--acc1)}
 #pcl .tabs .cx{flex:0 0 auto;background:none;border:0;color:#8a78b6;font-size:1.3rem;padding:0 .3rem;cursor:pointer}
 #pcl .body{flex:1;position:relative;min-height:0}
 #pcl .pane{position:absolute;inset:0;display:none}
@@ -1122,15 +1240,15 @@
 #pcl .withbar iframe{flex:1}
 #pcl .popbar{display:flex;align-items:center;gap:.45rem;padding:.5rem .6rem;background:#160e2b;border-bottom:1px solid #3a2864;font-size:.75rem;color:#bcaee6}
 #pcl .popbar .sp{flex:1}
-#pcl .popbar button{background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border:0;border-radius:8px;padding:.32rem .6rem;font-weight:800;cursor:pointer;font-size:.74rem}
+#pcl .popbar button{background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);border:0;border-radius:8px;padding:.32rem .6rem;font-weight:800;cursor:pointer;font-size:.74rem}
 #pcl .sset{padding:1.1rem;color:#efe9ff;overflow:auto;height:100%}
 #pcl .sset h4{margin:0 0 .7rem;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:#8a78b6}
 #pcl .srow{display:flex;align-items:center;justify-content:space-between;margin:.6rem 0;font-weight:700;font-size:.9rem}
-#pcl .ssw{width:46px;height:26px;border-radius:999px;background:rgba(255,255,255,.25);cursor:pointer;border:0;position:relative;flex:none}
+#pcl .ssw{width:46px;height:26px;border-radius:999px;background:rgba(var(--ink-rgb),.25);cursor:pointer;border:0;position:relative;flex:none}
 #pcl .ssw.on{background:#5fce9a} #pcl .ssw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s} #pcl .ssw.on i{left:23px}
 #pcl .ssm{display:flex;gap:.55rem;flex-wrap:wrap;margin-top:.5rem}
-#pcl .ssm button{width:32px;height:32px;border-radius:50%;border:2px solid rgba(255,255,255,.3);cursor:pointer;padding:0}
-#pcl .ssm button.on{border-color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.3)}
+#pcl .ssm button{width:32px;height:32px;border-radius:50%;border:2px solid rgba(var(--ink-rgb),.3);cursor:pointer;padding:0}
+#pcl .ssm button.on{border-color:var(--ink);box-shadow:0 0 0 3px rgba(var(--ink-rgb),.3)}
 /* [UI-ACCORDION-V55] Two collapsible blocks, both driven by the CHOSEN palette rather than
    their own colours. The key fields and the session pastes each arrived from a modal that
    carried its own teal, which is why the panel read as two applications bolted together.
@@ -1150,7 +1268,7 @@
 #pcl .kwrap .row{display:flex;gap:.4rem}
 #pcl .kwrap input{flex:1;min-width:0;background:#160e2b;border:1px solid #3a2864;color:#efe9ff;border-radius:9px;padding:.45rem .6rem;font-size:.82rem}
 #pcl .kwrap input:disabled{opacity:.55}
-#pcl .kwrap button{background:linear-gradient(135deg,#ffe9a8,#e0982e);color:#241a00;border:0;border-radius:9px;padding:.45rem .75rem;font-weight:800;cursor:pointer;font-size:.78rem}
+#pcl .kwrap button{background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);border:0;border-radius:9px;padding:.45rem .75rem;font-weight:800;cursor:pointer;font-size:.78rem}
 #pcl .kwrap button:disabled{opacity:.5;cursor:default}
 #pcl .kwrap .hint{color:#8a78b6;font-size:.72rem;line-height:1.45;margin-top:.3rem}
 #pcl-grip{position:absolute;top:0;left:-3px;width:9px;height:100%;cursor:ew-resize;z-index:6}
@@ -1170,7 +1288,7 @@
 </div>
 <script id="pcl-js">
 (function(){
-  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e']];
+  var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e'],['light','#f2f4f4','#dfe3e4']];
   function lg(k,d){try{var v=localStorage.getItem(k);return v==null?d:v;}catch(e){return d;}}
   function ls(k,v){try{localStorage.setItem(k,v);}catch(e){}}
   var panel=document.getElementById('pcl'), ov=document.getElementById('pcl-ov');
@@ -1184,12 +1302,12 @@
   window.pclOpen=function(){ if(typeof window.closeDash==='function') window.closeDash(); hideLegacy(); var w=lg('pcl_w',''); if(w){ panel.classList.add('notrans'); panel.style.width=w; setTimeout(function(){panel.classList.remove('notrans');},30); } panel.classList.add('on'); ov.classList.add('on'); pclTab(pclSafeTab(lg('pcl_tab','settings'))); };
   window.pclClose=function(){ panel.classList.remove('on'); ov.classList.remove('on'); };
   function buildSettings(){ var host=document.getElementById('pcl-set'); if(!host || host.getAttribute('data-built'))return; host.setAttribute('data-built','1');
-    var mush=lg('pc_mush','1')==='1', theme=lg('pc_theme','purple');
+    var mush=pcWhimsyOn()&&lg('pc_mush','1')==='1', theme=lg('pc_theme','purple');
     function applyTheme(t){document.documentElement.setAttribute('data-theme',t);}
     function applyMush(on){document.body.classList.toggle('nomush',!on);}
     host.innerHTML='<h4>Appearance</h4>';
     var r1=document.createElement('div'); r1.className='srow'; r1.innerHTML='<span>Mushroom theme</span>';
-    var sw=document.createElement('button'); sw.className='ssw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); host.appendChild(r1);
+    var sw=document.createElement('button'); sw.className='ssw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); if(pcWhimsyOn()) host.appendChild(r1);
     var r2=document.createElement('div'); r2.innerHTML='<div class="srow"><span>Color</span></div>';
     var sm=document.createElement('div'); sm.className='ssm';
     function markSm(){[].forEach.call(sm.children,function(c){c.classList.toggle('on',c.getAttribute('data-t')===theme);});}
@@ -1250,7 +1368,7 @@
 #pcusage{display:inline-flex;align-items:center;gap:.5rem;margin-left:auto;font-size:.66rem;
   letter-spacing:.04em;color:var(--ink-soft);background:var(--glass);border:1px solid var(--glass-line);
   border-radius:9px;padding:.16rem .5rem;white-space:nowrap}
-#pcusage b{color:#fff;font-weight:800}
+#pcusage b{color:var(--ink);font-weight:800}
 #pcusage .tag{font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;opacity:.7}
 #pcusage .dot{width:6px;height:6px;border-radius:50%;background:#4fd08a;box-shadow:0 0 6px #4fd08a}
 #pcusage.stale .dot{background:#f4c04e;box-shadow:0 0 6px #f4c04e}
@@ -1581,7 +1699,7 @@
 <style id="pcsessionpaste-css">
 #pcps-sheet{max-width:560px}
 #pcps-roles button{display:block;width:100%;text-align:left;margin-top:.35rem;background:var(--glass);
-  border:1px solid var(--glass-line);color:#fff;border-radius:9px;padding:.4rem .6rem;
+  border:1px solid var(--glass-line);color:var(--ink);border-radius:9px;padding:.4rem .6rem;
   font-size:.82rem;font-weight:600;cursor:pointer}
 #pcps-roles button:hover{background:var(--glass-2)}
 #pcps-roles button[disabled]{opacity:.55;cursor:default}
@@ -1782,7 +1900,7 @@
      paracoding.ai/demo.html, its stylesheet af.css and its theme engine af-theme.js -- and the
      numbers below were read out of those three files rather than invented. Where a rule here has
      a counterpart there it is the same number: .55rem/.9rem of header padding, .7rem of gap, a
-     30px round logo with box-shadow 0 0 12px 2px rgba(240,194,74,.5), .78rem/9px-radius header
+     30px round logo with box-shadow 0 0 12px 2px rgba(var(--acc-rgb),.5), .78rem/9px-radius header
      buttons, and a 22px-radius pill in the top right carrying the gold gradient.
 
      WHAT I DID NOT COPY, and why, because a partial copy that pretends to be a full one is worse
@@ -1809,38 +1927,55 @@
    These carry !important because #pcslim above set the same properties !important. Later wins at
    equal specificity, which is the same mechanism every other block in this file relies on. */
 .hdr{padding:.55rem .9rem!important;gap:.7rem!important;
-  background:rgba(9,4,20,.5)!important;border-bottom:1px solid rgba(255,255,255,.16)!important;
+  background:var(--hdr-bg)!important;border-bottom:1px solid rgba(var(--ink-rgb),.16)!important;
   backdrop-filter:blur(8px)!important}
-.hdr img{width:30px!important;height:30px!important;object-fit:cover!important;
-  border-radius:50%!important;mix-blend-mode:normal!important;
-  filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important;
-  box-shadow:0 0 12px 2px rgba(240,194,74,.5)!important}
+.hdr img{width:var(--logo-w-hdr)!important;height:var(--logo-h-hdr)!important;
+  max-width:var(--logo-maxw)!important;object-fit:var(--logo-fit-hdr)!important;
+  border-radius:var(--logo-radius)!important;mix-blend-mode:normal!important;
+  filter:var(--logo-filter)!important;
+  box-shadow:var(--logo-shadow-hdr)!important}
 /* the demo brand is gold gradient text at 1.02rem/800; #pcslim had dropped it to .82rem/700 */
 .hdr .ttl{font-size:1.02rem!important;font-weight:800!important;letter-spacing:.01em!important;
-  background:linear-gradient(90deg,#ffe9a8,#e0982e);-webkit-background-clip:text;background-clip:text;
-  color:transparent}
+  background:var(--ttl-bg);-webkit-background-clip:text;background-clip:text;
+  color:var(--ttl-ink)}
 .hdr .rt{gap:.5rem!important;align-items:center}
 /* .fakebtn geometry, .exit colours -- the demo's two header button treatments merged, since
    every button up here is real and none of them is the primary call to action. */
 .hbtn{font-size:.78rem!important;font-weight:600!important;padding:.32rem .6rem!important;
-  border-radius:9px!important;background:rgba(255,255,255,.05)!important;
-  border:1px solid rgba(255,255,255,.16)!important;color:rgba(233,246,241,.78)!important}
-.hbtn:hover{background:rgba(255,255,255,.12)!important;color:#fff!important}
+  border-radius:9px!important;background:rgba(var(--ink-rgb),.05)!important;
+  border:1px solid rgba(var(--ink-rgb),.16)!important;color:var(--hbtn-ink)!important}
+.hbtn:hover{background:rgba(var(--ink-rgb),.12)!important;color:var(--ink)!important}
 /* ...except the VM button, which keeps its state colour. See the note above. */
-.hbtn.startb{border-color:rgba(120,255,190,.55)!important;background:rgba(60,200,140,.22)!important;color:#fff!important}
-.hbtn.stopb{border-color:rgba(255,150,140,.55)!important;background:rgba(200,80,80,.22)!important;color:#fff!important}
+.hbtn.startb{border-color:rgba(120,255,190,.55)!important;background:rgba(60,200,140,.22)!important;color:var(--ink)!important}
+.hbtn.stopb{border-color:rgba(255,150,140,.55)!important;background:rgba(200,80,80,.22)!important;color:var(--ink)!important}
 /* the demo's empty-state logo is 84px with a wider glow; this one was 64px */
-.empty img{width:84px!important;height:84px!important;border-radius:50%!important;
-  mix-blend-mode:normal!important;box-shadow:0 0 26px 5px rgba(240,194,74,.4)!important}
+.empty img{width:var(--logo-w-empty)!important;height:var(--logo-h-empty)!important;
+  max-width:var(--logo-maxw)!important;border-radius:var(--logo-radius)!important;
+  mix-blend-mode:normal!important;box-shadow:var(--logo-shadow-empty)!important}
 /* professional mode: af-theme.js squares the logo off and dims the glow rather than killing it.
    The older body.nomush rule in #pctheme removed it entirely, which read as a broken image. */
-body.nomush .hdr img,body.nomush .empty img,body.nomush .brand img{
-  border-radius:10px!important;box-shadow:0 0 10px rgba(240,194,74,.35)!important;filter:none!important}
+/* [BRAND-LOGO-V1] Professional mode moves the TOKENS, so a brand overriding --logo-* gets both
+   modes from one place instead of chasing an !important pair.
+   THE ELEMENT RULE BELOW IS NOT REDUNDANT AND REMOVING IT IS A REGRESSION -- caught by the render
+   check, not by reading. An EARLIER rule, `body.nomush .brand img,body.nomush .hdr img,body.nomush
+   .empty img{filter:none!important;box-shadow:none!important}`, is (0,2,2) where the base logo
+   rules are (0,1,1), so it wins on SPECIFICITY regardless of order. The rule this replaced was
+   also (0,2,2) and beat it on order. Move those declarations to tokens and nothing outranks the
+   earlier rule any more: the glow silently vanished in professional mode on all five palettes
+   (2,186-2,616 pixels per render). filter and border-radius are safe as tokens because the base
+   rules read them; box-shadow needs an element rule at matching specificity to reach the img. */
+body.nomush{
+  --logo-filter:none;
+  --logo-radius:10px;
+  --logo-shadow-hdr:0 0 10px rgba(var(--acc-rgb),.35);
+  --logo-shadow-empty:0 0 10px rgba(var(--acc-rgb),.35);}
+body.nomush .hdr img,body.nomush .brand img{box-shadow:var(--logo-shadow-hdr)!important}
+body.nomush .empty img{box-shadow:var(--logo-shadow-empty)!important}
 
 /* ---------- composer: demo geometry, mic and attachment KEPT ---------- */
 .send{padding:.7rem 1.1rem!important;font-size:.95rem!important;border-radius:12px!important;
-  font-weight:800!important;background:linear-gradient(135deg,#ffe9a8,#e0982e)!important;
-  color:#3a2a06!important;border:0!important}
+  font-weight:800!important;background:linear-gradient(135deg,var(--acc1),var(--acc2))!important;
+  color:var(--acc-ink)!important;border:0!important}
 .mic{padding:.65rem .75rem!important;font-size:1rem!important;border-radius:12px!important}
 .cin{gap:.5rem!important}
 
@@ -1854,12 +1989,12 @@ body.nomush .hdr img,body.nomush .empty img,body.nomush .brand img{
 #pcmushrail>*{pointer-events:auto}
 #pcmushpill{display:inline-flex;align-items:center;gap:.4rem;padding:.46rem .8rem;border-radius:22px;
   font:700 .8rem/1 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;cursor:pointer;white-space:nowrap;
-  border:1px solid rgba(240,194,74,.6);color:#3a2a06;
-  background:linear-gradient(135deg,#ffe9a8,#e0982e);box-shadow:0 6px 20px rgba(0,0,0,.35)}
+  border:1px solid rgba(var(--acc-rgb),.6);color:var(--acc-ink);
+  background:linear-gradient(135deg,var(--acc1),var(--acc2));box-shadow:0 6px 20px rgba(0,0,0,.35)}
 #pcmushpill:hover{filter:brightness(1.06)}
 #pcmushpill:focus-visible{outline:2px solid #fff;outline-offset:2px}
-body.nomush #pcmushpill{background:rgba(255,255,255,.10);color:#eafaff;
-  border:1px dashed rgba(240,194,74,.6);backdrop-filter:blur(6px)}
+body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
+  border:1px dashed rgba(var(--acc-rgb),.6);backdrop-filter:blur(6px)}
 /* Reserve the pill's own width at the right end of the chat bar so the 7D usage strip never
    slides underneath it. The width is measured, not hard-coded, because "Not a mushroom fan?" is
    materially wider than "Mushroom mode" and a fixed rem value would be wrong in one of the two
@@ -1872,7 +2007,7 @@ body.nomush #pcmushpill{background:rgba(255,255,255,.10);color:#eafaff;
   body.mobile .mic{padding:.4rem .5rem!important;font-size:.9rem!important}
   body.mobile .cin{gap:.35rem!important}
   body.mobile .hdr{padding:.4rem .6rem!important}
-  body.mobile .hdr img{width:26px!important;height:26px!important}
+  body.mobile .hdr img{width:var(--logo-w-mobile)!important;height:var(--logo-h-mobile)!important;max-width:var(--logo-maxw)!important}
   body.mobile .hdr .ttl{font-size:.92rem!important}
 }
 </style>
@@ -2138,7 +2273,12 @@ body.nomush #pcmushpill{background:rgba(255,255,255,.10);color:#eafaff;
   /* ================= the floating toggle (the demo's #afRail pill) ================= */
   function lg(k,d){ try{ var v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }
   function st(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
-  function isOn(){ return lg('pc_mush','1')==='1'; }
+  /* [BRAND-WHIMSY-V1] The lexicon still RUNS when whimsy is off -- it must. Authored markup
+     contains mushroom-isms (the 'Open Fleet Flow' button authors a mushroom emoji) and MUSH2PRO
+     is what rewrites them in the professional direction. Gutting apply() would leave them on
+     screen, which is the trap rebranding this console has repeatedly walked into. Only the
+     ANSWER changes. */
+  function isOn(){ return pcWhimsyOn() && lg('pc_mush','1')==='1'; }
 
   var rail=null, pill=null;
   /* [UI-NO-PILL-V55] The floating pill is NOT built (operator ruling 2026-08-15: annoying;

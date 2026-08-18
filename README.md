@@ -1,4 +1,4 @@
-# Paracoding — v10.2
+# Paracoding — v10.4
 
 Paracoding is an agent platform that installs into **your own** Google Cloud project in one
 command. Agents propose. You commit. Then it builds the next version of itself.
@@ -289,6 +289,79 @@ override or disable them without cutting a new release: `PC_CLAUDE_APT_REPO`,
 install does not succeed the script does not pretend it did: it logs that "Claude" on that
 box means the Claude Code CLI plus a dedicated Chrome app window for claude.ai, and leaves
 you with those.
+
+## Which model the chat talks to, and over what
+
+Two providers, two transports each, and **Vertex is the default for both**. Nothing needs an API key
+to work.
+
+    Claude   Vertex (default)            <- rides the service's own identity, no key
+             api.anthropic.com           <- set CHAT_CLAUDE_PROVIDER=anthropic, needs a stored key
+    Gemini   Vertex (default)            <- token auth, no key
+             generativelanguage.google   <- set CHAT_GEMINI_PROVIDER=studio, needs a stored key
+
+Settings shows which one is live, per provider, in a line under each key box: what it resolved to,
+the region, the model, and -- when something is wrong -- the blocker and the one setting that moves
+you to the other transport. **An empty key box does not mean the chat is unconfigured.** On a
+default install it means Vertex is carrying it and no key is required. Read the line, not the box.
+
+**Region, and the global endpoint.** `CHAT_VERTEX_REGION` (default `us-east5`) picks where Claude is
+called; `CHAT_VERTEX_GEMINI_REGION` (default `global`) does the same for Gemini. Some published
+models are served ONLY on the global endpoint, and both providers now detect that and override the
+configured region rather than failing -- the override is logged with the model that caused it.
+
+That detection exists because the failure is deceptive. Asking a **regional** host for a
+**global-only** model does not 404. It answers:
+
+    HTTP 429 Quota exceeded ... base model: anthropic-claude-opus-5
+
+which reads as "ask Google for more quota", and the quota tables agree with that story, because
+`online_prediction_input_tokens_per_minute_per_base_model` enumerates REGIONAL buckets only and has
+no row for a model that is not served regionally. The model is fine, the quota is fine, and the
+endpoint is wrong. If you hit a 429 naming a base model, check the endpoint before you file a quota
+request.
+
+**Model ids.** `CHAT_API_OPUS` and `CHAT_API_SONNET` pin the two Claude entries. Genuinely stale ids
+(`claude-opus-4`, `claude-opus-4-1`, the whole `claude-opus-3` family) are still force-upgraded to
+`claude-opus-5` so old configuration cannot drag the chat backwards -- but only those. Newer members
+of the 4-x family are yours to pin, which matters because the regional quota a project actually has
+is often largest on those.
+
+## Themes, and changing how it looks
+
+The console ships six palettes -- purple (the default), green, orange, blue, dark and light --
+and you pick one in the console under Settings. Mushroom mode is on, as it always has been.
+
+**A palette is a list of values, not a code change.** Every colour the chrome uses reads a CSS
+custom property declared once in `control-plane/src/harness.html`, and a palette is a block that
+overrides the ones it wants:
+
+    html[data-theme="light"]{ --ink:#1a1c1c; --glass:rgba(255,255,255,.86); ... }
+
+Two things about that are worth knowing before you change any of it.
+
+**The hue is a token; the alpha stays where it is.** Colours that vary in transparency are written
+`rgba(var(--ink-rgb),.28)` rather than collapsed into one flat token. The accent glow appears at
+five different alphas in this file, the recessed surfaces at eight, and the ink at twenty-one.
+Collapsing each family to a single token is the obvious refactor and it silently restyles panel
+depth and border weight everywhere while looking like a no-op. Keep the split.
+
+**The logo is data too.** `--logo-filter`, `--logo-radius`, `--logo-fit-*`, `--logo-w-*`,
+`--logo-h-*`, `--logo-maxw` and `--logo-shadow-*` carry the treatment. The shipped mark is a 96x96
+square that the stock filter chain paints gold, so the defaults crop to a circle and recolour. If
+you drop in a wider lockup, say so in the tokens -- `--logo-filter:none`, `--logo-radius:0`,
+`--logo-w-hdr:auto`, `--logo-maxw:190px` -- rather than editing the rules. A finished asset handed
+to the stock defaults gets cropped to its first two letters and repainted.
+
+**Whimsy is a switch.** `window.PC_BRAND.whimsy = false` turns mushroom mode off and hides its
+four toggles, and it OVERRIDES the stored preference rather than seeding a default -- anyone who
+has ever clicked the toggle carries `pc_mush=1`, so changing only the default would leave it on
+for exactly the people who use it. The lexicon keeps running in the professional direction either
+way, because the authored markup contains mushroom-isms that it is what rewrites.
+
+Strings in the chrome are still authored in the document rather than read from data. Changing them
+means editing `harness.html`, and an install that does that is carrying a patch it will have to
+re-apply on upgrade.
 
 ## Using this from another agent client
 
