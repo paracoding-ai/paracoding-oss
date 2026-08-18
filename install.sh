@@ -36,12 +36,20 @@ PC_NO_ADOPT="${PC_NO_ADOPT:-0}"
 # name, immediately, with exit 2.
 PC_ARG_PROJECT=""
 PC_ARG_REGION=""
-PC_USAGE="usage: ./install.sh [--project ID] [--region REGION] [--no-adopt] [--plan]"
+# [WS-INSTALL-VM-V1] The workstation is BUILT by default now and --no-vm is the escape.
+# Operator ruling 2026-08-18: the console ships Start/Stop and Remote Desktop buttons, and a
+# button that cannot work until you go and run a second script is worse than no button. So the
+# default install produces a machine those controls actually drive. It is STOPPED when this
+# finishes, so the only standing cost is its 50 GB boot disk -- about $5/month at list, stated
+# at the step rather than discovered on a bill.
+PC_NO_VM="${PC_NO_VM:-0}"
+PC_USAGE="usage: ./install.sh [--project ID] [--region REGION] [--no-adopt] [--no-vm] [--plan]"
 while [ $# -gt 0 ]; do
   case "$1" in
     --rehearse|--stop-before-passkey) PC_REHEARSE=1; shift ;;
     --plan) PC_PLAN=1; shift ;;
     --no-adopt) PC_NO_ADOPT=1; shift ;;
+    --no-vm) PC_NO_VM=1; shift ;;
     --project) PC_ARG_PROJECT="${2:-}"; [ -n "$PC_ARG_PROJECT" ] || { echo "--project needs a project id"; exit 2; }; shift 2 ;;
     --project=*) PC_ARG_PROJECT="${1#--project=}"; shift ;;
     --region) PC_ARG_REGION="${2:-}"; [ -n "$PC_ARG_REGION" ] || { echo "--region needs a region"; exit 2; }; shift 2 ;;
@@ -189,12 +197,20 @@ die() {
 # [GCP-WS-OPTIONAL-NOT-FATAL-V76] A REFUSAL THAT IS NOT A FAILURE OF THE INSTALL.
 # die() is right for "this deployment is not safe to continue building". It is WRONG for
 # "one optional component cannot be built safely", which is a different sentence and used to
-# be spelled the same way -- an unbuildable workstation aborted the whole run at 5d/10 with
-# every earlier step's resources already created. pc_ws_warn() prints the identical text to
-# stderr with the same !! marker, so nothing about the WARNING is quieter or easier to miss,
-# and then RETURNS. It deliberately does NOT emit ##PCSTEP FAIL: the step did not fail, it
+# be spelled the same way -- an unbuildable workstation aborted the whole run with every
+# earlier step's resources already created. pc_ws_warn() prints the identical text to stderr
+# with the same !! marker, so nothing about the WARNING is quieter or easier to miss, and
+# then RETURNS. It deliberately does NOT emit ##PCSTEP FAIL: the step did not fail, it
 # declined, and a machine-readable FAIL on a step that goes on to complete is a lie to
 # whatever is parsing this transcript.
+#
+# [WS-LINUX-ONLY-V1 NOTE] IT HAS NO CALLER AS OF 10.1 AND IS KEPT ANYWAY, SAID PLAINLY HERE SO
+# THE NEXT READER DOES NOT GO LOOKING FOR ONE. The rule it encodes did not go away -- 9/10
+# runs workstation.sh as a subprocess and prints exactly this shape of message on a non-zero
+# exit without failing the install -- but that path is an `echo` in the step, not a call here.
+# Three other helpers went the same way when the workstation prompt was removed
+# (pc_ask_yn, pc_ask_choice, pc_confirm_word): defined, no longer called, harmless. Deleting
+# them is a separate change from the one this release is making, and is on the queue.
 pc_ws_warn() {
   printf '\n!! %s\n' "$*" >&2
 }
@@ -391,6 +407,14 @@ pc_derive_names() {
   CP_SA="pc-${PC_LP}${PC_TOK}control-plane@${PROJECT}.iam.gserviceaccount.com"
   GX_SA="pc-${PC_LP}${PC_TOK}gate-exec@${PROJECT}.iam.gserviceaccount.com"
   PC_SEC_SESSION="pc-${PC_LP}${PC_TOK}session-secret"
+  # [GH-SECRET-LANE-PREFIX-V1] The GitHub token slot is lane-namespaced like every other secret
+  # here, and for a reason that is not tidiness: two installs can share one GCP project, and an
+  # unprefixed github-token-<identity> would be ONE secret shared by both -- with each lane's
+  # installer granting its own service account read access to the other lane's GitHub
+  # credential. The control plane cannot see ${PC_LP}, so it reads this prefix from
+  # PC_GH_SECRET_PREFIX with the unprefixed name as its default, which is exactly what the
+  # lane-literal gate asks for.
+  PC_GH_SEC_PREFIX="pc-${PC_LP}${PC_TOK}github-token-"
   PC_SEC_CONFIRM="pc-${PC_LP}${PC_TOK}human-confirm-secret"
   PC_SEC_CREDS="pc-${PC_LP}${PC_TOK}webauthn-creds"
   PC_SEC_BOOT="pc-${PC_LP}${PC_TOK}bootstrap-secret"
@@ -718,8 +742,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="f90c62943af74154887395e9e9478db8af1c7596"
-PC_VERSION="10.0"
+PC_RELEASE="0efc8d20ecc15e20665774acfdaa9b582b6712ce"
+PC_VERSION="10.2"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -2126,6 +2150,58 @@ echo "  $PC_SEC_CREDS -> $GX_SA (secretAccessor, THAT SECRET ONLY; the control p
 echo "  not granted it, which is what makes verification in the executor mean anything)"
 echo "  It starts EMPTY. That is why 7/10 still ships PC_REQUIRE_ASSERTION=0: arming the"
 echo "  assertion check before a credential is enrolled refuses every approval."
+
+# [GH-TOKEN-PROVISION-V1] THE GITHUB TOKEN SLOT, CREATED EMPTY AND GRANTED HERE SO THE CONSOLE
+# PANEL WORKS THE FIRST TIME IT IS OPENED. Found the hard way on a live install: the Settings
+# panel verified a perfectly good token against GitHub and then failed to store it, because
+# writing a secret NAME THIS INSTALL HAD NEVER CREATED needs secrets.create, and the control
+# plane had only ever been granted read on the secrets this script makes. The operator got
+# "could not write the token to Secret Manager" and it took a diagnostic job to find out why.
+# Every adopter would have hit the same wall with nobody to diagnose it.
+#
+# THE GRANT IS ON THIS SECRET ONLY -- NOT PROJECT-WIDE secrets.create, WHICH WAS THE OBVIOUS
+# ALTERNATIVE AND IS THE WRONG ONE. Project-level create would let the control plane make (and
+# therefore own) any secret name in the project, which is precisely the blast radius the
+# operator asked to keep closed: "make sure it can not over write an existing x-wing key ... to
+# prevent some future attack using that to overwrite the data lake key locking me out of my own
+# data". Per-secret bindings mean the widened credential reaches exactly one name. A second
+# identity is one command, printed below, rather than a standing power to create anything.
+#
+# CREATED WITH AN EMPTY PAYLOAD, like the enrolment secret above: the tools read "no version" as
+# "no token stored yet" and say so. An empty slot is an honest state; a missing secret is an error
+# nobody can act on.
+if gcloud secrets describe "${PC_GH_SEC_PREFIX}default" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "  ${PC_GH_SEC_PREFIX}default exists, left alone"
+else
+  : > "$HERE/.g.tmp"
+  PC_GH_RC=0
+  retry gcloud secrets create "${PC_GH_SEC_PREFIX}default" --replication-policy=automatic \
+    --data-file="$HERE/.g.tmp" --project "$PROJECT" >/dev/null || PC_GH_RC=$?
+  rm -f "$HERE/.g.tmp"
+  if [ "$PC_GH_RC" -ne 0 ]; then
+    pc_ws_warn "could not create ${PC_GH_SEC_PREFIX}default (exit $PC_GH_RC). The install is FINE
+and nothing else depends on it -- the GitHub tools simply have nowhere to store a token, and the
+console will say so when you try. Create it and grant it later with the two commands printed at
+the end of this step."
+  else
+    echo "  ${PC_GH_SEC_PREFIX}default created (empty -- no token stored yet)"
+  fi
+fi
+retry gcloud secrets add-iam-policy-binding "${PC_GH_SEC_PREFIX}default" --member="serviceAccount:$CP_SA" \
+  --role=roles/secretmanager.secretAccessor --project "$PROJECT" >/dev/null 2>&1 \
+  || pc_ws_warn "could not grant $CP_SA secretAccessor on ${PC_GH_SEC_PREFIX}default; the GitHub
+tools will refuse with that reason until it is granted."
+retry gcloud secrets add-iam-policy-binding "${PC_GH_SEC_PREFIX}default" --member="serviceAccount:$CP_SA" \
+  --role=roles/secretmanager.secretVersionAdder --project "$PROJECT" >/dev/null 2>&1 \
+  || pc_ws_warn "could not grant $CP_SA secretVersionAdder on ${PC_GH_SEC_PREFIX}default; the
+console will verify a token against GitHub and then fail to store it."
+echo "  ${PC_GH_SEC_PREFIX}default -> $CP_SA (secretAccessor + secretVersionAdder, THAT SECRET"
+echo "  ONLY -- not project-wide secrets.create, so this grant can never reach another key)"
+echo "  Paste a token at the console: Settings -> API keys -> GitHub. For a SECOND identity"
+echo "  (a work account beside a personal one), create its slot the same way:"
+echo "      gcloud secrets create ${PC_GH_SEC_PREFIX}<identity> --replication-policy=automatic --project $PROJECT"
+echo "      gcloud secrets add-iam-policy-binding ${PC_GH_SEC_PREFIX}<identity> --member=serviceAccount:$CP_SA --role=roles/secretmanager.secretAccessor --project $PROJECT"
+echo "      gcloud secrets add-iam-policy-binding ${PC_GH_SEC_PREFIX}<identity> --member=serviceAccount:$CP_SA --role=roles/secretmanager.secretVersionAdder --project $PROJECT"
 # [SEC-MACFREE-INSTALL-V1] pc-approval-mac-key IS NOT CREATED AND NOT GRANTED HERE AT ALL.
 # It used to be created and handed to both services, and the grant to $GX_SA is precisely
 # what made the executor a signing oracle for its own approvals. gate-exec has read no
@@ -3156,7 +3232,7 @@ fi
 # passkey is bound to that host. Everything else is identical by construction.
 retry gcloud run deploy "$CP_SVC" --source "$HERE/control-plane" --region "$REGION" --project "$PROJECT" \
   --service-account "$CP_SA" --allow-unauthenticated --clear-base-image --quiet \
-  --set-env-vars "PC_SURFACE=console,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV" \
+  --set-env-vars "PC_SURFACE=console,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV" \
   --set-secrets "WA_SESSION_SECRET=${PC_SEC_SESSION}:latest" \
   >/dev/null || die "console deploy failed"
 echo "  console deployed"
@@ -3176,7 +3252,7 @@ that image serves no /mcp at all."
 echo "  image $PC_IMAGE"
 retry gcloud run deploy "$MC_SVC" --image "$PC_IMAGE" --region "$REGION" --project "$PROJECT" \
   --service-account "$CP_SA" --allow-unauthenticated --quiet \
-  --set-env-vars "PC_SURFACE=mcp,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV" \
+  --set-env-vars "PC_SURFACE=mcp,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV" \
   --set-secrets "WA_SESSION_SECRET=${PC_SEC_SESSION}:latest" \
   >/dev/null || die "MCP service deploy failed"
 echo "  mcp deployed from the same image"
@@ -4730,7 +4806,7 @@ try:
                     "idempotence: a re-install adopts the repository rather than overwriting "
                     "whatever you have committed since.")
             else:
-                _sf = []
+                _sf, _sbin = [], []
                 for _r, _ds, _fs2 in os.walk(_seed_here):
                     _ds[:] = sorted(_d for _d in _ds
                                     if _d not in PC_SEED_SKIP and not _d.startswith("."))
@@ -4738,12 +4814,31 @@ try:
                         if _fn.startswith("."):
                             continue
                         _p = os.path.join(_r, _fn)
+                        _rel0 = os.path.relpath(_p, _seed_here).replace(os.sep, "/")
                         try:
                             _txt = open(_p, encoding="utf-8").read()
                         except Exception:
+                            # [SEC-SEED-BINARY-V1] THIS `continue` USED TO BE THE WHOLE STORY,
+                            # AND IT IS WHY A FRESHLY INSTALLED REPOSITORY COULD NOT BUILD.
+                            # Every file was read as UTF-8 and anything that failed to decode
+                            # was dropped -- SILENTLY, with no line in the log and no entry in
+                            # the refusal list two lines below, which reports the other reason
+                            # a file can be skipped. The ten binary assets are exactly those
+                            # files: control-plane/src/brand/ (5) and src/wiki-assets/ (5).
+                            # The Dockerfile hard-asserts all ten with `test -s` BEFORE esbuild
+                            # runs, so an image built from the seeded repository died on that
+                            # assertion every time, and the CI lane -- which builds from a
+                            # bundle of the pushed tree -- was dead on arrival for the same
+                            # reason. install.sh itself deploys from its own extracted tree,
+                            # which is the only reason any working revision ever existed and
+                            # the only reason this went unnoticed. It also quietly falsified
+                            # the charter line "source in the repository, build reads the
+                            # repository". Binaries now ride the upload path instead.
+                            _sbin.append((_rel0, _p))
                             continue
-                        _sf.append((os.path.relpath(_p, _seed_here).replace(os.sep, "/"), _txt))
+                        _sf.append((_rel0, _txt))
                 _sf.sort()
+                _sbin.sort()
 
                 def _seed_chunks(_tx, _bud):
                     _ls = _tx.splitlines(True)
@@ -4783,6 +4878,14 @@ try:
                         _acc = _acc + _nx
                 if _batch:
                     _steps.append(("propose", _batch))
+                # [SEC-SEED-BINARY-V1] Binaries go LAST and in small groups, and the upload
+                # happens inside the step rather than here. POST /git/blob hands back an oid
+                # that resolves only while the upload is unexpired -- roughly twenty minutes --
+                # and a full seed is 78 sequential round trips, so uploading everything up
+                # front would race the clock and fail at the far end with an oid that no longer
+                # resolves. Uploading immediately before the propose that names it cannot.
+                for _bi in range(0, len(_sbin), 4):
+                    _steps.append(("binprop", _sbin[_bi:_bi + 4]))
 
                 _serr = ""
                 if _nofit:
@@ -4809,7 +4912,43 @@ try:
                     _smsg = ("seed the shipped release tree into the repository, part "
                              + str(_i + 1) + " of " + str(len(_steps))
                              + " -- written by install.sh 8b/10")
-                    if _s[0] == "propose":
+                    if _s[0] == "binprop":
+                        _bents, _berr = [], ""
+                        for _brel, _bpath in _s[1]:
+                            try:
+                                _bb = open(_bpath, "rb").read()
+                                _breq = urllib.request.Request(
+                                    MC + "/git/blob", data=_bb, method="POST")
+                                _breq.add_header("Authorization", "Bearer " + KEY)
+                                _breq.add_header("Content-Type", "application/octet-stream")
+                                with urllib.request.urlopen(_breq, timeout=90) as _br:
+                                    _bj = json.loads(_br.read().decode())
+                                if not _bj.get("blobOid"):
+                                    _berr = _brel + ": upload returned no blobOid"
+                                    break
+                                # The oid is ASSERTED, not trusted: sha256 is recomputed here
+                                # and the server refuses the propose if the bytes it recorded
+                                # differ. A silently wrong asset is the failure this whole
+                                # change exists to end, so it is not swapped for a quieter one.
+                                _bsha = hashlib.sha256(_bb).hexdigest()
+                                if _bj.get("sha256") and _bj.get("sha256") != _bsha:
+                                    _berr = (_brel + ": server recorded sha256 "
+                                             + str(_bj.get("sha256"))[:16] + ", local is "
+                                             + _bsha[:16])
+                                    break
+                                _bents.append({"path": _brel,
+                                               "uploaded": {"blob_oid": _bj["blobOid"],
+                                                            "sha256": _bsha}})
+                            except Exception as _be:
+                                _berr = _brel + ": " + str(_be)[:160]
+                                break
+                        if _berr:
+                            _serr = ("a binary asset could not be uploaded, so the repository "
+                                     "would not build from a checkout: " + _berr)
+                            break
+                        st, f = call("git_propose", {"branch": "main", "files": _bents,
+                                                     "message": _smsg})
+                    elif _s[0] == "propose":
                         st, f = call("git_propose", {"branch": "main", "files": _s[1],
                                                      "message": _smsg})
                     else:
@@ -5345,6 +5484,203 @@ echo "  - the data lake and the git object store, deliberately and permanently."
 # wants that posture. WA_SESSION_SECRET is still minted at 4/10 for exactly that reason.
 # --rehearse is still ACCEPTED so existing harnesses keep working, but it no longer stops early:
 # there is no longer a human step for it to stop above.
+say "9/10 the workstation VM (built here, left STOPPED)"
+# [WS-INSTALL-VM-V1] IT CALLS workstation.sh RATHER THAN RE-INLINING IT. v9.0 took 2,377 lines
+# of workstation code OUT of this installer for good reasons that all still hold; putting them
+# back would undo that. The script ships in the same tarball, it already knows how to adopt an
+# existing box, and passing --project/--region means it never reaches its own prompt. One
+# behaviour, one place, and workstation.sh stays independently runnable.
+#
+# WHY THE VM IS STOPPED AT THE END AND NOT LEFT RUNNING. A running e2-standard-4 bills for
+# every hour. The reason to build it during the install is that the console's Start/Stop and
+# Remote Desktop controls are useless without a machine to point at -- not that anybody needs
+# it running the moment the installer exits. So it is created, provisioned, and stopped: the
+# buttons work, and the meter is not running.
+#
+# AN OPTIONAL COMPONENT MUST NOT BE ABLE TO FAIL THE RUN. Everything below is warn-and-continue
+# for the same reason 5d/10 was: by this point Firestore, three service accounts, every secret,
+# both Cloud Run URLs, the KMS keys and all three buckets exist. A VM that could not be built
+# is a missing convenience, not a failed install, and it says so rather than dying.
+if [ "$PC_NO_VM" = 1 ]; then
+  echo "  --no-vm: skipped. Nothing created and nothing billed."
+  echo "  The console's Start VM and Remote Desktop buttons stay disabled until one exists."
+  echo "  Build it later with:  ./workstation.sh --project $PROJECT --region $REGION"
+else
+  PC_WSI_NAME="paracoding-${PC_LP}${PC_TOK}workstation-linux"
+  if [ ! -f "$HERE/workstation.sh" ]; then
+    echo "  SKIPPED: workstation.sh is not beside this installer, so there is nothing to run."
+    echo "  The install is fine; the VM controls will stay disabled until you build one."
+  else
+    echo "  building $PC_WSI_NAME via workstation.sh -- this takes a few minutes"
+    PC_WSI_RC=0
+    bash "$HERE/workstation.sh" --project "$PROJECT" --region "$REGION" || PC_WSI_RC=$?
+    PC_WSI_ZONE=$(gcloud compute instances list --project "$PROJECT" \
+      --filter="name=($PC_WSI_NAME)" --format='value(zone)' 2>/dev/null | sed -n '1p')
+    if [ "$PC_WSI_RC" != 0 ] || [ -z "$PC_WSI_ZONE" ]; then
+      echo "  THE WORKSTATION WAS NOT BUILT (workstation.sh exit $PC_WSI_RC). THE INSTALL IS NOT"
+      echo "  FAILED BY THIS and nothing else depends on it. Re-run when you want one:"
+      echo "      ./workstation.sh --project $PROJECT --region $REGION"
+    else
+      echo "  built: $PC_WSI_NAME in $PC_WSI_ZONE"
+      # THE CONSOLE CANNOT POWER A MACHINE IT HAS NO ROLE ON, and this is the grant that was
+      # missing until now: the control-plane identity carries no compute role at project level,
+      # so /api/vm/start answered a refusal and the console showed a Start button that could
+      # not work. The grant is INSTANCE-SCOPED and custom -- start/stop/get on ONE VM -- rather
+      # than roles/compute.instanceAdmin.v1 at project level, which would be power over every
+      # instance in the project to serve two buttons. Anyone auditing the project policy will
+      # therefore see no compute role on this identity and must read the INSTANCE policy; that
+      # is deliberate, and it is written here so the next reader does not call it an omission.
+      # A CUSTOM ROLE ID IS [a-zA-Z0-9_.] ONLY -- NO DASHES -- and both PC_LP and PC_TOK carry
+      # a trailing dash by construction. Composing the id from them raw produces a name gcloud
+      # refuses, so every non-alphanumeric is stripped here. Empty is fine: an untokenized,
+      # unlaned install just gets pcVmPower, which is what a single install has always been.
+      PC_VMROLE="pcVmPower$(printf '%s%s' "$PC_LP" "$PC_TOK" | tr -cd '"'"'[:alnum:]'"'"')"
+      if ! gcloud iam roles describe "$PC_VMROLE" --project "$PROJECT" >/dev/null 2>&1; then
+        retry gcloud iam roles create "$PC_VMROLE" --project "$PROJECT" \
+          --title="Paracoding workstation power" \
+          --description="Start, stop and read ONE workstation instance. Bound on the instance, not the project." \
+          --permissions=compute.instances.start,compute.instances.stop,compute.instances.get,compute.instances.list \
+          --stage=GA >/dev/null 2>&1 || echo "  note: could not create the custom role $PC_VMROLE"
+      fi
+      retry gcloud compute instances add-iam-policy-binding "$PC_WSI_NAME" \
+        --zone "$PC_WSI_ZONE" --project "$PROJECT" \
+        --member="serviceAccount:$CP_SA" --role="projects/$PROJECT/roles/$PC_VMROLE" \
+        >/dev/null 2>&1 \
+        && echo "  $CP_SA -> start/stop on $PC_WSI_NAME ONLY (instance-scoped, custom role)" \
+        || echo "  note: the VM power binding did not land; Start/Stop will refuse until it does"
+      # WS_VM AND WS_ZONE ARE THE PAIR THAT TURNS THE BUTTONS ON, and until this release the
+      # installer created a machine and then only PRINTED the commands that would set them --
+      # so /api/vm/status answered 503 on every poll and the console showed a hardcoded red
+      # light it had never measured. Set on BOTH surfaces: the console serves the buttons, and
+      # the MCP service is where the vm_* tools register.
+      for _pc_vsvc in "$CP_SVC" "$MC_SVC"; do
+        retry gcloud run services update "$_pc_vsvc" --region "$REGION" --project "$PROJECT" \
+          --update-env-vars "WS_VM=$PC_WSI_NAME,WS_ZONE=$PC_WSI_ZONE" >/dev/null 2>&1 \
+          || echo "  note: could not set WS_VM/WS_ZONE on $_pc_vsvc"
+      done
+      echo "  WS_VM/WS_ZONE set on $CP_SVC and $MC_SVC -- the vm_* tools and the console"
+      echo "  Start/Stop and Remote Desktop buttons are live."
+      # ================= [SEC-CDP-NIC0-GATED-V1] the browser tools, wired =================
+      # THE BRIDGE BINDS LOOPBACK UNTIL THIS BLOCK PROVES IT DOES NOT HAVE TO. cdp-bridge.py
+      # ships bound to 127.0.0.1 and says why: nic0 is only safe where a rule SUBTRACTS the
+      # default network's own default-allow-internal (priority 65534, tcp 0-65535, source
+      # 10.128.0.0/9, no target tags), and an ALLOW cannot subtract on GCP -- only a
+      # higher-priority DENY can. Without that, nic0 means every VM in the project may open
+      # the bridge. So the pair is created here, READ BACK, and only then is the instance
+      # told it may bind nic0.
+      #
+      #   DENY  tcp:8025  priority 900  target-tag <host>   source 0.0.0.0/0
+      #   ALLOW tcp:8025  priority 800  target-tag <host>   source-tag <client>
+      #
+      # Lower number wins, so the ALLOW is the hole and the DENY is everything else. The
+      # client tag rides on the MCP service's Direct VPC egress (--network-tags), which is
+      # what lets a firewall rule name Cloud Run traffic at all.
+      #
+      # DIRECT VPC EGRESS, NOT A SERVERLESS VPC ACCESS CONNECTOR. The connector bills for its
+      # own instances; Direct VPC egress does not, and the operator asked for the free path.
+      PC_CDP_OK=0
+      # SAME TRAP AS WS_SA, SAME FIX: PC_WS_NETTAG is composed inside WS_LIB, which lives in
+      # workstation.sh and not here. Reading it would be unbound under `set -u`. Composed from
+      # the same parts, through the same tr, so the two spellings cannot drift.
+      PC_CDP_TAG_H=$(printf '%s' "pc-${PC_LP}${PC_TOK}cdp-host" | tr -cd '[:alnum:]-')
+      PC_CDP_TAG_C=$(printf '%s' "pc-${PC_LP}${PC_TOK}cdp-client" | tr -cd '[:alnum:]-')
+      PC_CDP_SEC="pc-${PC_LP}${PC_TOK}cdp-token"
+      PC_CDP_FW_D="pc-${PC_LP}${PC_TOK}cdp-deny"
+      PC_CDP_FW_A="pc-${PC_LP}${PC_TOK}cdp-allow"
+      # THE TOKEN IS MINTED HERE AND LIVES IN ONE SECRET. Not metadata -- compute.instances.get
+      # returns metadata in full to any project viewer -- and not a value pasted by hand. Both
+      # ends read the same secret under its own IAM: the VM may READ it, the two Cloud Run
+      # services may READ it, and nothing else is granted anything on it.
+      if ! gcloud secrets describe "$PC_CDP_SEC" --project "$PROJECT" >/dev/null 2>&1; then
+        retry gcloud secrets create "$PC_CDP_SEC" --replication-policy=automatic \
+          --project "$PROJECT" >/dev/null 2>&1 || true
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' \
+          | gcloud secrets versions add "$PC_CDP_SEC" --data-file=- --project "$PROJECT" \
+            >/dev/null 2>&1 || true
+      fi
+      # THE WORKSTATION SA IS RECOMPOSED HERE, NOT INHERITED. WS_SA is declared inside WS_LIB,
+      # which this installer does NOT carry -- v9.0 moved that library into workstation.sh
+      # alone. Referencing it here would be an unbound variable under `set -u`, which aborts
+      # the run; the name is composed from the same three parts workstation.sh uses. There is
+      # no MC_SA: both Cloud Run surfaces are one image running as $CP_SA.
+      PC_CDP_WSSA="pc-${PC_LP}${PC_TOK}workstation@${PROJECT}.iam.gserviceaccount.com"
+      for _pc_cdpsa in "$PC_CDP_WSSA" "$CP_SA"; do
+        [ -n "$_pc_cdpsa" ] || continue
+        retry gcloud secrets add-iam-policy-binding "$PC_CDP_SEC" --project "$PROJECT" \
+          --member="serviceAccount:$_pc_cdpsa" --role=roles/secretmanager.secretAccessor \
+          --condition=None >/dev/null 2>&1 || true
+      done
+      if ! gcloud compute firewall-rules describe "$PC_CDP_FW_D" --project "$PROJECT" >/dev/null 2>&1; then
+        retry gcloud compute firewall-rules create "$PC_CDP_FW_D" --project "$PROJECT" \
+          --network default --direction INGRESS --priority 900 --action DENY \
+          --rules tcp:8025 --source-ranges 0.0.0.0/0 --target-tags "$PC_CDP_TAG_H" \
+          --description "Subtracts default-allow-internal for the CDP bridge. Everything is refused except the ALLOW at 800." \
+          >/dev/null 2>&1 || true
+      fi
+      if ! gcloud compute firewall-rules describe "$PC_CDP_FW_A" --project "$PROJECT" >/dev/null 2>&1; then
+        retry gcloud compute firewall-rules create "$PC_CDP_FW_A" --project "$PROJECT" \
+          --network default --direction INGRESS --priority 800 --action ALLOW \
+          --rules tcp:8025 --source-tags "$PC_CDP_TAG_C" --target-tags "$PC_CDP_TAG_H" \
+          --description "The only hole in the CDP DENY: the MCP service's Direct VPC egress, by network tag." \
+          >/dev/null 2>&1 || true
+      fi
+      # READ BOTH BACK. This is the measurement the bridge's bind decision rests on, so it is
+      # a read of what EXISTS rather than the exit code of what was attempted -- a create that
+      # raced another run, or was refused, must not be reported as a rule that is protecting
+      # anything.
+      if gcloud compute firewall-rules describe "$PC_CDP_FW_D" --project "$PROJECT" >/dev/null 2>&1 \
+         && gcloud compute firewall-rules describe "$PC_CDP_FW_A" --project "$PROJECT" >/dev/null 2>&1; then
+        PC_CDP_OK=1
+      fi
+      if [ "$PC_CDP_OK" = 1 ]; then
+        retry gcloud compute instances add-metadata "$PC_WSI_NAME" --zone "$PC_WSI_ZONE" \
+          --project "$PROJECT" \
+          --metadata "pc-cdp-bind=nic0,pc-cdp-secret=$PC_CDP_SEC" >/dev/null 2>&1 || PC_CDP_OK=0
+      fi
+      if [ "$PC_CDP_OK" = 1 ]; then
+        # THE MCP SERVICE ONLY. The browser tools register on the MCP surface; the console has
+        # no use for VPC egress and giving it a path into the subnet would be reach nothing
+        # asked for.
+        retry gcloud run services update "$MC_SVC" --region "$REGION" --project "$PROJECT" \
+          --network default --subnet default --vpc-egress private-ranges-only \
+          --network-tags "$PC_CDP_TAG_C" \
+          --update-env-vars "WS_CDP_PORT=8025" \
+          --update-secrets "CDP_TOKEN=$PC_CDP_SEC:latest" >/dev/null 2>&1 || PC_CDP_OK=0
+      fi
+      if [ "$PC_CDP_OK" = 1 ]; then
+        echo "  BROWSER TOOLS WIRED: browser_tabs, browser_open and browser_navigate register"
+        echo "  on $MC_SVC. The bridge binds nic0 behind DENY $PC_CDP_FW_D (900) with one hole,"
+        echo "  ALLOW $PC_CDP_FW_A (800), whose source is this service's egress tag. The token"
+        echo "  is in Secret Manager as $PC_CDP_SEC and is not in instance metadata."
+      else
+        echo "  BROWSER TOOLS NOT WIRED, and they are WITHHELD rather than registered broken."
+        echo "  One of the firewall pair, the metadata write or the service update did not"
+        echo "  land. WS_CDP_PORT is unset, so index.ts does not register the three tools --"
+        echo "  which is the designed state, not a failure of this install. The bridge stays"
+        echo "  on loopback and is reachable over the IAP tunnel exactly as before."
+      fi
+      # ================= end browser tools =================
+      # STOP IT. Read the state back rather than trusting the stop command: an instance that
+      # is still RUNNING because the call was refused is the one outcome that costs money
+      # quietly, so it is measured and said either way.
+      gcloud compute instances stop "$PC_WSI_NAME" --zone "$PC_WSI_ZONE" --project "$PROJECT" \
+        --quiet >/dev/null 2>&1 || true
+      PC_WSI_STATE=$(gcloud compute instances describe "$PC_WSI_NAME" --zone "$PC_WSI_ZONE" \
+        --project "$PROJECT" --format='value(status)' 2>/dev/null | sed -n '1p')
+      case "$PC_WSI_STATE" in
+        TERMINATED|STOPPED|SUSPENDED)
+          echo "  STOPPED ($PC_WSI_STATE). It bills only for its boot disk until you start it." ;;
+        STOPPING)
+          echo "  STOPPING. It will settle in a minute; nothing else waits on it." ;;
+        *)
+          echo "  !! STILL $PC_WSI_STATE -- the stop did not take, and a running e2-standard-4"
+          echo "  !! bills by the hour. Stop it with:"
+          echo "  !!   gcloud compute instances stop $PC_WSI_NAME --zone $PC_WSI_ZONE --project $PROJECT" ;;
+      esac
+    fi
+  fi
+fi
+
 say "10/10 self-test"
 # [SEC-FAILSTATE-PERCHECK-V1] THE FAILURE STATE IS PER-CHECK NOW, AND THE SUMMARY NAMES IT.
 # `FAIL=$PC_FUNC_FAIL` seeded a COUNTER out of 8b/10 and the closing line printed that counter
