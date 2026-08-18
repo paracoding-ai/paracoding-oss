@@ -39,6 +39,10 @@
   .vmlight.on{color:#4df5b0;background:#4df5b0}
   .vmlight.off{color:#ff8f86;background:#ff8f86}
   .vmlight.prov{color:rgba(255,255,255,.4);background:rgba(255,255,255,.4);box-shadow:none}
+  /* [GCP-VMBTN-ACTS-V1] Where a refused start/stop is SAID. It has no resting appearance -- it is
+     display:none until vmNote() is given a reason, so the header is unchanged when the VM is
+     behaving and carries the Compute status code when it is not. */
+  .vmerr{max-width:22rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.68rem;font-weight:700;color:#ffd9d4;background:rgba(192,57,43,.30);border:1px solid rgba(255,143,134,.45);border-radius:999px;padding:.18rem .5rem;align-self:center}
   .divb{width:1px;height:22px;background:var(--glass-line);align-self:center;margin:0 .15rem}
   .startb{border-color:rgba(120,255,190,.55)!important;background:rgba(60,200,140,.22)!important}
   .stopb{border-color:rgba(255,150,140,.55)!important;background:rgba(200,80,80,.22)!important}
@@ -182,6 +186,7 @@
     <div class="rt">
       <span class="vmlight off" id="vmLight" title="VM stopped"></span>
       <button class="hbtn startb" id="vmBtn" onclick="toggleVM()">▶ Start VM</button>
+      <span class="vmerr" id="vmErr" style="display:none"></span>
       <span class="divb"></span>
       <button class="hbtn" id="rdpBtn2" onclick="window.open('https://remotedesktop.google.com/access','_blank','noopener')" title="Chrome Remote Desktop (new tab)">🖥️ Remote Desktop</button>
       <button class="hbtn" onclick="window.open('/dash','pcdash')">📊 Dashboard</button>
@@ -265,6 +270,21 @@
     <div class="kfield" style="opacity: 0.7"><label><span class="dotc dotGemini"></span> Gemini (Google AI) <span class="tag" id="tagGemini">—</span></label>
       <div class="row"><input id="inGemini" type="password" placeholder="No static key needed (token auth)" disabled><button class="save" disabled>Token</button></div>
       <div class="hint">Token-only via Vertex AI OAuth.</div></div>
+    <!-- [GH-TOOLS-V1] GITHUB LIVES HERE, WITH THE OTHER CREDENTIALS, AND IT IS STATIC MARKUP.
+         It was first built as a section of the dashboard Settings panel and the operator could
+         not find it, which is two separate defects worth naming. (1) WRONG PLACE: this console
+         has exactly one surface a person opens to paste a credential and it is this modal; the
+         dashboard panel is theme and strain status, behind a rail nobody opens looking for a
+         token. (2) WRONG CONSTRUCTION: that section was built by an async function whose result
+         was appended inside a try/catch, so ANY error inside it -- a failed fetch, a missing
+         field -- removed the entire feature from the page with no message and nothing to debug.
+         A catch that hides a whole feature is worse than the error it swallowed. Static markup
+         cannot vanish: the inputs are always present, and only the STATUS line depends on a
+         fetch, degrading to a dash if that fetch fails. -->
+    <div class="kfield"><label><span class="dotc" id="dotGithub" style="background:#8b93a7"></span> GitHub <span class="tag" id="tagGithub">not set</span></label>
+      <div class="row"><input id="inGhId" type="text" placeholder="identity" value="default" style="max-width:9rem"><input id="inGithub" type="password" placeholder="fine-grained token (github_pat_... )"><button class="save" onclick="saveGithub()">Save</button></div>
+      <div class="hint">Create at github.com/settings/personal-access-tokens: fine-grained, only the repositories you mean, <b>Contents: read and write</b>. Verified against GitHub before it is stored, then written to Secret Manager and never shown again. A second identity (e.g. <b>work</b>) is stored alongside the first rather than replacing it.</div>
+      <div class="hint" id="ghState">&mdash;</div></div>
     <button class="close" onclick="closeKeys()">Done</button>
   </div></div>
 <script>
@@ -273,19 +293,106 @@
   const esc=s=>String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
   function ago(ms){ if(!ms)return''; const m=Math.max(0,Math.round((Date.now()-ms)/60000)); if(m<1)return'now'; if(m<60)return m+'m'; const h=Math.round(m/60); if(h<24)return h+'h'; return Math.round(h/24)+'d'; }
   async function api(path,opts){ const r=await fetch(path,Object.assign({credentials:'include'},opts||{})); if(!r.ok){ let _b=null; try{_b=await r.json();}catch(e){} throw {status:r.status, body:_b}; } return r.json(); }
-  let vmRunning=false, vmProvisioned=true, vmStarting=false, vmStartAt=0;
+  /* [GCP-VMLIGHT-HONEST-V1] vmKnown starts FALSE. The old pair (vmRunning=false, vmProvisioned=true)
+     were the literals every failed poll fell back to, so a console that had never once
+     reached /api/vm/status displayed a confident red 'VM stopped'. Never-measured is now a
+     distinct state from measured-and-stopped. */
+  /* [GCP-VMBTN-ACTS-V1] THE BUTTON NOW ACTS ON THE INSTANCE, AND SAYS SO WHEN IT CANNOT.
+     Operator report 2026-08-17: "clicking it changes from stop to start red to green but
+     nothing happens to vm". Measured before rewriting -- Cloud Logging on
+     paracoding-control-plane over the click window carried /api/vm/status polls and NOT ONE
+     /api/vm/start or /api/vm/stop. The click was never leaving the page. Three separate
+     defects, all of which had to go:
+       1. DEMO. loadFleet() sets DEMO=true on ANY failure of /api/fleet/agents, and toggleVM
+          then took a branch that mutated vmRunning locally and returned. A transient list
+          fetch therefore silently converted the VM control into a light switch wired to
+          nothing -- exactly the reported symptom, and invisible because the light still moved.
+          The VM control no longer consults DEMO at all: there is no offline VM to pretend at,
+          so a pretend VM is only ever a lie about production.
+       2. catch(e){}. /api/vm/start returns 200 with {ok:false,http:403} when Compute refuses
+          the control-plane identity, and throws on a 503 from the unconfigured-workstation
+          gate. Both were swallowed, and stop went further -- it set vmRunning=false and
+          repainted BEFORE the server had answered, so the UI asserted the outcome it wanted.
+          Nothing is assumed now: the light only ever follows what /api/vm/status measured, and
+          a refusal is put on screen with its reason.
+       3. No transition state. Compute reports STAGING/STOPPING for tens of seconds; the old
+          paint knew only running/stopped, so the button stayed live and invited the re-click
+          the operator asked to prevent. Moving is now its own state, the button is disabled
+          throughout, and the poll runs at 2.5s while moving instead of 8s. */
+  let vmRunning=false, vmProvisioned=true, vmKnown=false;
+  let vmState='', vmWant='', vmBusyUntil=0, vmFastTid=0, vmDeadUntil=0;
+  /* Every Compute status that is NOT a resting state. SUSPENDED and TERMINATED are resting
+     (stopped); REPAIRING is Compute moving the instance without being asked. */
+  const VM_MOVING={PROVISIONING:1,STAGING:1,STOPPING:1,SUSPENDING:1,REPAIRING:1};
+  function vmMoving(){ return !!VM_MOVING[vmState] || Date.now()<vmBusyUntil; }
+  function vmNote(msg){ const e=$('vmErr'); if(!e) return;
+    if(!msg){ e.style.display='none'; e.textContent=''; e.removeAttribute('title'); return; }
+    e.style.display=''; e.textContent=msg; e.title=msg; console.error('[vm] '+msg); }
+  /* A thrown api() error carries {status, body}; a 200 with ok:false carries the reason in the
+     body. Both are turned into one sentence that names the verb, the code and the server's own
+     detail -- 'VM start failed (403)' is actionable, a green light is not. */
+  function vmWhy(act,st,body){
+    let m='VM '+act+' failed'+(st?' ('+st+')':'');
+    const d=body&&(body.detail||body.error||(body.http?('Compute answered HTTP '+body.http):''));
+    return d?(m+': '+d):m; }
   function paintVM(){ const l=$('vmLight'),b=$('vmBtn'),r=$('rdpBtn'),r2=$('rdpBtn2');
-    var rdpOn=!!vmRunning; if(r) r.disabled=!rdpOn; if(r2) r2.disabled=!rdpOn;
-    if(!vmProvisioned){ l.className='vmlight prov'; l.title='not provisioned'; b.textContent='▶ Start VM'; b.disabled=true; b.className='hbtn startb'; if(r)r.disabled=true; if(r2)r2.disabled=true; return; }
-    if(vmStarting && !vmRunning){ l.className='vmlight starting'; l.title='booting'; b.innerHTML='<span class="btnspin"></span>Booting\u2026'; b.disabled=true; b.className='hbtn startb'; if(r)r.disabled=true; if(r2)r2.disabled=true; return; }
-    if(vmRunning){ l.className='vmlight on'; l.title='VM running'; b.textContent='⏹ Stop VM'; b.className='hbtn stopb'; b.disabled=false; }
-    else{ l.className='vmlight off'; l.title='VM stopped'; b.textContent='▶ Start VM'; b.className='hbtn startb'; b.disabled=false; } }
+    function rdp(on){ if(r) r.disabled=!on; if(r2) r2.disabled=!on; }
+    if(!vmKnown){ l.className='vmlight prov'; l.title='VM state unknown -- /api/vm/status did not answer'; b.textContent='▶ Start VM'; b.disabled=true; b.className='hbtn startb'; rdp(false); return; }
+    if(!vmProvisioned){ l.className='vmlight prov'; l.title='not provisioned'; b.textContent='▶ Start VM'; b.disabled=true; b.className='hbtn startb'; rdp(false); return; }
+    if(vmMoving()){
+      const stopping=(vmWant==='stop')||vmState==='STOPPING'||vmState==='SUSPENDING';
+      l.className='vmlight starting'; l.title=(stopping?'stopping':'booting')+(vmState?' ('+vmState+')':'');
+      b.innerHTML='<span class="btnspin"></span>'+(stopping?'Stopping…':'Booting…');
+      b.disabled=true; b.className='hbtn '+(stopping?'stopb':'startb'); rdp(false); return; }
+    /* [GCP-VMBTN-ACTS-V1] A REFUSAL ALSO EARNS A COOLDOWN, but a SHORT one and a HONEST one. Left to
+       itself the failure path re-enabled the button the instant the error came back, and a
+       measured seven clicks in under a second each fired their own Compute call -- retry
+       pressure aimed at an API that had just said no. The button is held for four seconds, and
+       it is held in the RESTING look (red light, 'Start VM') rather than the moving one,
+       because nothing is moving: the pill next to it carries the reason. */
+    const dead=Date.now()<vmDeadUntil;
+    if(dead) setTimeout(paintVM, Math.max(60, vmDeadUntil-Date.now()));
+    if(vmRunning){ l.className='vmlight on'; l.title='VM running'; b.textContent='⏹ Stop VM'; b.className='hbtn stopb'; b.disabled=dead; rdp(true); }
+    else{ l.className='vmlight off'; l.title='VM '+(vmState?vmState.toLowerCase():'stopped'); b.textContent='▶ Start VM'; b.className='hbtn startb'; b.disabled=dead; rdp(false); } }
   async function toggleVM(){ const b=$('vmBtn');
-    if(!vmRunning){ b.disabled=true; vmStarting=true; vmStartAt=Date.now(); b.innerHTML='<span class="btnspin"></span>Booting\u2026'; $('vmLight').className='vmlight starting'; $('vmLight').title='booting';
-      if(DEMO){ setTimeout(()=>{ vmRunning=true; paintVM(); },1500); return; }
-      try{ await api('/api/vm/start',{method:'POST'}); }catch(e){} pollVM();
-    } else { if(!DEMO){ try{ await api('/api/vm/stop',{method:'POST'}); }catch(e){} } vmRunning=false; paintVM(); } }
-  async function pollVM(){ if(DEMO) return; try{ const d=await api('/api/vm/status'); vmProvisioned=d.provisioned!==false; vmRunning=(d.state==='RUNNING'); if(vmRunning){ vmStarting=false; } else if(vmStarting && vmStartAt && (Date.now()-vmStartAt>120000)){ vmStarting=false; } paintVM(); }catch(e){} }
+    /* The re-click guard the operator asked for, and it is a GUARD rather than a repaint: an
+       unknown state, a state in motion, or a cooldown still running all refuse the click
+       outright instead of queueing a second Compute call behind the first. */
+    if(!b || b.disabled || !vmKnown || !vmProvisioned || vmMoving()) return;
+    const act=vmRunning?'stop':'start';
+    vmNote(''); vmWant=act; vmBusyUntil=Date.now()+15000;
+    /* Optimistic about the TRANSITION only, never about the OUTCOME: the button shows motion
+       so the click registers, but vmRunning is left alone -- only a poll may move the light. */
+    paintVM();
+    let d=null;
+    try{ d=await api('/api/vm/'+act,{method:'POST'}); }
+    catch(e){ vmWant=''; vmBusyUntil=0; vmDeadUntil=Date.now()+4000; vmNote(vmWhy(act,e&&e.status,e&&e.body)); pollVM(); return; }
+    if(d && d.ok===false){ vmWant=''; vmBusyUntil=0; vmDeadUntil=Date.now()+4000; vmNote(vmWhy(act,d.http,d)); pollVM(); return; }
+    vmPollFast(0); }
+  /* Compute does not flip status the instant it accepts the call, so a single follow-up poll
+     would read the OLD state and look like nothing happened. Poll every 2.5s for up to a
+     minute, stop as soon as the instance is at rest, and if it never gets there say so rather
+     than leaving a spinner up forever. */
+  function vmPollFast(n){ if(vmFastTid){ clearTimeout(vmFastTid); vmFastTid=0; }
+    pollVM().then(function(){
+      const atRest=!VM_MOVING[vmState];
+      const done=atRest && ((vmWant==='start'&&vmRunning)||(vmWant==='stop'&&!vmRunning)||vmWant==='');
+      if(done){ vmWant=''; vmBusyUntil=0; paintVM(); return; }
+      if(n<24){ vmFastTid=setTimeout(function(){ vmPollFast(n+1); },2500); return; }
+      const act=vmWant||'change'; vmWant=''; vmBusyUntil=0;
+      vmNote('VM '+act+' was accepted but the instance is still '+(vmState||'unreadable')+' after a minute -- the light follows the real state.');
+      paintVM(); }); }
+  /* [GCP-VMLIGHT-HONEST-V1] A bare catch here turned a 503 that NAMES the missing variable into a red
+     'VM stopped' light -- the console reporting its own initial constant as a measurement.
+     A failed poll now says 'unknown', which is visually distinct from 'measured, stopped'. */
+  async function pollVM(){ try{ const d=await api('/api/vm/status');
+      vmProvisioned=d.provisioned!==false; vmKnown=true;
+      vmState=String((d&&d.state)||'UNKNOWN'); vmRunning=(vmState==='RUNNING');
+      if(vmWant && !VM_MOVING[vmState] && ((vmWant==='start'&&vmRunning)||(vmWant==='stop'&&!vmRunning))){ vmWant=''; vmBusyUntil=0; }
+      paintVM();
+    }catch(e){ vmKnown=false; vmState='';
+      if(!window.__vmWarned){ window.__vmWarned=1; console.error('[vm] /api/vm/status did not answer: '+((e&&e.status)?('HTTP '+e.status):(e&&e.message||e))+' -- the light shows UNKNOWN, not stopped.'); }
+      paintVM(); } }
   /* [HARNESSUI-MODEL-DERIVE-V1] EMPTY on purpose. Every model name the page shows comes from
      /api/models, which builds the catalog from the CHAT_API_* environment. A literal here is
      the defect this change exists to remove: it renders before the fetch and then keeps
@@ -515,7 +622,7 @@
     mk(); }
   /* Null-guarded: once the Settings panel has been opened the key fields are MOVED into it
      and #keyModal is removed, so these can be called with no modal present. */
-  function openKeys(){ var m=$('keyModal'); if(m) m.classList.add('on'); }
+  function openKeys(){ var m=$('keyModal'); if(m) m.classList.add('on'); loadGithubState(); }
   function closeKeys(){ var m=$('keyModal'); if(m) m.classList.remove('on'); }
   function paintKeyState(st){ const c=!!(st&&st.claude), g=!!(st&&st.gemini);
     const now = Date.now();
@@ -544,6 +651,44 @@
     $('keyState').innerHTML = gDot + cDot;
   }
   async function loadKeys(){ try{ paintKeyState(await api('/api/keys/status')); }catch(e){ if(DEMO) paintKeyState({claude:false,gemini:false}); else $('keyState').innerHTML='<span class="miss">—</span>'; } }
+  /* [GH-TOOLS-V1] Presence AND the resolved login, never the token. Which account a stored token
+     actually authenticates as is the whole value of this line: "stored" only says bytes exist,
+     and the failure that costs real time is a token that is present, valid, and belongs to the
+     wrong account. */
+  async function loadGithubState(){
+    var el=$('ghState'), tag=$('tagGithub'), dot=$('dotGithub'); if(!el) return;
+    try{
+      var st=await api('/api/github/status');
+      var ids=(st&&st.identities)||[];
+      if(!ids.length){ el.textContent='No token stored yet.'; if(tag)tag.textContent='not set'; return; }
+      var good=0;
+      var parts=ids.map(function(i){
+        if(i.stored&&i.login){ good++; return i.identity+' \u2192 '+i.login; }
+        if(i.stored&&i.error){ return i.identity+' \u2192 '+i.error; }
+        return i.identity+' \u2192 no token stored';
+      });
+      el.textContent=parts.join('   \u00b7   ');
+      if(tag) tag.textContent=good?(good+' active'):'not set';
+      if(dot) dot.style.background=good?'#4df5b0':'#8b93a7';
+    }catch(e){ el.textContent='\u2014'; }
+  }
+  async function saveGithub(){
+    var t=($('inGithub')&&$('inGithub').value||'').trim();
+    var id=($('inGhId')&&$('inGhId').value||'').trim()||'default';
+    var el=$('ghState'); if(!t){ if(el) el.textContent='Paste a token first.'; return; }
+    if(el) el.textContent='Verifying with GitHub\u2026';
+    try{
+      var r=await api('/api/github/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({identity:id,token:t})});
+      $('inGithub').value='';
+      if(el) el.textContent='Stored. '+id+' authenticates as '+((r&&r.login)||'?')+'.';
+      loadGithubState();
+    }catch(e){
+      /* Same discipline as saveKey(): print the sentence the route sent. A bare status code turns
+         "GitHub rejected that token" into an unexplained no. */
+      var why=(e&&e.body&&(e.body.error||e.body.detail))||'';
+      if(el) el.textContent='Not stored'+(why?': '+why:' ('+((e&&e.status)||'net')+').');
+    }
+  }
   async function saveKey(p){ const v=$('in'+(p==='claude'?'Claude':'Gemini')).value.trim(); if(!v) return;
     if(DEMO){ paintKeyState(Object.assign({claude:$('tagClaude').textContent==='set',gemini:$('tagGemini').textContent==='set'},{[p]:true})); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; return; }
     try{ await api('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:v})}); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; loadKeys(); }catch(e){ /* [SEC-FLEETMODE-CONSOLE-V1] SAY WHY IT FAILED. api() already throws {status, body} with the parsed JSON body, and every refusal on this route sends {error}; this used to print the bare code and drop the sentence that explained it, so a 409 read as an unexplained no. */ const _why=(e&&e.body&&(e.body.error||e.body.detail))||''; alert('Could not save key ('+(e.status||'net')+')'+(_why?': '+_why:'')+'.'); } }
@@ -1078,7 +1223,13 @@
 .hdr img{width:20px!important;height:20px!important}
 .hdr .sub{display:none!important}
 .hdr .ttl{font-size:.82rem!important;font-weight:700!important}
-#rdpBtn,#rdpBtn2,.hdr .divb,.hdr .rt button[onclick*="/dash"]{display:none!important}
+/* [WS-RDP-BUTTON-V1] #rdpBtn2 IS NO LONGER HIDDEN. It is the Chrome Remote Desktop link
+   that sits beside Start/Stop VM, and it was swept up in the 2026-07-25 "slim the chrome"
+   rule together with #rdpBtn -- a DIFFERENT control, the one that opens the embedded RDP
+   panel, which is genuinely gone. Hiding a working link because it shared a selector with
+   a dead one is how the operator ended up with a Start button and nowhere to go once the
+   box was up. The divider stays visible with it so the group still reads as a group. */
+#rdpBtn,.hdr .rt button[onclick*="/dash"]{display:none!important}
 .hdr .rt{gap:.3rem!important}
 .hbtn{padding:.26rem .5rem!important;font-size:.76rem!important;border-radius:8px!important}
 .chat .cbar{padding:.3rem .7rem!important;gap:.5rem!important}
@@ -1242,6 +1393,13 @@
       try{ if(localStorage.getItem('pcl_acc_'+id)==='1'){ w.classList.add('open'); h.setAttribute('aria-expanded','true'); } }catch(e){}
       w.appendChild(h); w.appendChild(b); box.appendChild(w); return w;
     }
+    /* [GH-TOOLS-V1] THE GITHUB FIELD RIDES IN HERE FOR FREE, and that is why it is a .kfield in
+       #keyModal rather than markup of its own: this loop MOVES every .kfield out of the modal
+       into the Layers panel, so the credential surface has exactly one implementation and a new
+       credential is one block of static HTML beside the others. The onOpen below is the piece
+       that is NOT free -- without it the GitHub status line would sit at an em dash until
+       something else happened to call it, because openKeys() only fires on the modal path and
+       this panel never opens the modal. */
     acc('keys','\uD83D\uDD11 API keys',function(b){
       var kp=document.createElement('div'); kp.className='kwrap';
       var sheet=document.querySelector('#keyModal .sheet');
@@ -1250,7 +1408,7 @@
         [].slice.call(sheet.querySelectorAll('.kfield')).forEach(function(f){ kp.appendChild(f); });
       }
       b.appendChild(kp);
-    });
+    }, function(){ try{ loadKeys(); }catch(e){} try{ loadGithubState(); }catch(e){} });
     /* SESSION PASTES: same move-don't-copy rule. #pcps-out, #pcps-text, #pcps-msg and
        #pcps-roles are all looked up BY ID by the minting code, so relocating the nodes keeps
        every handler working; rebuilding them would duplicate those ids and break minting.

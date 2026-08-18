@@ -432,6 +432,22 @@ export async function gitUploadBlobForRoute(
   return await gitUploadBlob(uploadCtx(), bytes, agent);
 }
 
+// [GH-PUBLISH-COPY-V1] READ ONE BLOB OUT OF THE FLEET REPOSITORY FOR REPUBLISHING ELSEWHERE.
+// gh_commit takes file content as a TOOL ARGUMENT, which is correct for a config file and
+// impossible for a release: the v10.2 changed set is 1.48 MB and control-plane/src/index.ts
+// alone is 790 KB, so publishing through arguments would push a megabyte and a half of source
+// through an MCP call and the model's context. git_propose solved exactly this with copy_from
+// and uploaded{blob_oid}; this is the same idea pointed at GitHub, and the bytes never leave
+// the control plane.
+//
+// IT REUSES gitRead RATHER THAN REACHING PAST IT, which is what makes it binary-safe for free:
+// gitRead already returns encoding 'base64' for a binary blob and 'utf-8' for text, and it
+// already refuses an oversized read LOUDLY instead of truncating -- a silent truncation here
+// would publish a half file to a public repository.
+export async function readForPublish(path: string, ref: string): Promise<any> {
+  return await gitRead(ctx(), { path, ref });
+}
+
 export function registerGitTools(server: any, z: any, AG: any, agentId?: string) {
   // [SEC-GITTOOLS-UNCONFIGURED-V1] REGISTER NOTHING WHEN THERE IS NO REPOSITORY TO SERVE.
   // loadConfig() requireEnv's GIT_REPO_ID and GIT_BUCKET, and ctx() is deferred into the

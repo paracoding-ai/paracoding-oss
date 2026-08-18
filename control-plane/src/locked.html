@@ -92,7 +92,12 @@
   </style>
 </head>
 <body>
-  <div class="card">
+  <!-- pc-locked-stage: the stable marker install.sh's self-test greps for. It is on BOTH
+       this page and login.html, so the check asserts "an anonymous caller gets the locked
+       stage" without asserting WHICH of the two postures is deployed, and without keying on
+       a brand word that a rebrand is free to change. [SEC-LOGIN-RECOVER-V1] shipped the
+       marker on login.html only and said so; this closes that stated gap. -->
+  <div class="card" data-pc-locked-stage="1">
     <div class="brand">Paracoding.AI</div>
     <h1>The Autoclave</h1>
     <div id="pane"><button id="go" disabled>Checking…</button></div>

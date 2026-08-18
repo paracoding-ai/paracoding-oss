@@ -2,19 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Paracoding -- create a workstation VM, on its own, long after install.sh finished.
 #
-#   bash workstation.sh               ask: none / linux / windows
-#   bash workstation.sh linux         non-interactive, scriptable
-#   bash workstation.sh windows
-#   bash workstation.sh --project P --region R windows
+#   bash workstation.sh               build it. No question, no flavour, no prompt.
+#   bash workstation.sh --project P --region R
 #
-# WHY THIS EXISTS AS A SEPARATE SCRIPT: install.sh asks about a workstation ONCE, at 5d/10,
-# and most people say no the first time because they only wanted the MCP server and git.
+# WHY THIS EXISTS AS A SEPARATE SCRIPT: install.sh does not build a workstation at all, and
+# most people do not want one on day one -- they wanted the MCP server and the git store.
 # Coming back later should not mean re-running a 10-step installer over a live deployment.
 #
-# IT IS SAFE TO RUN TWICE, AND IT IS SAFE TO RUN ONCE FOR EACH FLAVOUR. The two flavours get
-# DIFFERENT instance names -- paracoding-workstation-linux and paracoding-workstation-win --
-# so they coexist, and re-running for a flavour that already exists ADOPTS it and prints its
-# details rather than failing or replacing it.
+# [WS-LINUX-ONLY-V1] THERE IS ONE FLAVOUR NOW AND IT IS LINUX. The Windows box is REMOVED --
+# not deprecated, not hidden behind a flag. OPERATOR MEASUREMENT 2026-08-18, on a real
+# corporate install: Cowork does not run on the Windows workstation, so the machine could not
+# do the one job it existed for. A Linux VM was used instead and worked. Shipping a choice
+# where one arm is known not to work is not optionality, it is a trap with a billing
+# consequence -- Windows carried the larger disk of the two.
+#
+# THE PROMPT IS GONE WITH IT. A question with one possible answer is not a question; it is a
+# stop. This script now builds the box when you run it, which is what running it meant.
+#
+# IT IS STILL SAFE TO RUN TWICE. Re-running when the instance already exists ADOPTS it and
+# prints its details rather than failing or replacing it.
+#
+# AN EXISTING WINDOWS BOX IS NOT ORPHANED BY THIS. uninstall.sh still knows that instance
+# name and still removes it, and the adopt path still recognises one and says what it found.
+# Removing the name from the teardown sweep is how a machine keeps billing after an operator
+# believes they have deleted everything.
 #
 # Written POSIX-safe on purpose, exactly like install.sh: macOS still ships bash 3.2.
 set -u
@@ -23,7 +34,8 @@ PC_WS_ARG=""
 PROJECT="${PC_PROJECT:-}"
 REGION="${PC_REGION:-}"
 pc_usage() {
-  echo "usage: bash workstation.sh [--project PROJECT_ID] [--region REGION] [none|linux|windows]"
+  echo "usage: bash workstation.sh [--project PROJECT_ID] [--region REGION] [none|linux]"
+  echo "  linux is the default and the only machine this builds; 'none' exits without creating one."
 }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,7 +44,10 @@ while [ $# -gt 0 ]; do
     --region)    [ $# -ge 2 ] || { pc_usage >&2; exit 2; }; REGION="$2"; shift 2 ;;
     --region=*)  REGION="${1#--region=}"; shift ;;
     -h|--help)   pc_usage; exit 0 ;;
-    none|linux|windows) PC_WS_ARG="$1"; shift ;;
+    none|linux) PC_WS_ARG="$1"; shift ;;
+    windows) echo "windows: the Windows workstation was removed in [WS-LINUX-ONLY-V1] -- Cowork does not run on it." >&2
+             echo "         Run with no argument to build the Linux box. An existing Windows VM is still removed by uninstall.sh." >&2
+             exit 2 ;;
     *) echo "unknown argument: $1" >&2; pc_usage >&2; exit 2 ;;
   esac
 done
@@ -115,12 +130,20 @@ die() {
 # [GCP-WS-OPTIONAL-NOT-FATAL-V76] A REFUSAL THAT IS NOT A FAILURE OF THE INSTALL.
 # die() is right for "this deployment is not safe to continue building". It is WRONG for
 # "one optional component cannot be built safely", which is a different sentence and used to
-# be spelled the same way -- an unbuildable workstation aborted the whole run at 5d/10 with
-# every earlier step's resources already created. pc_ws_warn() prints the identical text to
-# stderr with the same !! marker, so nothing about the WARNING is quieter or easier to miss,
-# and then RETURNS. It deliberately does NOT emit ##PCSTEP FAIL: the step did not fail, it
+# be spelled the same way -- an unbuildable workstation aborted the whole run with every
+# earlier step's resources already created. pc_ws_warn() prints the identical text to stderr
+# with the same !! marker, so nothing about the WARNING is quieter or easier to miss, and
+# then RETURNS. It deliberately does NOT emit ##PCSTEP FAIL: the step did not fail, it
 # declined, and a machine-readable FAIL on a step that goes on to complete is a lie to
 # whatever is parsing this transcript.
+#
+# [WS-LINUX-ONLY-V1 NOTE] IT HAS NO CALLER AS OF 10.1 AND IS KEPT ANYWAY, SAID PLAINLY HERE SO
+# THE NEXT READER DOES NOT GO LOOKING FOR ONE. The rule it encodes did not go away -- 9/10
+# runs workstation.sh as a subprocess and prints exactly this shape of message on a non-zero
+# exit without failing the install -- but that path is an `echo` in the step, not a call here.
+# Three other helpers went the same way when the workstation prompt was removed
+# (pc_ask_yn, pc_ask_choice, pc_confirm_word): defined, no longer called, harmless. Deleting
+# them is a separate change from the one this release is making, and is on the queue.
 pc_ws_warn() {
   printf '\n!! %s\n' "$*" >&2
 }
@@ -368,49 +391,6 @@ pc_ws_flavour_of() {
 # because three copies of a set of connection commands is three chances to print a stale one.
 pc_ws_access_banner() {
 PC_WS_KIND="$1"
-if [ "$PC_WS_KIND" = windows ]; then
-cat <<EOF
-
-  WORKSTATION CREATED: WINDOWS (${WS_IMG_FAMILY:-windows server}, Desktop Experience)
-  ${WS_VM_NAME:-the workstation} in ${WS_VM_ZONE:-its zone}.
-
-  It has NO EXTERNAL IP. RDP is reachable ONLY through IAP TCP forwarding -- the firewall
-  rule allows tcp:3389 from 35.235.240.0/20, which is IAP's range, and from nowhere else.
-  Two commands, in this order, and THE FIRST ONE IS MANUAL ON PURPOSE:
-
-    gcloud compute reset-windows-password ${WS_VM_NAME:-WORKSTATION} \\
-      --zone ${WS_VM_ZONE:-ZONE} --project ${PROJECT} --user paracoding
-
-    gcloud compute start-iap-tunnel ${WS_VM_NAME:-WORKSTATION} 3389 \\
-      --local-host-port=localhost:13389 --zone ${WS_VM_ZONE:-ZONE} --project ${PROJECT}
-
-  Then point an RDP client at localhost:13389 and log in as paracoding with the password the
-  first command printed. THAT FIRST COMMAND CANNOT BE RUN FOR YOU: it mints a new
-  administrator password and prints it in cleartext, so an installer that ran it would leave
-  a working administrator credential in this terminal and in every log that captured it.
-  Provisioning log on the VM: C:\\ProgramData\\paracoding\\ws-setup.log -- the provisioning
-  run finishes with the line WS-SETUP-DONE, and the idle-stop below appends to the same file
-  afterwards, so WS-SETUP-DONE is a line IN that log and not the last line of it.
-
-  [WS-WIN-IDLE-V49] THIS MACHINE STOPS ITSELF AFTER 30 MINUTES IDLE, AND HERE IS THE OFF
-  SWITCH. A scheduled task (PcWsIdleStop) checks every 5 minutes from 10 minutes after boot;
-  six consecutive checks with NO Active RDP or console session and CPU under 25% run
-  Stop-Computer, which takes the instance to TERMINATED so it stops billing for compute. Any
-  activity resets the count to zero -- it is 30 minutes of CONTINUOUS quiet, not 30 minutes
-  of quiet on average. A DISCONNECTED RDP session is NOT activity, so closing the RDP window
-  and leaving a long job running is the one case you must say something about:
-
-    suspend it (elevated PowerShell on the VM, BEFORE you disconnect):
-      New-Item -ItemType File -Force -Path C:\\ProgramData\\paracoding\\ws-busy
-    resume it:
-      Remove-Item -Force C:\\ProgramData\\paracoding\\ws-busy
-    turn it off entirely -- the box then runs, and bills, until you stop it:
-      Disable-ScheduledTask -TaskName PcWsIdleStop     (Enable- puts it back)
-
-  The marker is checked FIRST, before anything is measured, so it holds the machine up
-  whatever the sessions and the CPU say. Every decision it takes is a line in that log.
-EOF
-else
 cat <<EOF
 
   WORKSTATION CREATED: LINUX (${WS_VM_NAME:-the workstation} in ${WS_VM_ZONE:-its zone}).
@@ -424,9 +404,8 @@ cat <<EOF
     Then connect at  https://remotedesktop.google.com/access
     Provisioning log on the VM: /var/log/paracoding-ws-setup.log (ends WS-SETUP-DONE)
 
-  [WS-WIN-IDLE-V49] THIS MACHINE STOPS ITSELF AFTER 30 MINUTES IDLE, and it always has --
-  it is stated here because the Windows flavour now does the same and neither used to say
-  so. /usr/local/bin/ws-idle.sh runs on a systemd timer every 5 minutes from 10 minutes
+  THIS MACHINE STOPS ITSELF AFTER 30 MINUTES IDLE, and it always has -- it is stated here
+  because until [WS-WIN-IDLE-V49] nothing said so. /usr/local/bin/ws-idle.sh runs on a systemd timer every 5 minutes from 10 minutes
   after boot; six consecutive checks with no logged-in session and load under 1 run
   \`shutdown -h now\`, and any activity resets the count to zero. Hold it up for an
   unattended job with the busy marker, which is checked before anything is measured:
@@ -464,7 +443,6 @@ cat <<EOF
   address at the same time -- a loopback listener is not reachable from Cloud Run, and
   that is the point of it.
 EOF
-fi
 # [SEC-WSVM-IAPGRANT-V1] EVERY COMMAND ABOVE GOES THROUGH IAP, so this banner must not be the
 # last word when the grant that authorises IAP could not be made. THREE STATES, NOT TWO, and
 # the third is why this is not a plain else: UNSET means the grant has not been attempted yet
@@ -484,8 +462,9 @@ fi
 # pc_ws_grant_access KIND -- THE PERMISSION THAT MAKES THE COMMANDS IN THAT BANNER WORK.
 #
 # [SEC-WSVM-IAPGRANT-V1] THE DEFECT THIS CLOSES, AND WHY NOBODY EVER SAW IT. Both flavours
-# are created with --no-address, so the ONLY route in is IAP TCP forwarding -- 3389 for RDP
-# on Windows, 22 for SSH on Linux. The firewall rule above opens that path at the NETWORK
+# is created with --no-address, so the ONLY route in is IAP TCP forwarding on 22 for SSH.
+# [WS-LINUX-ONLY-V1] There is no longer any RDP path and no rule that opens one: the tcp:3389
+# firewall rule lived inside the Windows arm and went with it. The rule above opens the NETWORK
 # layer and grants nobody permission to USE it. That permission is
 # iap.tunnelInstances.accessViaIAP, it is carried by exactly one predefined role, and this
 # installer never granted it to anybody. It worked anyway for the only person who had run
@@ -538,15 +517,13 @@ PC_WS_IAPT_OK=0
 PC_IAPT_ROLE=roles/iap.tunnelResourceAccessor
 PC_IAPT_RES="projects/$PROJECT/iap_tunnel/zones/$WS_VM_ZONE/instances/$WS_VM_NAME"
 PC_IAPT_URL="https://iap.googleapis.com/v1/$PC_IAPT_RES"
-# THE PORT AND THE PROOF COMMAND BOTH FOLLOW THE FLAVOUR. Printing the Windows tunnel line
-# under a Linux box would hand somebody a local port below 1024 and a tunnel to a machine
-# they log into with ssh, which is a wrong instruction dressed as a helpful one.
-PC_IAPT_PORT=3389
-PC_IAPT_TRY="gcloud compute start-iap-tunnel $WS_VM_NAME 3389 --local-host-port=localhost:13389 --zone $WS_VM_ZONE --project $PROJECT"
-if [ "$PC_WSGA_KIND" != windows ]; then
-  PC_IAPT_PORT=22
-  PC_IAPT_TRY="gcloud compute ssh $WS_VM_NAME --zone $WS_VM_ZONE --project $PROJECT --tunnel-through-iap"
-fi
+# [WS-LINUX-ONLY-V1] ONE PORT AND ONE PROOF COMMAND. This used to default to 3389/RDP and
+# override to 22/ssh for the non-Windows arm. With the Windows box removed the RDP default
+# was unreachable code that would have printed a tunnel to a port nothing listens on if the
+# guard above it ever went wrong -- a wrong instruction dressed as a helpful one, which is
+# exactly what the old comment here warned about in the other direction.
+PC_IAPT_PORT=22
+PC_IAPT_TRY="gcloud compute ssh $WS_VM_NAME --zone $WS_VM_ZONE --project $PROJECT --tunnel-through-iap"
 # THE PRINCIPAL TYPE MUST MATCH THE IDENTITY. An IAM member is TYPE:EMAIL and Google refuses
 # a mismatched pair outright rather than ignoring it -- the same rule 8/10 follows for the
 # console binding, and it is spelled out again here because this function also runs from
@@ -677,7 +654,9 @@ fi
 # Desktop registration these banners walk you through needs neither, so the smaller one is
 # granted and the one command in this release that DOES need sudo is named below rather than
 # paid for by everybody.
-if [ "$PC_WSGA_KIND" != windows ]; then
+# [WS-LINUX-ONLY-V1] Unconditional now. This was wrapped in a non-Windows guard; with one
+# kind of workstation the guard could only ever be true, and a condition that cannot be
+# false is a reader's trap rather than a control.
   PC_OSL_RC=0
   if [ -n "$PC_IAPT_MEMBER" ]; then
     retry gcloud projects add-iam-policy-binding "$PROJECT" --member="$PC_IAPT_MEMBER" --role=roles/compute.osLogin --condition=None >/dev/null 2>&1 || PC_OSL_RC=$?
@@ -699,13 +678,12 @@ if [ "$PC_WSGA_KIND" != windows ]; then
     echo "  !!   gcloud projects add-iam-policy-binding $PROJECT --member=${PC_IAPT_MEMBER:-user:YOUR_EMAIL} --role=roles/compute.osLogin --condition=None"
     echo "  !! (use roles/compute.osAdminLogin instead if you want sudo on the box)"
   fi
-fi
 }
 
 # pc_workstation_create KIND
 # Sets WS_VM_NAME and WS_VM_ZONE for the caller. Creates whatever is missing and ADOPTS
 # whatever is already there; every prerequisite below (Cloud Router, Cloud NAT, the
-# pc-workstation service account and its two IAM bindings, and the IAP-only RDP firewall
+# pc-workstation service account and its two IAM bindings, and the IAP-only SSH firewall
 # rule) is describe-first / create-if-absent, so a second run of this function costs a
 # handful of describes and changes nothing. Needs: PROJECT, REGION, HERE, die, retry.
 pc_workstation_create() {
@@ -719,10 +697,18 @@ PC_WS_REFUSED=0
   # paracoding-workstation adopted the LINUX box, created nothing, and then printed the
   # Windows next-steps for a machine that has no RDP on it. Separate names remove the
   # collision entirely, so the adopt path can no longer adopt the wrong operating system.
+  # [WS-LINUX-ONLY-V1] The Windows arm is gone; the SUFFIXED NAME IS NOT. -linux stays in the
+  # instance name even though it is now the only kind, because renaming it would orphan every
+  # box already built: the tools address the VM by name, uninstall sweeps by name, and an
+  # install that renames the machine it cannot see leaves a running VM billing forever. A
+  # cosmetic suffix costs nothing; a rename costs somebody a hidden instance.
   case "$PC_WS_KIND" in
-    windows) WS_VM_NAME=paracoding-${PC_LP}${PC_TOK}workstation-win ;;
     linux)   WS_VM_NAME=paracoding-${PC_LP}${PC_TOK}workstation-linux ;;
-    *)       die "pc_workstation_create: unknown flavour '"'"'$PC_WS_KIND'"'"' (want linux or windows)" ;;
+    windows) die "pc_workstation_create: the Windows workstation was REMOVED in [WS-LINUX-ONLY-V1].
+Measured on a real corporate install: Cowork does not run on it, so the machine could not do
+the one job it existed for. Nothing here builds one. An existing Windows box is untouched by
+this refusal and is still found and removed by uninstall.sh." ;;
+    *)       die "pc_workstation_create: unknown kind '"'"'$PC_WS_KIND'"'"' (want linux)" ;;
   esac
   # A FIXED NAME, AND DELIBERATELY NOT A ROLE NAME. WS_VM and WS_ZONE are both written onto the
   # control plane at 6/10 below, so nothing here depends on this matching any built-in default
@@ -808,7 +794,7 @@ ${CP_SVC:-the paracoding-control-plane service}."
     # --no-address --no-service-account --no-scopes. Four separate defects, and together they
     # made the machine unusable rather than merely austere:
     #   - DEBIAN. The Claude desktop app does not run on it. Ubuntu LTS below.
-    #   - 10 GB. A desktop environment plus Chrome does not fit. 100 GB pd-balanced below.
+    #   - 10 GB. A desktop environment plus Chrome does not fit. 50 GB pd-balanced below.
     #   - 2 vCPU / 8 GB. A desktop plus a browser needs more. e2-standard-4 below.
     #   - NO EGRESS AT ALL. --no-address with no Cloud NAT means the box cannot apt-get
     #     anything, so it could never have installed the desktop it was missing anyway. That
@@ -861,616 +847,13 @@ ${CP_SVC:-the paracoding-control-plane service}."
       --role=roles/logging.logWriter --condition=None >/dev/null
     retry gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$WS_SA" \
       --role=roles/monitoring.metricWriter --condition=None >/dev/null
-    # [SEC-WSVM-WINDOWS-V1] THE WINDOWS ALTERNATIVE STARTS HERE, AND NOTE WHAT IS *ABOVE*
-    # THIS LINE: the instance-name lookup, the zone listing, the Cloud NAT + Cloud Router and
-    # the dedicated pc-workstation service account are ALL SHARED, deliberately. The NAT was
-    # NOT duplicated for Windows -- there is one router (paracoding-nat-router) and one NAT
-    # config (paracoding-nat) per region no matter which flavour is chosen, so switching
-    # flavours cannot leave a second billed NAT gateway behind. Only the image, the ACCESS
-    # MODEL and the provisioning script differ below.
-    if [ "$PC_WS_KIND" = windows ]; then
-    # EGRESS IS A HARD REQUIREMENT HERE AND THE EXTERNAL-IP FALLBACK IS *REFUSED*.
-    # The Linux path above may fall back to an ephemeral external IP when no Cloud NAT can be
-    # provisioned; that is defensible there because OS Login refuses password and key SSH, so
-    # the exposed port is not an authentication surface. NONE OF THAT IS TRUE ON WINDOWS. The
-    # auto-created "default" VPC ships a rule named default-allow-rdp permitting tcp:3389
-    # from 0.0.0.0/0 to every instance in the network, and Windows authenticates RDP with a
-    # PASSWORD. An external IP here is therefore not a documented trade-off, it is a
-    # password-guessable administrator login on the public internet from first boot. Die.
-    if [ "$PC_WS_EGRESS" != cloud-nat ]; then
-      # [GCP-WS-OPTIONAL-NOT-FATAL-V76] THE REFUSAL IS RIGHT; KILLING THE INSTALL OVER IT IS
-      # NOT. This used to `die`, which aborted the ENTIRE install at 5d/10 -- after Firestore,
-      # the service accounts, the secrets, the URLs, the KMS keys and all three buckets had
-      # been created -- because an OPTIONAL component could not be built safely. The workstation
-      # is optional by construction: `none` is the documented default and the banner below says
-      # nothing else in this install depends on it. An optional step that can fail the whole run
-      # is a defect regardless of how correct its reasoning is.
-      # WHAT IS UNCHANGED: the VM is still NOT created, and the external-IP fallback is still
-      # REFUSED. Windows authenticates RDP with a password and the default VPC allows tcp:3389
-      # from 0.0.0.0/0, so an external IP here is a password-guessable administrator login on
-      # the public internet. That judgement stands; only the blast radius changes.
-      pc_ws_warn "refusing to create the WINDOWS workstation without Cloud NAT.
-No usable Cloud NAT could be provisioned in $REGION, and the only other way to give this VM
-egress is an external IP. On Linux that is a trade-off worth printing; on Windows it is an
-open RDP port -- the auto-created 'default' VPC contains default-allow-rdp, which allows
-tcp:3389 from 0.0.0.0/0, and RDP authenticates with a password. Fix the network (create a
-Cloud NAT in $REGION and re-run), or choose PC_WS_KIND=linux, which can safely take an
-external IP because OS Login refuses password and key SSH.
-THE INSTALL IS CONTINUING WITHOUT A WORKSTATION. Nothing else depends on it; the four vm_*
-tools will not work until you add one. Re-run workstation.sh, or this installer with
-PC_WS_KIND=..., once the network is fixed."
-      PC_WS_REFUSED=1
-      return 0
-    fi
-    # RDP OVER IAP TCP FORWARDING, AND NOTHING ELSE. The instance keeps --no-address, so the
-    # ONLY route to 3389 is Google's IAP forwarder, which authenticates the operator against
-    # IAM before a single packet reaches the VM. 35.235.240.0/20 IS IAP'S OWN SOURCE RANGE
-    # and it is the only source this rule accepts; the rule is further narrowed to instances
-    # carrying our tag, so it cannot accidentally expose anything else in the project.
-    # IF YOU ARE EVER TEMPTED TO WIDEN THIS TO 0.0.0.0/0 TO "JUST GET IN": that is the
-    # mistake this comment exists to stop, and it is not a smaller mistake than it looks.
-    PC_RDP_TAG=paracoding-rdp-iap
-    PC_RDP_FW=paracoding-allow-rdp-iap
-    gcloud compute firewall-rules describe "$PC_RDP_FW" --project "$PROJECT" >/dev/null 2>&1 \
-      || retry gcloud compute firewall-rules create "$PC_RDP_FW" --project "$PROJECT" \
-           --network "$PC_WS_NET" --direction INGRESS --action allow --rules tcp:3389 \
-           --source-ranges 35.235.240.0/20 --target-tags "$PC_RDP_TAG" --priority 1000 \
-           --description "RDP to tagged workstations from IAP TCP forwarding ONLY" \
-           --quiet >/dev/null 2>&1 || true
-    gcloud compute firewall-rules describe "$PC_RDP_FW" --project "$PROJECT" >/dev/null 2>&1 \
-      || die "the firewall rule $PC_RDP_FW is still absent after a create attempt. Refusing to
-continue: without it IAP TCP forwarding cannot reach 3389 and this workstation would be
-created, billed, and impossible to log in to. The describe is the authority here and not the
-create status, because a concurrent run makes create a 409 and that is success for us."
-    # A PRE-EXISTING default-allow-rdp IS NOT OURS AND IS NOT DELETED HERE -- other instances
-    # in this project may be relying on it, and an installer that silently removes a firewall
-    # rule it did not create is a worse citizen than one that names it. It is checked and
-    # reported below, because it is the one rule that would undo everything above the moment
-    # anything in this project gets an external IP.
-    PC_RDP_WORLD=""
-    gcloud compute firewall-rules describe default-allow-rdp --project "$PROJECT" \
-      --format='value(sourceRanges.list())' 2>/dev/null | grep -q '0\.0\.0\.0/0' \
-      && PC_RDP_WORLD=1
-    # WINDOWS SERVER WITH DESKTOP EXPERIENCE, RESOLVED NOT ASSUMED -- exactly the discipline
-    # the Ubuntu path uses, for exactly the same reason. Image families ARE retired (
-    # windows-2012-r2 is gone) and which one is newest changes every couple of years, so a
-    # hardcoded family is a create that fails with a message about images rather than about
-    # this line. Take the first the project can actually describe, newest first. The -core
-    # families are DELIBERATELY ABSENT: Server Core has no desktop, and a desktop is the
-    # entire point of this VM -- silently landing on Core would reproduce the exact defect
-    # (a workstation you cannot look at) that this whole step was rewritten to fix.
-    WS_IMG_FAMILY=""
-    for _f in windows-2025 windows-2022 windows-2019 windows-2016; do
-      if gcloud compute images describe-from-family "$_f" --project windows-cloud \
-           >/dev/null 2>&1; then WS_IMG_FAMILY="$_f"; break; fi
-    done
-    [ -n "$WS_IMG_FAMILY" ] || die "no Windows Server Desktop Experience image family
-(windows-2025, windows-2022, windows-2019, windows-2016) could be resolved from the
-windows-cloud image project. Refusing to guess a family name and refusing to fall back to a
-Server Core family: Core has no desktop, and a workstation you cannot see is not a
-workstation. Check that the Compute Engine API is enabled on $PROJECT."
-    # THE PROVISIONING SCRIPT. windows-startup-script-ps1 is run by the Google guest agent on
-    # EVERY boot, so it MUST be idempotent -- it stamps a version marker and returns at once
-    # on a re-run, the same contract as the Linux startup script. Written to a file and
-    # attached with --metadata-from-file so the PowerShell never has to survive a second
-    # round of shell quoting; the delimiter is QUOTED, so every $ below belongs to PowerShell.
-    cat > "$HERE/.ws-startup.ps1" <<'PC_WS_PS1_EOF'
-# Paracoding Windows workstation provisioning (windows-startup-script-ps1).
-# IDEMPOTENT BY CONTRACT: this runs on every boot. Stamp, then return.
-$ErrorActionPreference = 'Continue'
-$PcRoot  = 'C:\ProgramData\paracoding'
-$PcStamp = Join-Path $PcRoot 'ws-setup.v1'
-$PcLog   = Join-Path $PcRoot 'ws-setup.log'
-New-Item -ItemType Directory -Force -Path $PcRoot | Out-Null
-function Write-PcLog([string]$Message) {
-  Add-Content -Path $PcLog -Value ("{0} {1}" -f (Get-Date).ToUniversalTime().ToString('s'), $Message)
-}
-Write-PcLog "== paracoding ws-setup starting"
-if (Test-Path $PcStamp) {
-  Write-PcLog "already provisioned; nothing to do"
-  Add-Content -Path $PcLog -Value "WS-SETUP-DONE"
-  exit 0
-}
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# NOTHING FETCHED FROM THE NETWORK IS EXECUTED UNVERIFIED. Every installer below is pulled
-# over https from the VENDOR'S OWN host and its AUTHENTICODE SIGNATURE is checked before it
-# runs: the status must be Valid and the signing subject must contain the expected publisher.
-# The usual Windows shortcut -- `iwr https://... | iex`, which is how Chocolatey bootstraps
-# itself -- is deliberately NOT used here: it executes whatever arrives, with no signature to
-# check at all, which is the Windows spelling of `curl | sh`.
-function Get-PcVerified([string]$Url, [string]$Dest, [string]$Publisher) {
-  try {
-    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -TimeoutSec 900
-  } catch {
-    Write-PcLog ("DOWNLOAD FAILED {0}: {1}" -f $Url, $_.Exception.Message)
-    return $false
-  }
-  if (-not (Test-Path $Dest)) { Write-PcLog ("DOWNLOAD FAILED {0}: no file written" -f $Url); return $false }
-  $sig = Get-AuthenticodeSignature -FilePath $Dest
-  if ($sig.Status -ne 'Valid') {
-    Write-PcLog ("REFUSED {0}: Authenticode status is {1}, not Valid" -f $Dest, $sig.Status)
-    Remove-Item -Force $Dest -ErrorAction SilentlyContinue
-    return $false
-  }
-  $subject = ''
-  if ($sig.SignerCertificate) { $subject = [string]$sig.SignerCertificate.Subject }
-  if ($subject -notmatch [regex]::Escape($Publisher)) {
-    Write-PcLog ("REFUSED {0}: signed by '{1}', wanted a subject containing '{2}'" -f $Dest, $subject, $Publisher)
-    Remove-Item -Force $Dest -ErrorAction SilentlyContinue
-    return $false
-  }
-  Write-PcLog ("verified {0}: signed by {1}" -f $Dest, $subject)
-  return $true
-}
-function Get-PcMetadata([string]$Key) {
-  try {
-    $u = "http://metadata.google.internal/computeMetadata/v1/instance/attributes/" + $Key
-    return [string](Invoke-RestMethod -Uri $u -Headers @{'Metadata-Flavor' = 'Google'} -TimeoutSec 10)
-  } catch {
-    return ''
-  }
-}
-
-# RDP: ASSERTED, NOT ASSUMED. The Google Windows images ship with it enabled, but this costs
-# nothing and turns "the image changed" into a no-op instead of a lockout. This is the HOST
-# firewall; the VPC rule that actually decides who can reach 3389 is the IAP-scoped one the
-# installer created, and that one allows 35.235.240.0/20 and nothing else.
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-  -Name 'fDenyTSConnections' -Value 0 -ErrorAction SilentlyContinue
-Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
-
-# GOOGLE CHROME, from Google's own enterprise MSI over https, signature checked above.
-$PcChromeExe = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-if (-not (Test-Path $PcChromeExe)) {
-  $msi = Join-Path $env:TEMP 'pc-chrome.msi'
-  if (Get-PcVerified 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi' $msi 'Google LLC') {
-    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru
-    Write-PcLog ("google chrome: msiexec exit {0}" -f $p.ExitCode)
-  } else {
-    Write-PcLog "SKIPPED google chrome: the installer could not be downloaded or verified"
-  }
-  Remove-Item -Force $msi -ErrorAction SilentlyContinue
-} else {
-  Write-PcLog "google chrome already present"
-}
-
-# THE CLAUDE DESKTOP APP -- THE SAME JUDGEMENT CALL, AND THE SAME ANSWER, AS THE LINUX PATH.
-# [SEC-WSCLAUDE-PIN-V1] THIS PARAGRAPH USED TO SAY "Anthropic publishes no stable, guessable
-# Windows installer URL", and the code below was correct given that premise. The premise is
-# false: Anthropic's own download page, claude.com/download, publishes a VERSIONLESS setup
-# redirect, and the installer now writes it onto the instance as pc-claude-win-url. NOT ONE
-# LINE OF THE LOGIC BELOW CHANGED -- it still reads that key, still requires https, and still
-# hands the download to Get-PcVerified, which REFUSES any file whose Authenticode subject
-# does not contain "Anthropic". That refusal is what makes pinning a URL safe: if the
-# endpoint ever stops serving an Anthropic-signed binary this path fails CLOSED and takes the
-# fallback. It is still a METADATA value precisely so nobody has to cut a new release to
-# change it, and an operator who sets pc-claude-win-url themselves still overrides the pin.
-# With no URL, or one that fails, we do NOT guess -- we create a dedicated Chrome app window
-# for claude.ai and SAY SO, so this log never claims an install that did not happen.
-$PcClaudeOk = $false
-$PcClaudeUrl = (Get-PcMetadata 'pc-claude-win-url').Trim()
-if ($PcClaudeUrl -and $PcClaudeUrl.StartsWith('https://')) {
-  $exe = Join-Path $env:TEMP 'pc-claude-setup.exe'
-  if (Get-PcVerified $PcClaudeUrl $exe 'Anthropic') {
-    $p = Start-Process -FilePath $exe -ArgumentList @('/S') -Wait -PassThru
-    Write-PcLog ("claude desktop installer exit {0}" -f $p.ExitCode)
-    if ($p.ExitCode -eq 0) { $PcClaudeOk = $true }
-  }
-  Remove-Item -Force $exe -ErrorAction SilentlyContinue
-} elseif ($PcClaudeUrl) {
-  Write-PcLog "REFUSED pc-claude-win-url: it is not an https URL"
-}
-if (-not $PcClaudeOk) {
-  Write-PcLog "no Claude desktop installer ran; creating a Chrome app window for claude.ai instead"
-  if (Test-Path $PcChromeExe) {
-    $lnk = 'C:\Users\Public\Desktop\Claude.lnk'
-    $shell = New-Object -ComObject WScript.Shell
-    $sc = $shell.CreateShortcut($lnk)
-    $sc.TargetPath = $PcChromeExe
-    $sc.Arguments = '--app=https://claude.ai/'
-    $sc.IconLocation = $PcChromeExe
-    $sc.Description = 'Claude, in a dedicated app window'
-    $sc.Save()
-    Write-PcLog ("created {0}" -f $lnk)
-  } else {
-    Write-PcLog "SKIPPED the Claude shortcut: chrome is not installed"
-  }
-}
-
-# THE CLAUDE CHROME EXTENSION, FORCE-INSTALLED BY CHROME'S OWN POLICY MECHANISM -- NOT
-# SIDELOADED. ExtensionInstallForcelist under HKLM SOFTWARE Policies Google Chrome is how an
-# enterprise pins an extension: Chrome fetches it from the Web Store itself, verifies the
-# publisher signature, keeps it updated and refuses to let it be disabled. Downloading a .crx
-# and dropping it in a directory bypasses every one of those properties, so we do not.
-#
-# THE EXTENSION ID IS NOT HARDCODED, AND THAT IS A SECURITY DECISION, NOT LAZINESS. An
-# extension id IS a capability: whoever owns that id gets code running in this operator's
-# browser, on whatever pages the extension requests. The real published id of Anthropic's
-# Chrome extension could NOT be established from an authoritative source when this was
-# written, and a wrong id here would silently force-install A STRANGER'S EXTENSION on every
-# workstation this installer ever creates -- unremovable, because that is what forcelist
-# means. So the id comes from instance metadata, it is validated to be exactly 32 characters
-# in a-p (the only alphabet a Chrome extension id uses), and WHEN IT IS UNSET THIS BLOCK
-# DOES NOTHING AND SAYS SO IN THE LOG. Set it with:
-#   gcloud compute instances add-metadata NAME --zone ZONE --metadata pc-claude-ext-id=ID
-$PcExtId = (Get-PcMetadata 'pc-claude-ext-id').Trim().ToLower()
-if (-not $PcExtId) {
-  Write-PcLog "SKIPPED the Claude chrome extension: instance metadata pc-claude-ext-id is unset, and this script will not guess an extension id"
-} elseif ($PcExtId -notmatch '^[a-p]{32}$') {
-  Write-PcLog ("REFUSED pc-claude-ext-id '{0}': a chrome extension id is exactly 32 characters a-p" -f $PcExtId)
-} else {
-  $PcPolKey = 'HKLM:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist'
-  $PcEntry  = $PcExtId + ';https://clients2.google.com/service/update2/crx'
-  New-Item -Path $PcPolKey -Force | Out-Null
-  $PcHave = $false
-  $PcMax  = 0
-  $PcProps = Get-ItemProperty -Path $PcPolKey -ErrorAction SilentlyContinue
-  if ($PcProps) {
-    foreach ($p in $PcProps.PSObject.Properties) {
-      if ($p.Name -match '^[0-9]+$') {
-        if ([int]$p.Name -gt $PcMax) { $PcMax = [int]$p.Name }
-        if ([string]$p.Value -eq $PcEntry) { $PcHave = $true }
-      }
-    }
-  }
-  if ($PcHave) {
-    Write-PcLog "claude chrome extension policy already present; nothing to do"
-  } else {
-    New-ItemProperty -Path $PcPolKey -Name ([string]($PcMax + 1)) -Value $PcEntry -PropertyType String -Force | Out-Null
-    Write-PcLog ("force-installed the claude chrome extension by policy: {0} = {1}" -f ($PcMax + 1), $PcEntry)
-  }
-}
-
-# [WS-WIN-IDLE-V49] THE IDLE STOP. MEASURED: THIS BOX HAD NONE AND THE LINUX ONE HAS HAD ONE
-# ALL ALONG. linux-startup.sh installs ws-idle.sh plus a ws-idle.timer (OnBootSec=10min,
-# OnUnitActiveSec=5min) that stops that machine after 30 minutes of quiet. Searching this
-# script for idle, shutdown or Stop-Computer before this block returned NOTHING, and neither
-# flavour's description said so -- so an operator who had used the Linux box provisioned a
-# Windows one, assumed the same behaviour, and was only saved from an all-night bill by
-# stopping it by hand. The assumption was reasonable; the silence was the defect.
-#
-# THE SEMANTICS ARE THE LINUX ONES, NOT AN APPROXIMATION OF THEM: a check every 5 minutes
-# starting 10 minutes after boot, SIX CONSECUTIVE idle checks before anything happens, a busy
-# marker that overrides everything, and a counter that RESETS TO ZERO on any activity rather
-# than decaying. 6 x 5 = 30 minutes of CONTINUOUS quiet. A decaying counter would eventually
-# stop a machine that is used for one minute in every twenty-five, which is a machine in use.
-$PcIdleScript = Join-Path $PcRoot 'ws-idle.ps1'
-$PcIdleTask   = 'PcWsIdleStop'
-$PcIdleBusy   = Join-Path $PcRoot 'ws-busy'
-# A SINGLE-QUOTED HERE-STRING: PowerShell expands NOTHING between @' and '@, so every $ below
-# belongs to ws-idle.ps1 and none of it is read by this script.
-$PcIdleBody = @'
-# Paracoding workstation idle-stop check. [WS-WIN-IDLE-V49]
-# Installed by the workstation startup script and run by the scheduled task PcWsIdleStop
-# every 5 minutes, first run 10 minutes after boot. SIX consecutive idle runs = 30 minutes of
-# continuous quiet, and then this machine stops itself. Any activity resets the count to 0.
-$ErrorActionPreference = 'Continue'
-$PcRoot  = 'C:\ProgramData\paracoding'
-$PcLog   = Join-Path $PcRoot 'ws-setup.log'
-$PcBusy  = Join-Path $PcRoot 'ws-busy'
-$PcState = Join-Path $PcRoot 'ws-idle-count'
-$PcLimit = 6
-# THE CPU THRESHOLD IS THE LINUX TEST'S ARITHMETIC RESTATED, NOT A GUESS. The Linux check is
-# `load < 1` -- fewer than one runnable task on average. This VM is created as an
-# e2-standard-4, so ONE of its four vCPUs saturated is 25% of the machine, and 25 is that
-# same statement in the units Windows reports. A parked Windows desktop with Chrome open
-# measures single digits; a build, an installer or a test run measures far more than 25.
-$PcCpuMax = 25
-
-function Write-PcIdleLog([string]$Message) {
-  Add-Content -Path $PcLog -Value ("{0} ws-idle {1}" -f (Get-Date).ToUniversalTime().ToString('s'), $Message)
-}
-
-# THE COUNTER IS BOOT-SCOPED, BECAUSE ITS LINUX ORIGINAL IS AND THIS DIRECTORY IS NOT.
-# /run is tmpfs, so /run/ws-idle-count is empty after every boot. C:\ProgramData survives a
-# reboot, so a machine that stopped itself holding 6 would come back up still holding 6 and
-# stop again at its first check -- a workstation nobody can start. The file therefore records
-# the boot it was written under, and a count from any other boot reads as 0.
-# AND IT HAS A SECOND SOURCE, BECAUSE ONE SOURCE HERE IS A SINGLE POINT OF FAILURE FOR THE
-# WHOLE FEATURE. If the boot identifier could not be read at all, every run would disagree
-# with the file it just wrote, the count would never get past 1, and this machine would never
-# stop -- silently, and looking exactly like a machine nobody had left running. So when the
-# CIM call fails the boot instant is DERIVED: wall clock now minus milliseconds since boot,
-# rounded to the minute to absorb sampling jitter. Same value all through one boot, a
-# different one after the next.
-$PcBoot = ''
-try { $PcBoot = [string]((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.Ticks) } catch { $PcBoot = '' }
-if ($PcBoot -eq '') {
-  try { $PcBoot = 't' + [string]([long]((Get-Date).AddMilliseconds(-1 * [Environment]::TickCount64).Ticks / 600000000)) } catch { $PcBoot = 'unknown' }
-}
-$PcCount = 0
-$PcWas   = ''
-if (Test-Path $PcState) {
-  $PcF = @((([string](Get-Content -Path $PcState -TotalCount 1)) -split '\s+') | Where-Object { $_ -ne '' })
-  if ($PcF.Count -ge 2 -and $PcF[0] -eq $PcBoot) {
-    try { $PcCount = [int]$PcF[1] } catch { $PcCount = 0 }
-    if ($PcF.Count -ge 3) { $PcWas = [string]$PcF[2] }
-  }
-}
-# The third field is WHY the last run decided what it decided. It exists so a transition is
-# logged ONCE instead of every five minutes forever: a line per tick would make this the
-# largest file on the disk within a month, and no line at all would make a box that never
-# stops silent about the reason.
-function Set-PcIdleState([int]$N, [string]$Reason) {
-  Set-Content -Path $PcState -Value ("{0} {1} {2}" -f $PcBoot, $N, $Reason) -Encoding ASCII
-}
-
-# BUSY OVERRIDE, FIRST, BEFORE ANYTHING IS MEASURED. An unattended job can hold no session
-# and little CPU and still be the entire reason this machine is running; the marker is how an
-# operator says so, and it is the same escape hatch as /run/ws-busy on the Linux box.
-if (Test-Path $PcBusy) {
-  if ($PcWas -ne 'busy') { Write-PcIdleLog ("{0} exists: idle-stop suspended, counter reset to 0" -f $PcBusy) }
-  Set-PcIdleState 0 'busy'
-  exit 0
-}
-
-# SESSION TEST -- EXACTLY WHICH qwinsta ROWS ARE COUNTED AND WHY. qwinsta (a.k.a.
-# `query session`) prints a header and one row per session. On a box like this one:
-#   services   id 0      Disc     the session Windows services live in. Never a person.
-#   console    id 1      Conn     the console sitting at the sign-in screen. Nobody is on it.
-#   rdp-tcp    id 65536  Listen   the listener that ACCEPTS RDP. Not a session anyone is in.
-#   rdp-tcp#N  id N      Active   somebody is signed in over RDP right now. THIS is activity.
-#   console    id 1      Active   somebody is signed in at the console. THIS is activity.
-#   (no name)  id N      Disc     an RDP session whose window was closed. NOT activity -- the
-#                                 operator has gone home, and a job they left behind is what
-#                                 the busy marker above is for.
-# So: state Active, and session id NOT 0. Id 0 is excluded explicitly because `services` is
-# reported Active on some builds and it is never a human.
-# THE COLUMNS ARE NOT SPLIT POSITIONALLY. SESSIONNAME and USERNAME are both blank on some
-# rows, so a fixed-width or nth-field parse reads the wrong column on exactly the rows that
-# matter. Instead each row is tokenised on whitespace, the FIRST all-digits token is the ID,
-# and the token after it is the STATE. The header row carries no all-digits token, so the
-# same rule skips it without special-casing its text.
-$PcSeen   = $false
-$PcActive = $false
-$PcQ = @()
-try { $PcQ = @(& qwinsta.exe 2>$null) } catch { $PcQ = @() }
-foreach ($PcLine in $PcQ) {
-  $PcT = @((([string]$PcLine).TrimStart('>', ' ') -split '\s+') | Where-Object { $_ -ne '' })
-  $PcI = -1
-  for ($n = 0; $n -lt $PcT.Count; $n++) { if ($PcT[$n] -match '^\d+$') { $PcI = $n; break } }
-  if ($PcI -lt 1 -or ($PcI + 1) -ge $PcT.Count) { continue }
-  $PcSeen = $true
-  if ([int]$PcT[$PcI] -ne 0 -and $PcT[$PcI + 1] -eq 'Active') { $PcActive = $true }
-}
-
-# CPU, FROM A CLASS WHOSE NAMES ARE INVARIANT. Get-Counter takes a LOCALISED counter path and
-# would break on a non-English image; WMI class and property names never translate. One
-# sample is coarse, and that is acceptable here precisely because six consecutive samples are
-# required: a spurious high reading only resets the counter, and a spurious low one cannot
-# stop anything on its own.
-$PcCpu = -1
-try {
-  $PcPerf = @(Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop)
-  if ($PcPerf.Count -ge 1) { $PcCpu = [int]$PcPerf[0].PercentProcessorTime }
-} catch { $PcCpu = -1 }
-if ($PcCpu -lt 0) {
-  try {
-    $PcAvg = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average
-    if ($null -ne $PcAvg) { $PcCpu = [int]$PcAvg }
-  } catch { $PcCpu = -1 }
-}
-
-# AN UNMEASURABLE ANSWER IS TREATED AS ACTIVITY, IN BOTH DIRECTIONS. If qwinsta produced no
-# parseable row, or neither CPU source answered, this run is NOT idle and the counter resets.
-# That is the same direction the Linux script fails in, and it is the right one: the cost of
-# being wrong here is an hour of compute, and the cost of being wrong the other way is a
-# machine that stops in the middle of somebody's work because a counter could not be read.
-$PcReason = 'idle'
-if (-not $PcSeen)             { $PcReason = 'nosessiondata' }
-elseif ($PcActive)            { $PcReason = 'session' }
-elseif ($PcCpu -lt 0)         { $PcReason = 'nocpudata' }
-elseif ($PcCpu -ge $PcCpuMax) { $PcReason = 'cpu' }
-if ($PcReason -ne 'idle') {
-  if ($PcWas -ne $PcReason) { Write-PcIdleLog ("not idle ({0}, cpu {1}%): counter reset to 0" -f $PcReason, $PcCpu) }
-  Set-PcIdleState 0 $PcReason
-  exit 0
-}
-$PcCount = $PcCount + 1
-Set-PcIdleState $PcCount 'idle'
-if ($PcCount -le $PcLimit) {
-  Write-PcIdleLog ("idle interval {0} of {1}: no Active session, cpu {2}% under {3}%" -f $PcCount, $PcLimit, $PcCpu, $PcCpuMax)
-}
-if ($PcCount -gt $PcLimit -and (($PcCount - $PcLimit) % 12) -eq 0) {
-  Write-PcIdleLog ("STILL RUNNING {0} checks past the first Stop-Computer: something is refusing the shutdown, and this machine is billing" -f ($PcCount - $PcLimit))
-}
-if ($PcCount -ge $PcLimit) {
-  # Stop-Computer, NOT a logoff or a session disconnect. Ending a session leaves the INSTANCE
-  # RUNNING, and a running instance is what Compute Engine bills for -- whether or not anybody
-  # is signed in. Only a clean guest shutdown takes the instance to TERMINATED, where it bills
-  # for its disk alone. A logoff would make this file look like it worked and change the bill
-  # by nothing, which is the failure this whole check exists to stop.
-  # -Force so an application with an unsaved buffer cannot veto it, exactly as `shutdown -h
-  # now` cannot be vetoed on the Linux box. The supported way to say "not now" is the busy
-  # marker at the top of this file, which is checked before anything else.
-  Write-PcIdleLog ("{0} consecutive idle checks at 5 minutes each = 30 minutes idle; stopping this computer" -f $PcLimit)
-  Stop-Computer -Force
-}
-'@
-Set-Content -Path $PcIdleScript -Value $PcIdleBody -Encoding ASCII
-# THE TASK IS REGISTERED FROM XML, NOT BUILT FROM New-ScheduledTaskTrigger. What is wanted is
-# one boot trigger with a 10-minute delay AND a 5-minute repetition, and the cmdlet route
-# reaches that only by assigning a Repetition object taken off a second, throwaway trigger --
-# a construction whose behaviour has differed across Windows versions. The XML is what the
-# Task Scheduler actually stores, it says all three things in one place, and it is the same
-# document Export-ScheduledTask round-trips. RUNS AS S-1-5-18 (SYSTEM), which is a service
-# account that needs no password and is signed in whether or not a human is: a task that ran
-# as the operator would not run when the machine is empty, which is the only time it matters.
-$PcIdleXml = @'
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Author>paracoding</Author>
-    <Description>Idle stop: six consecutive idle 5-minute checks (30 minutes) shut this workstation down. Create C:\ProgramData\paracoding\ws-busy to suspend it.</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-      <Delay>PT10M</Delay>
-      <Repetition>
-        <Interval>PT5M</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-    </BootTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>S-1-5-18</UserId>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
-    <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
-    <Priority>7</Priority>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\ProgramData\paracoding\ws-idle.ps1"</Arguments>
-    </Exec>
-  </Actions>
-</Task>
-'@
-# IDEMPOTENT: -Force replaces a task of the same name rather than failing on the second run,
-# which is the same contract the rest of this script keeps. schtasks.exe is the fallback and
-# not the first choice -- it is present on every Windows there is, so a machine whose
-# ScheduledTasks module is missing still gets the task. The XML file it needs is written
-# UTF-16, which is what its declaration says and what schtasks expects.
-$PcIdleOk = $false
-try {
-  Register-ScheduledTask -TaskName $PcIdleTask -Xml $PcIdleXml -Force -ErrorAction Stop | Out-Null
-  $PcIdleOk = $true
-} catch {
-  Write-PcLog ("Register-ScheduledTask failed ({0}); falling back to schtasks.exe" -f $_.Exception.Message)
-  try {
-    $PcIdleXmlFile = Join-Path $PcRoot 'ws-idle-task.xml'
-    Set-Content -Path $PcIdleXmlFile -Value $PcIdleXml -Encoding Unicode
-    & schtasks.exe /Create /TN $PcIdleTask /XML $PcIdleXmlFile /F | Out-Null
-    if ($LASTEXITCODE -eq 0) { $PcIdleOk = $true }
-  } catch {
-    Write-PcLog ("schtasks.exe also failed: {0}" -f $_.Exception.Message)
-  }
-}
-# VERIFIED BY ASKING THE TASK SCHEDULER, NOT BY READING AN EXIT CODE, because the whole point
-# of this block is that an idle-stop nobody installed looks exactly like one that works until
-# the bill arrives.
-$PcIdleThere = $false
-try { if (Get-ScheduledTask -TaskName $PcIdleTask -ErrorAction Stop) { $PcIdleThere = $true } } catch {
-  & schtasks.exe /Query /TN $PcIdleTask > $null 2>&1
-  if ($LASTEXITCODE -eq 0) { $PcIdleThere = $true }
-}
-if ($PcIdleThere) {
-  Write-PcLog ("idle-stop installed: {0} runs {1} every 5 minutes from boot+10min; 6 idle checks (30 min) stop this VM. Suspend with {2}" -f $PcIdleTask, $PcIdleScript, $PcIdleBusy)
-} else {
-  Write-PcLog ("WARNING: THE IDLE-STOP IS NOT INSTALLED (registered={0}). This machine will run, and bill, until somebody stops it by hand." -f $PcIdleOk)
-}
-
-New-Item -ItemType File -Force -Path $PcStamp | Out-Null
-Write-PcLog "== finished"
-Add-Content -Path $PcLog -Value "WS-SETUP-DONE"
-PC_WS_PS1_EOF
-    chmod 0600 "$HERE/.ws-startup.ps1"
-    # NO enable-oslogin HERE, AND THAT IS NOT AN OMISSION. OS Login is a Linux-guest feature;
-    # setting it on a Windows instance does nothing at all, and leaving it on the create line
-    # would imply a protection this box does not have. What protects this box is that it has
-    # NO EXTERNAL IP and that 3389 is reachable only from IAP's range, both above.
-    # 150 GB rather than the Linux path's 100: a Windows Server image plus updates plus
-    # Chrome plus the app is a much larger floor, and an out-of-space workstation is exactly
-    # the class of defect this step was rewritten to stop shipping.
-    PC_VMC_RC=0
-    retry gcloud compute instances create "$WS_VM_NAME" --project "$PROJECT" \
-      --zone "$WS_VM_ZONE" --machine-type e2-standard-4 \
-      --image-family "$WS_IMG_FAMILY" --image-project windows-cloud \
-      --boot-disk-size 150GB --boot-disk-type pd-balanced \
-      --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
-      --tags "$PC_RDP_TAG" \
-      --metadata pc-claude-ext-id="$PC_WS_EXT_ID",pc-claude-win-url="$PC_WS_CLAUDE_WIN_URL" \
-      --metadata-from-file windows-startup-script-ps1="$HERE/.ws-startup.ps1" \
-      --service-account "$WS_SA" \
-      --scopes https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/devstorage.read_only \
-      $PC_WS_NET_FLAG \
-      --quiet >/dev/null || PC_VMC_RC=$?
-    gcloud compute instances describe "$WS_VM_NAME" --zone "$WS_VM_ZONE" --project "$PROJECT" \
-      >/dev/null 2>&1 \
-      || die "the workstation VM $WS_VM_NAME is still absent in $WS_VM_ZONE after a create
-attempt (exit $PC_VMC_RC). The describe is the authority here, not the create status, because a
-concurrent run makes create a 409 and that is success for our purposes."
-    rm -f "$HERE/.ws-startup.ps1"
-    echo "  created $WS_VM_NAME in $WS_VM_ZONE (WINDOWS: $WS_IMG_FAMILY, e2-standard-4,"
-    echo "  150 GB pd-balanced, Shielded VM, service account $WS_SA)"
-    echo "  NO EXTERNAL IP. Egress is via the SAME Cloud NAT the linux path uses"
-    echo "  ($PC_NAT_CFG on router $PC_NAT_RTR in $REGION) -- outbound only."
-    echo "  RDP INGRESS IS IAP-ONLY: firewall rule $PC_RDP_FW allows tcp:3389 from"
-    echo "  35.235.240.0/20 (IAP TCP forwarding) to instances tagged $PC_RDP_TAG, and from"
-    echo "  nowhere else. 3389 is NOT open to the internet and must never be."
-    if [ -n "$PC_RDP_WORLD" ]; then
-      echo "  !! HEADS UP: this project ALSO has the auto-created firewall rule"
-      echo "  !! default-allow-rdp, which permits tcp:3389 from 0.0.0.0/0 to every instance"
-      echo "  !! in the network. It does not expose THIS VM, because this VM has no external"
-      echo "  !! address -- but it would expose any Windows instance that ever gets one. It"
-      echo "  !! was NOT deleted here because it is not ours and something else may use it."
-      echo "  !! To remove it once you are sure:"
-      echo "  !!   gcloud compute firewall-rules delete default-allow-rdp --project $PROJECT"
-    fi
-    echo
-    echo "  A STARTUP SCRIPT IS PROVISIONING THIS BOX RIGHT NOW, IN THE BACKGROUND. It"
-    echo "  installs Google Chrome and the Claude desktop app, it verifies the Authenticode"
-    echo "  signature of everything it downloads before running it, and it is idempotent."
-    echo "  It logs to C:\\ProgramData\\paracoding\\ws-setup.log on the VM and the"
-    echo "  provisioning run finishes with the line WS-SETUP-DONE. Give it about fifteen"
-    echo "  minutes. The idle-stop below writes to the SAME log afterwards, so WS-SETUP-DONE"
-    echo "  is a line in it and not the last line of it."
-    echo
-    # [WS-WIN-IDLE-V49] SAID HERE AS WELL AS IN THE ACCESS BANNER, because this is the only
-    # output a workstation.sh create ever prints -- that script does not reach the banner.
-    # The measured failure: the operator was told what this box installs and nothing about
-    # what it costs, assumed the Linux box's idle-stop applied, and left one running.
-    echo "  IT STOPS ITSELF AFTER 30 MINUTES IDLE, AND THIS IS HOW TO STOP IT DOING THAT."
-    echo "  The same startup script installs a scheduled task, PcWsIdleStop, that checks"
-    echo "  every 5 minutes from 10 minutes after boot. Six consecutive checks with no"
-    echo "  Active RDP or console session and CPU under 25% run Stop-Computer, which takes"
-    echo "  the instance to TERMINATED and stops the compute charge. Any activity resets the"
-    echo "  count. A DISCONNECTED RDP session is NOT activity, so before you close the RDP"
-    echo "  window on a long unattended job, hold the box up with the busy marker:"
-    echo "    New-Item -ItemType File -Force -Path C:\\ProgramData\\paracoding\\ws-busy"
-    echo "    Remove-Item -Force C:\\ProgramData\\paracoding\\ws-busy      (release it)"
-    echo "  Or turn the whole thing off, and pay for every hour this VM exists:"
-    echo "    Disable-ScheduledTask -TaskName PcWsIdleStop"
-    echo
-    echo "  THE FIRST PASSWORD IS MANUAL AND CANNOT BE AUTOMATED SAFELY. Windows has no"
-    echo "  equivalent of OS Login here: you log in with a username and a password, and the"
-    echo "  only way to get the first one is the command below, which MINTS A NEW"
-    echo "  ADMINISTRATOR PASSWORD AND PRINTS IT IN CLEARTEXT. An installer that ran it for"
-    echo "  you would write a working administrator credential into this terminal, your"
-    echo "  scrollback and your CI logs, where it would live forever. So you run it, once,"
-    echo "  when you are ready:"
-    echo "    1. mint the password (prints it -- keep it somewhere safe):"
-    echo "         gcloud compute reset-windows-password $WS_VM_NAME \\"
-    echo "           --zone $WS_VM_ZONE --project $PROJECT --user paracoding"
-    echo "    2. open the IAP tunnel and LEAVE IT RUNNING in its own terminal:"
-    echo "         gcloud compute start-iap-tunnel $WS_VM_NAME 3389 \\"
-    echo "           --local-host-port=localhost:13389 --zone $WS_VM_ZONE --project $PROJECT"
-    echo "    3. point any RDP client at   localhost:13389   and log in as paracoding."
-    echo "       (Windows: mstsc /v:localhost:13389 -- macOS: Microsoft Remote Desktop)"
-    echo "    4. the desktop may be up before the software is; if Chrome or Claude is"
-    echo "       missing, wait for WS-SETUP-DONE in the log above."
-    else
+    # [WS-LINUX-ONLY-V1] EVERYTHING ABOVE THIS LINE IS SHARED SETUP and none of it was
+    # Windows-specific: the instance-name lookup, the zone listing, the Cloud NAT + Cloud
+    # Router, and the dedicated pc-workstation service account. There is one router
+    # (paracoding-nat-router) and one NAT config (paracoding-nat) per region, which is why
+    # removing the Windows arm cannot strand a second billed NAT gateway behind it. What
+    # follows is the image, the access model and the provisioning script -- previously the
+    # only three things that differed between the two, and now simply the only three.
     # UBUNTU LTS, RESOLVED NOT ASSUMED. Image family names are renamed between releases and a
     # family that does not exist fails the create with a message about images, not about this
     # line. Take the first of these that the project can actually describe.
@@ -1725,6 +1108,38 @@ MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme
 PC_CHROMEDESK_EOF
 chmod 0644 /usr/local/share/applications/google-chrome.desktop
 id -u pc-cdp >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin pc-cdp
+# [SEC-CDP-TOKEN-SECRET-V1] TWO SOURCES, AND METADATA IS STILL NOT ONE OF THEM.
+# The original rule here was "minted on the box and never transported", and its reason
+# stands unchanged: instance metadata is returned IN FULL by compute.instances.get to
+# anybody holding roles/compute.viewer, so a token there is a token handed to every
+# reader in the project. Nothing below puts it in metadata -- metadata carries only the
+# NAME of a secret.
+# WHAT CHANGED AND WHY. The console has to hold this token now: the MCP browser tools
+# call the bridge, so both ends need the same value, and "the operator reads it over a
+# tunnel and pastes it" is a manual step that scales to nobody. So when install.sh has
+# provisioned a Secret Manager secret and named it in pc-cdp-secret, the box reads the
+# value from there. That is a transport, and it is an auditable one with its own IAM on
+# a single secret, which is a different thing from broadcasting it to every project
+# viewer. When no secret is named -- workstation.sh run on its own -- the old behaviour
+# is exactly preserved: mint locally, never transport, operator reads it over the tunnel.
+PC_CDP_SECRET=$(pc_ws_meta pc-cdp-secret 2>/dev/null || true)
+if [ ! -s /opt/cdp-token ] && [ -n "$PC_CDP_SECRET" ]; then
+  install -m 0640 -o root -g pc-cdp /dev/null /opt/cdp-token
+  if gcloud secrets versions access latest --secret="$PC_CDP_SECRET" \
+       > /opt/cdp-token 2>/dev/null && [ -s /opt/cdp-token ]; then
+    chown root:pc-cdp /opt/cdp-token
+    chmod 0640 /opt/cdp-token
+    echo "read /opt/cdp-token from Secret Manager secret $PC_CDP_SECRET (root:pc-cdp 0640)."
+  else
+    # A FAILED FETCH MUST NOT LEAVE AN EMPTY TOKEN FILE. An empty file is not "no token",
+    # it is a token of zero length that a constant-time compare could be asked about, and
+    # the bridge would start holding it. Remove it and fall through to the local mint, so
+    # the box ends up with a STRONG token that the console does not know rather than a
+    # weak one that it does.
+    rm -f /opt/cdp-token
+    echo "could not read secret $PC_CDP_SECRET; falling back to a locally minted token."
+  fi
+fi
 if [ ! -s /opt/cdp-token ]; then
   install -m 0640 -o root -g pc-cdp /dev/null /opt/cdp-token
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /opt/cdp-token
@@ -1732,7 +1147,7 @@ if [ ! -s /opt/cdp-token ]; then
   chmod 0640 /opt/cdp-token
   echo "minted /opt/cdp-token (root:pc-cdp 0640). It is NOT in instance metadata."
 else
-  echo "/opt/cdp-token already exists, left alone"
+  echo "/opt/cdp-token already present, left alone"
 fi
 # ---------------------------------------------------------------- CDP bridge :8025
 # Backend browser driving rather than scraping. The control plane already has the
@@ -1864,7 +1279,57 @@ POLICY_PATH = os.environ.get('CDP_POLICY', '/opt/cdp-policy.json')
 # TOKEN, which it does not have, and which is the same thing that stands between any
 # caller and the bridge on either bind. An nic0 bind with no DENY rule would not fix
 # that page and would add every other VM in the project to the same set.
-BIND_HOST = '127.0.0.1'
+# [SEC-CDP-NIC0-GATED-V1] LOOPBACK IS STILL THE DEFAULT AND STILL THE ANSWER WHEN
+# NOTHING SAYS OTHERWISE. What changed is that the DENY rule the paragraph above
+# calls for can now actually exist: install.sh step 9/10 creates a target-tagged
+# DENY on tcp:8025 at priority 900 and an ALLOW at 800 whose SOURCE TAG is carried
+# by the MCP service's Direct VPC egress. Where that pair is present, nic0 is
+# reachable by the control plane and by nothing else, which is exactly the condition
+# the loopback bind was standing in for.
+#
+# THE INSTALLER MEASURES; THIS FILE ONLY READS. The bridge's service account holds no
+# compute permission, so it cannot check a firewall rule itself and does not pretend
+# to. install.sh creates BOTH rules, reads BOTH back, and only then writes the
+# instance metadata key below. So this value is a RECORD OF A MEASUREMENT taken by
+# something that could take it, not a preference someone set.
+#
+# WHY THIS IS NOT THE ENVIRONMENT OVERRIDE THE OLD COMMENT REFUSED. That refusal was
+# right and still is: an override is a slower way to get 0.0.0.0 back. This accepts
+# exactly ONE literal, 'nic0', and resolves the address itself from the metadata
+# server -- there is no spelling of this key that produces 0.0.0.0, a chosen
+# interface, or any address the caller supplies. Anything else, absent, unreadable,
+# or an nic0 lookup that fails, falls back to loopback and says which and why. It is
+# also not writable by the thing loopback defends against: a page inside Chrome
+# cannot set instance metadata.
+def _pc_meta(key):
+    try:
+        rq = urllib.request.Request(
+            'http://metadata.google.internal/computeMetadata/v1/' + key,
+            headers={'Metadata-Flavor': 'Google'})
+        with urllib.request.urlopen(rq, timeout=3) as r:
+            return r.read().decode('utf-8', 'replace').strip()
+    except Exception:
+        return ''
+
+
+def _pc_bind_host():
+    want = _pc_meta('instance/attributes/pc-cdp-bind')
+    if want != 'nic0':
+        if want:
+            sys.stderr.write('[cdp-bridge] pc-cdp-bind=%r is not the one accepted value '
+                             "'nic0'; binding loopback\n" % want[:32])
+        return '127.0.0.1'
+    ip = _pc_meta('instance/network-interfaces/0/ip')
+    if not ip:
+        sys.stderr.write('[cdp-bridge] pc-cdp-bind=nic0 but nic0 has no address from the '
+                         'metadata server; binding loopback\n')
+        return '127.0.0.1'
+    sys.stderr.write('[cdp-bridge] binding nic0 %s -- install.sh recorded that the '
+                     'tcp:8025 DENY/ALLOW pair is in place\n' % ip)
+    return ip
+
+
+BIND_HOST = _pc_bind_host()
 
 
 # ---------------------------------------------------------------- method allowlist
@@ -2493,15 +1958,42 @@ echo "WS-SETUP-DONE"
 PC_WS_STARTUP_EOF
     chmod 0600 "$HERE/.ws-startup.sh"
     PC_VMC_RC=0
+    # [WS-DISK-COST-V1] 100GB pd-balanced -> 50GB, AND THE REASON IS THE STANDING BILL.
+    # A STOPPED instance still bills for its disk, every month, whether or not anyone ever
+    # starts it -- so the boot disk is the one number on this command that costs money while
+    # nothing is happening. At us-east1 list, pd-balanced is about $0.10/GB/month: the old
+    # 100GB was roughly $10/month standing, this is roughly $5. The image plus XFCE, Chrome
+    # and the Claude desktop app lands well under 20GB, so 50 is headroom rather than a
+    # squeeze, and a boot disk can be grown later without recreating the instance -- it
+    # cannot be shrunk, which is the asymmetry that makes the smaller default the right one.
+    # PC_WS_DISK_GB overrides it for anyone who wants the old size back.
+    PC_WS_DISK_GB="${PC_WS_DISK_GB:-50}"
+    # [SEC-CDP-NIC0-GATED-V1] A NETWORK TAG, because a firewall rule cannot name an instance.
+    # The tcp:8025 DENY/ALLOW pair install.sh creates is target-tagged, and this is the tag it
+    # targets. It is set at create time rather than added later so there is never a window in
+    # which the box is up and the DENY does not apply to it.
+    PC_WS_NETTAG="pc-${PC_LP}${PC_TOK}cdp-host"
+    PC_WS_NETTAG=$(printf '%s' "$PC_WS_NETTAG" | tr -cd '"'"'[:alnum:]-'"'"')
+    # [SEC-CDP-TOKEN-SECRET-V1] SCOPES WIDEN TO cloud-platform AND THE AUTHORITY DOES NOT.
+    # The box needs to read one Secret Manager secret. There is no per-API scope for Secret
+    # Manager -- it is reachable only under cloud-platform -- so the narrow-looking triple
+    # that was here could not express "and this one secret". A SCOPE IS A CEILING, NOT A
+    # GRANT: what this VM can actually do is decided by the IAM held by $WS_SA, which is
+    # logging writer, monitoring writer, and secretAccessor ON A SINGLE SECRET. Google's own
+    # current guidance is exactly this -- cloud-platform plus a least-privilege service
+    # account -- because the legacy scope list silently blocks calls in ways that read as
+    # permission bugs. The old triple is what made devstorage.read_only look like a control;
+    # it was a ceiling too.
     retry gcloud compute instances create "$WS_VM_NAME" --project "$PROJECT" \
       --zone "$WS_VM_ZONE" --machine-type e2-standard-4 \
       --image-family "$WS_IMG_FAMILY" --image-project ubuntu-os-cloud \
-      --boot-disk-size 100GB --boot-disk-type pd-balanced \
+      --boot-disk-size "${PC_WS_DISK_GB}GB" --boot-disk-type pd-balanced \
       --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
       --metadata enable-oslogin=TRUE,pc-claude-ext-id="$PC_WS_EXT_ID",pc-claude-apt-repo="$PC_WS_CLAUDE_APT_REPO",pc-claude-apt-key="$PC_WS_CLAUDE_APT_KEY",pc-claude-apt-fpr="$PC_WS_CLAUDE_APT_FPR" \
       --metadata-from-file startup-script="$HERE/.ws-startup.sh" \
       --service-account "$WS_SA" \
-      --scopes https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write,https://www.googleapis.com/auth/devstorage.read_only \
+      --tags "$PC_WS_NETTAG" \
+      --scopes https://www.googleapis.com/auth/cloud-platform \
       $PC_WS_NET_FLAG \
       --quiet >/dev/null || PC_VMC_RC=$?
     gcloud compute instances describe "$WS_VM_NAME" --zone "$WS_VM_ZONE" --project "$PROJECT" \
@@ -2511,7 +2003,7 @@ attempt (exit $PC_VMC_RC). The describe is the authority here, not the create st
 concurrent run makes create a 409 and that is success for our purposes."
     rm -f "$HERE/.ws-startup.sh"
     echo "  created $WS_VM_NAME in $WS_VM_ZONE ($WS_IMG_FAMILY, e2-standard-4,"
-    echo "  100 GB pd-balanced, Shielded VM, service account $WS_SA)"
+    echo "  ${PC_WS_DISK_GB} GB pd-balanced, Shielded VM, service account $WS_SA)"
     if [ "$PC_WS_EGRESS" = cloud-nat ]; then
       echo "  NO EXTERNAL IP. Egress is via Cloud NAT ($PC_NAT_CFG on router $PC_NAT_RTR in"
       echo "  $REGION) -- outbound only, nothing inbound, no firewall rule opened."
@@ -2552,9 +2044,8 @@ concurrent run makes create a 409 and that is success for our purposes."
     echo "    4. wait for /var/log/paracoding-ws-setup.log to end with WS-SETUP-DONE"
     echo "    5. PASTE that command there and run it. It asks you to set a 6-digit PIN."
     echo "    6. open   https://remotedesktop.google.com/access   and connect."
-    fi
   fi
-  # ONE CALL SITE, AND IT DOMINATES ALL THREE PATHS ABOVE -- adopt, windows create and linux
+  # ONE CALL SITE, AND IT DOMINATES BOTH PATHS ABOVE -- adopt and create
   # create. An ADOPTED instance needs this exactly as much as a new one: the binding lives on
   # the tunnel resource, not on the image, so a VM somebody else created is unreachable for
   # the same reason. Everything in it is describe-first / read-modify-write, so a second run
@@ -2598,48 +2089,31 @@ fi
 # The ZONE is never composed from the region -- pc_workstation_create LISTS the zones that
 # are UP in $REGION and takes the first, because us-east1 has b, c and d and no a at all.
 
-PC_WS_KIND="${PC_WS_ARG:-${PC_WS_KIND:-}}"
+PC_WS_KIND="${PC_WS_ARG:-${PC_WS_KIND:-linux}}"
 case "$PC_WS_KIND" in
-  none|linux|windows) : ;;
-  "") PC_WS_KIND="" ;;
-  *)  echo "unknown flavour: $PC_WS_KIND (want none, linux or windows)" >&2; exit 2 ;;
+  none|linux) : ;;
+  *)  echo "unknown argument: $PC_WS_KIND (want none or linux)" >&2; exit 2 ;;
 esac
-if [ -z "$PC_WS_KIND" ]; then
-  echo
-  echo "  A workstation VM is what makes the vm_* tools work, and it is where you would run"
-  echo "  the Claude desktop app. Two flavours. THEY DIFFER IN HOW YOU GET A SCREEN, AND"
-  echo "  BOTH NOW STOP THEMSELVES AFTER 30 MINUTES IDLE -- [WS-WIN-IDLE-V49], because"
-  echo "  until this release only the linux one did and nothing said so:"
-  echo "    linux    Ubuntu LTS + XFCE + Chrome Remote Desktop. No inbound port at all and"
-  echo "             nothing to open, but CRD needs a manual one-time registration code and"
-  echo "             a headless CRD install has several ways to come up blank."
-  echo "             IDLE-STOPS: yes, after 30 minutes -- a systemd timer, every 5 minutes"
-  echo "             from boot+10min, 6 consecutive quiet checks then shutdown -h now."
-  echo "             Hold it up for an unattended job with  sudo touch /run/ws-busy."
-  echo "    windows  Windows Server, Desktop Experience. RDP is part of the OS, so there is"
-  echo "             less to go wrong -- and it STILL gets no public address: RDP is reached"
-  echo "             through IAP TCP forwarding only, never 3389 open to the internet. The"
-  echo "             first Administrator password has to be reset by hand before you log in."
-  echo "             IDLE-STOPS: yes, after 30 minutes -- a scheduled task on the same"
-  echo "             schedule, 6 consecutive checks with no Active session and CPU under"
-  echo "             25%, then Stop-Computer. A DISCONNECTED RDP session does not count as"
-  echo "             activity; hold the box up with C:\\ProgramData\\paracoding\\ws-busy."
-  echo "    none     do nothing and exit. Nothing created, nothing billed."
-  echo "  An idle-stop is not a spend cap: a machine you leave BUSY bills for every hour,"
-  echo "  and a stopped instance still bills for its 150 GB (windows) / 100 GB disk."
-  echo
-  echo "  You can run this script again later and pick the other one; they have different"
-  echo "  instance names and both can exist at the same time."
-  # [SEC-STDIN-DRAIN-V1] The SAME drained prompt install.sh uses, from the same source. An
-  # unrecognised answer RE-PROMPTS and is never rounded to the nearest option, because
-  # rounding "y" to a flavour is how somebody gets billed for a machine they did not pick.
-  # The default is NONE for the same reason it is there: the default must create nothing.
-  pc_ask_choice none 'none linux windows' \
-    '  Workstation VM? [none/linux/windows] (ENTER for none): '
-  PC_WS_KIND="$PC_CHOICE"
-fi
+# [WS-LINUX-ONLY-V1] NO PROMPT. There used to be a three-way question here whose default was
+# `none` -- so the ordinary case was: run the script, read a screen of comparison text, and
+# get nothing. That was defensible while there were two machines to choose between and one of
+# them could bill you a 150 GB disk by accident. There is one machine now, so the question has
+# one answer, and asking it would only be a way to fail to build the thing you asked for.
+#
+# `none` is KEPT as an explicit argument, not as a default. It is what a script passes to say
+# "check my flags and my project resolution but create nothing", and dropping it would break
+# any caller already doing that.
+echo
+echo "  Building the Linux workstation: Ubuntu LTS + XFCE + Chrome Remote Desktop."
+echo "  No inbound port is opened and the box gets no public address. Chrome Remote Desktop"
+echo "  needs a one-time registration code, which this script prints when it is done."
+echo "  IT STOPS ITSELF AFTER 30 MINUTES IDLE -- a systemd timer, 6 consecutive quiet checks."
+echo "  Hold it up for an unattended job with  sudo touch /run/ws-busy."
+echo "  An idle-stop is not a spend cap: a STOPPED instance still bills for its 50 GB boot"
+echo "  disk -- roughly \$5/month at list. That is the standing cost of having one at all."
+echo
 if [ "$PC_WS_KIND" = none ]; then
-  echo "  none: nothing created, nothing billed. Re-run with linux or windows when you want one."
+  echo "  none: nothing created, nothing billed. Re-run this script with no argument when you want one."
   exit 0
 fi
 

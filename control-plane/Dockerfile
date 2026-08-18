@@ -73,6 +73,16 @@ RUN npx esbuild src/index.ts --platform=node --format=cjs --target=node20 --outf
  && test -s dist/index.js
 RUN npx esbuild src/gittools.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/gittools.js --external:firebase-admin --external:@google-cloud/storage --external:isomorphic-git \
  && test -s dist/gittools.js
+# [GH-TOOLS-V1] The GitHub tool module. Its own RUN so every neighbouring line stays
+# byte-identical -- a deploy pre-condition counts the gittools assertion above exactly once,
+# and this comment deliberately does not repeat that string. NOT --bundle: ghtools.ts imports
+# nothing outside the standard library and reaches GitHub with global fetch, so transpiling is
+# enough and bundling would only hide that. `test -s` is the part that matters: index.ts
+# require()s ./ghtools.js at registration inside a try/catch, so a missing or empty output
+# would produce a GREEN build and an image where every gh_* tool is silently absent, with one
+# console line as the only trace. Fail the build instead.
+RUN npx esbuild src/ghtools.ts --platform=node --format=cjs --target=node20 --outfile=dist/ghtools.js \
+ && test -s dist/ghtools.js
 # PCV1-READ-V1: the git-object read path imports src/pcgit/05-adapter/src/vault-objenc.ts.
 # APPENDED as its own RUN so the gittools bundle line above stays byte-identical --
 # a deploy pre-condition counts it. This is a syntax gate: a file that compiles to

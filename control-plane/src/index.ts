@@ -479,6 +479,18 @@ const PC_SURFACE_MAP: { [k: string]: string } = {
   'GET /api/usage': 'console',
   'GET /api/keys/status': 'console',
   'POST /api/keys': 'console',
+  // [GH-TOOLS-V1] CONSOLE ONLY, and this table is why. The gh_* TOOLS run on the MCP surface,
+  // but they never call these routes -- they read Secret Manager and config/github directly,
+  // in-process. These three are the operator's panel: a human behind IAP pasting a token. A
+  // route registered on a surface that has no reason to serve it is reach nobody asked for.
+  //
+  // This entry is not paperwork. Omitting it is what took the first v10.2 MCP revision down at
+  // boot -- pcSurfaceGuard threw '[surface] GET /api/github/status names no surface', the
+  // container never listened, and Cloud Run refused the revision. At ZERO TRAFFIC, before
+  // anything moved, which is the entire point of deploying that way and of the guard existing.
+  'GET /api/github/status': 'console',
+  'POST /api/github/token': 'console',
+  'POST /api/github/config': 'console',
   'GET /api/fleet/agents': 'console',
   'POST /api/strain/delete': 'console',
   'POST /api/strain/subculture': 'console',
@@ -762,6 +774,24 @@ const PC_TOOL_CLASS: any = {
   git_propose: 'write',
   git_propose_patch: 'write',
   git_push: 'write',
+  // [GH-TOOLS-V1] THE SAME TWO CLASSES AS THE git_* TOOLS, NOT A THIRD ONE, AND THE REASON IS
+  // that a class no strain holds is a tool nobody can call. pcToolClasses() reads each strain's
+  // recorded tool_classes, PC_TOOLS_ENFORCE ships 1 on a real install, and an unrecognised class
+  // falls to 'other' and is withheld from every role -- so classifying these as 'github' would
+  // have shipped ten tools that register for nobody until every strain document is rewritten.
+  // Reading GitHub is a read and writing to it is a write; that is honest, and it works on the
+  // install that already exists. A narrower class is a later change that has to move the strain
+  // documents in the same commit, and it should not ride along with the feature landing.
+  gh_whoami: 'read',
+  gh_repos: 'read',
+  gh_read: 'read',
+  gh_list: 'read',
+  gh_log: 'read',
+  gh_diff: 'read',
+  gh_commit: 'write',
+  gh_branch: 'write',
+  gh_fork: 'write',
+  gh_pr: 'write',
   whoami: 'read',
   create_entities: 'write',
   create_relations: 'write',
@@ -1844,7 +1874,29 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
           });
         }
       }
-      if (!ents.length) return '(memory empty)';
+      // [SEC-FRESH-INSTALL-V1] AN EMPTY GRAPH IS THE NORMAL STATE OF A NEW INSTALL, AND
+      // '(memory empty)' READ LIKE A BROKEN ONE. Operator report 2026-08-18: agents on a
+      // first run were confused about what they were looking at. This is the first thing
+      // whoami hands them, so it is the right place to say which situation they are in --
+      // and to point at the one capability a first session most often needs and cannot see
+      // from the tool list alone, which is that a build starts with git_archive.
+      if (!ents.length) return [
+        'THIS INSTALL HAS NO FLEET MEMORY YET. That is the expected state of a NEW install,',
+        'not a fault and not a read failure: nothing has been measured here yet, so there is',
+        'nothing for you to be contradicting. You are the first session.',
+        '',
+        'WHAT THAT MEANS FOR YOU RIGHT NOW:',
+        '  * Do not go looking for prior context. There is none. Measure what you need.',
+        '  * Write back what you measure, with add_observations, in the same session. The next',
+        '    agent starts with whatever you leave and nothing else.',
+        '  * The repository is NOT empty even though memory is -- install.sh seeded the shipped',
+        '    release tree into it. git_archive returns the whole ref in ONE call and is how you',
+        '    get a buildable tree; git_read/git_list work file by file. Do not reconstruct a',
+        '    checkout out of diffs.',
+        '  * Build and deploy from that tree: build, deploy at ZERO traffic behind a tag,',
+        '    verify the tagged URL, then shift. Read the serving revision out of the service,',
+        '    never out of the deploy command output.',
+      ].join('\n');
 
       // A -- the complete name list, uncapped, emitted BEFORE anything a budget can trim.
       const namesBlock = ents.slice()
@@ -2204,7 +2256,14 @@ const ctxBuild = async () => {
       const _adm = await pcAdmitStage(who(a), String(a.command_type || ''), jargs);
       if (!_adm.ok) return { content: [{ type: 'text', text: _adm.refusal }], isError: true };
       await ref.set({ job_id: ref.id, staged_by: who(a), command_type: a.command_type, arguments: jargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha });
-      await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: `Staged ${a.command_type} (${ref.id}) awaiting human approval.`, timestamp: FieldValue.serverTimestamp() });
+      // [SEC-JOURNAL-TRUTH-V1] THIS LINE USED TO ASSERT AN APPROVAL THAT NEVER HAPPENED.
+      // It wrote 'awaiting human approval' UNCONDITIONALLY, five lines above the pcAutoRun
+      // call that executes the job in this same request. On a default install
+      // (PC_AUTO_APPROVE=1) that made the FIRST journal entry about every auto-run job false,
+      // and the journal is the audit trail an incident is reconstructed from -- the one record
+      // that is supposed to outrank an agent's memory of what it believed. Read off the same
+      // constant pcAutoRun branches on, so the two cannot drift.
+      await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: PC_AUTO_APPROVE ? `Staged ${a.command_type} (${ref.id}) -- PRE-APPROVED AND EXECUTING IN THIS CALL under PC_AUTO_APPROVE=1. No human approved it.` : `Staged ${a.command_type} (${ref.id}) awaiting human approval.`, timestamp: FieldValue.serverTimestamp() });
       // [SEC-AUTORUN-SCOPE-V1] Auto-run like run_command does. Before this line the job was
       // written at 'pending' and left there for an approval console that no longer exists,
       // so this tool reported STAGED and then nothing ever happened. Same pre-approval, same
@@ -2717,6 +2776,41 @@ const ctxBuild = async () => {
   } catch (e: any) {
     console.error('[gittools] not registered: ' + String(e && e.message ? e.message : e));
   }
+  // [GH-TOOLS-V1] REGISTERED UNCONDITIONALLY, WHICH DEPARTS FROM [SEC-GITTOOLS-UNCONFIGURED-V1]
+  // ON PURPOSE. That rule -- do not advertise a tool that will fail on its first call -- was
+  // written about git tools that threw an opaque configuration error at an adopter who had no
+  // way to know what was missing. These do the opposite: with no token stored, every gh_* tool
+  // returns one sentence naming the console panel that fixes it. Withholding them instead would
+  // mean the ONLY way to discover the capability exists is to read the release notes, and a tool
+  // surface nobody can see is the failure [PCGIT-ARCHIVE-TOOL-V1] already cost this fleet days
+  // over. A clear refusal is documentation; an absent tool is not.
+  try {
+    const _ght = require('./ghtools.js');
+    const _gn = _ght.registerGithubTools(server, z, AG, agentId, {
+      secretGet: harSecretGet,
+      secretPrefix: PC_GH_SECRET_PREFIX,
+      // [GH-PUBLISH-COPY-V1] The SAME module instance the git tools use, required the same way,
+      // so the vault registry it reads through is the one that is actually armed. Requiring a
+      // second transpiled copy would load a different module record with an empty key map --
+      // the exact failure [PCV1-GIT-VAULT-WIRE-V2] documents for gitBlobOid.
+      pcgitRead: async (p: string, r: string) => require('./gittools.js').readForPublish(p, r),
+      configGet: ghConfig,
+      journal: async (action: string, message: string) => {
+        // The journal is the audit trail and a GitHub write is at least as consequential as a
+        // privileged GCP call, which is journalled. It is best-effort ON PURPOSE: the commit has
+        // already landed on GitHub by the time this runs, so throwing here would report a failure
+        // for work that succeeded -- the exact shape of lie [SEC-JOURNAL-TRUTH-V1] removed.
+        try {
+          await db.collection('journal').add({
+            agent_id: agentId, action, message, timestamp: FieldValue.serverTimestamp(),
+          });
+        } catch (_e) { /* never fail a write that already happened */ }
+      },
+    });
+    console.log('[ghtools] registered ' + _gn.length + ' tools');
+  } catch (e: any) {
+    console.error('[gittools] not registered: ' + String(e && e.message ? e.message : e));
+  }
   return server;
 }
 
@@ -2875,6 +2969,16 @@ const WA_SESSION_MIN = parseInt(process.env.WA_SESSION_MIN || '10', 10);
 const GCP_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
 const GCP_BILLING_DATASET = process.env.GCP_BILLING_DATASET || 'billing_export';
 const WA_LOCK_HTML: string = pcHtml('locked.html');
+// [SEC-LOGIN-RECOVER-V1] THE SECOND LOCKED-STAGE DOCUMENT, AND WHY THERE ARE TWO.
+// locked.html carries the passkey flows -- unlock, first-setup, enrol -- and every one of them
+// needs WebAuthn. With PC_REQUIRE_PASSKEY=0 none of them can run, so on an install with no
+// credential registered and no WA_BOOTSTRAP_SECRET that page reaches its terminal branch and
+// tells the caller "No way in from here" over what was usually a two-second timing problem.
+// login.html is the document for THAT posture: it re-checks /api/webauthn/status until the IAP
+// key cache is warm, retries the request itself, and only stops -- capped, so the front door
+// cannot spin -- to say what it measured. Neither file replaces the other; the switch that
+// decides which auth applies decides which page explains it.
+const WA_LOGIN_HTML: string = pcHtml('login.html');
 // [SEC-NOGATE-V1] /gate IS GONE -- the route, the 142KB document behind it, and every redirect
 // into it. Two human URLs remain, /harness and /wiki, plus /mcp for connectors. There is
 // therefore nothing left for a bounce to point AT: a 302 to a route this file no longer
@@ -2896,7 +3000,7 @@ function waSendLocked(res: express.Response): void {
   res.status(401);
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.send(WA_LOCK_HTML);
+  res.send(PC_REQUIRE_PASSKEY ? WA_LOCK_HTML : WA_LOGIN_HTML);
 }
 const WA_DASH_HTML: string = pcHtml('dash.html');
 const waFetch: any = (globalThis as any).fetch;
@@ -2940,17 +3044,49 @@ function waMakeSession(): string {
 // the real evidence, so it is verified against Google's IAP JWKS. waSessionOk is synchronous, so
 // the keys are cached; a cold cache FAILS CLOSED and schedules a refresh rather than admitting an
 // unverified caller.
+//
+// [SEC-IAP-JWKS-COLDCACHE-V1] FAILING CLOSED ON A COLD CACHE IS CORRECT. ANSWERING FROM ONE IS NOT.
+// This function used to be fire-and-forget and was called once at module load, so the keys were
+// still absent when the first request arrived: pcIapEmail returned '' for a caller carrying a
+// perfectly valid assertion, waSessionOk said no, and every console URL answered 401 with
+// locked.html. On an install running PC_REQUIRE_PASSKEY=0 with no passkey registered and no
+// WA_BOOTSTRAP_SECRET, that page has no usable flow -- it renders "No way in from here" -- so a
+// cold start dead-ended the operator on his own console until he reloaded and hit the now-warm
+// cache. Reproduced deterministically against this exact code with a synthetic ES256 JWKS:
+// request at t=0 refused, same request at t=400ms admitted.
+//
+// THREE CHANGES, and the third is the one that is not obvious.
+//   1. It returns a promise, so boot can AWAIT the first fill before app.listen (see the bottom
+//      of this file). The port opens with usable keys instead of opening and refusing.
+//   2. An in-flight fetch is shared. The 1h guard needs PC_IAP_KEYS truthy to short-circuit, so
+//      while the cache was empty EVERY request fired its own request to gstatic -- the repro
+//      above fired three for two calls. A cold-start burst was a stampede.
+//   3. AN EMPTY KEY SET IS REFUSED. `PC_IAP_KEYS = m` assigned unconditionally, and `{}` is
+//      truthy, so one malformed or empty JWKS response installed a map that satisfies the 1h
+//      guard and matches no kid: refresh suppressed, every caller refused, for a FULL HOUR, with
+//      no way back except a redeploy. That is lockout-class and it is why this now keeps the
+//      previous keys and says so on stderr rather than overwriting them.
 const PC_IAP_JWKS_URL = 'https://www.gstatic.com/iap/verify/public_key-jwk';
-function pcIapRefreshKeys(): void {
-  if (PC_IAP_KEYS && Date.now() - PC_IAP_KEYS_AT < 3600000) return;
+let PC_IAP_KEYS_INFLIGHT: Promise<void> | null = null;
+function pcIapRefreshKeys(): Promise<void> {
+  if (PC_IAP_KEYS && Date.now() - PC_IAP_KEYS_AT < 3600000) return Promise.resolve();
+  if (PC_IAP_KEYS_INFLIGHT) return PC_IAP_KEYS_INFLIGHT;
   PC_IAP_KEYS_AT = Date.now();
-  try {
-    (globalThis as any).fetch(PC_IAP_JWKS_URL).then((r: any) => r.json()).then((j: any) => {
+  PC_IAP_KEYS_INFLIGHT = (async () => {
+    try {
+      const r: any = await (globalThis as any).fetch(PC_IAP_JWKS_URL);
+      const j: any = await r.json();
       const m: any = {};
       for (const k of (j.keys || [])) m[k.kid] = k;
-      PC_IAP_KEYS = m;
-    }).catch(() => { });
-  } catch (e) { }
+      if (Object.keys(m).length) PC_IAP_KEYS = m;
+      else console.error('[iap-jwks] refused an empty key set; keeping the previous keys');
+    } catch (e: any) {
+      console.error('[iap-jwks] refresh failed: ' + ((e && e.message) || String(e)));
+    } finally {
+      PC_IAP_KEYS_INFLIGHT = null;
+    }
+  })();
+  return PC_IAP_KEYS_INFLIGHT;
 }
 pcIapRefreshKeys();
 function pcIapEmail(req: express.Request): string {
@@ -5150,7 +5286,69 @@ async function harSecretGet(name: string): Promise<string | null> {
   const j: any = await r.json();
   try { return Buffer.from(j.payload.data, 'base64').toString('utf8'); } catch (e) { return null; }
 }
+// [SEC-SECRETWRITE-ALLOWLIST-V1] A POSITIVE ALLOWLIST OF WHAT THIS FUNCTION MAY WRITE, ENFORCED
+// BEFORE ANY REQUEST LEAVES THE PROCESS. Operator's requirement, and he is right to have raised
+// it: "make sure it can not over write an existing x-wing key ... to prevent some future attack
+// using that to overwrite the data lake key locking me out of my own data."
+//
+// WHAT THE THREAT ACTUALLY IS, measured rather than assumed. The X-Wing key itself is a CLOUD KMS
+// key (VAULT_KMS_KEY, KEM_XWING) and no Secret Manager write can touch it. The wrapped master is
+// a lake object living under one of the LAKE_EXEC_PREFIXES, and resolveKey() already refuses every
+// write beneath those prefixes for every role. So the specific attack is blocked twice over
+// today, in two other systems. This function is still where a future one would come from: it
+// takes an arbitrary NAME, it has always taken an arbitrary name, and the only thing keeping it
+// safe was that both of its callers happened to compose the name themselves. That is a property
+// of today's call sites, not a property of the function -- exactly the shape of guarantee this
+// codebase keeps learning not to trust.
+//
+// AN ALLOWLIST, NOT A DENYLIST, AND THAT CHOICE IS THE POINT. A denylist of critical names has to
+// be edited every time a secret is added and is wrong the first time somebody forgets -- and the
+// failure is silent and permanent, because a clobbered key is not recoverable from a backup of
+// ciphertext. An allowlist fails the other way: a NEW legitimate write is refused loudly until
+// someone adds it here deliberately, which is a build-time argument rather than a lockout.
+//
+// IT MATTERS MORE THAN IT LOOKS BECAUSE THE GRANT IS ABOUT TO WIDEN. github-token-<slug> is a name
+// this install has never created, so the control plane needs create-and-add on Secret Manager
+// where it previously only read. The narrower the code path behind a widened credential, the
+// better, and this keeps it to two shapes.
+//
+// [GH-SECRET-LANE-PREFIX-V1] THE PREFIX COMES FROM THE ENVIRONMENT, WITH THE UNPREFIXED NAME AS
+// THE DEFAULT, WHICH IS THE PATTERN THE LANE-LITERAL GATE ASKS FOR IN SO MANY WORDS: "compiled
+// code cannot see ${PC_LP}, so reach it through process.env with the unprefixed name as the
+// DEFAULT, and have install.sh set the variable." Every other secret this product creates is
+// lane-namespaced so that two installs can share one GCP project. The first version of this
+// wrote a bare github-token-<identity>, and the consequence is not cosmetic: in a two-lane
+// project both installs would share one secret, and lane B's installer would grant lane B's
+// service account read access to lane A's GitHub token. That is a cross-lane credential leak
+// created by a naming choice, and it is the reason this indirection exists at all.
+const PC_GH_SECRET_PREFIX = (process.env.PC_GH_SECRET_PREFIX || 'github-token-');
+const PC_GH_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+function pcGhSecretName(slug: string): string { return PC_GH_SECRET_PREFIX + slug; }
+function pcSecretWriteRefusal(name: string): string | null {
+  if (/^chat-key-(claude|gemini)$/.test(name)) return null;
+  // Anchored on BOTH ends: the prefix must match exactly and what follows must be a whole slug.
+  // A startsWith() test alone would admit <prefix>../chat-key-claude, which is the leak the
+  // sabotaged-list test in this commit's sibling proved a prefix-only rule lets through.
+  if (name.startsWith(PC_GH_SECRET_PREFIX)
+      && PC_GH_SLUG_RE.test(name.slice(PC_GH_SECRET_PREFIX.length))) return null;
+  return 'REFUSED: this service does not write the secret "' + name + '". Secret writes are '
+    + 'restricted to an explicit allowlist -- the chat API keys and ' + PC_GH_SECRET_PREFIX
+    + '<identity> -- so that no route, present or future, can overwrite a key this install '
+    + 'cannot regenerate. Nothing was sent to Secret Manager.';
+}
+
 async function harSecretSet(name: string, value: string): Promise<boolean> {
+  return (await harSecretSetX(name, value)).ok;
+}
+// [SEC-SECRETWRITE-REASON-V1] The reason travels back. harSecretSet returned a bare boolean and
+// threw the Secret Manager response away, so the console could only say "could not write the token
+// to Secret Manager" -- which is what it said to the operator, and it cost a diagnostic job to
+// learn the real answer was PERMISSION_DENIED on secrets.create. A failure report that names no
+// cause is the same defect as a check that cannot fail: it looks like diligence and carries no
+// information.
+async function harSecretSetX(name: string, value: string): Promise<{ ok: boolean; detail?: string }> {
+  const refusal = pcSecretWriteRefusal(name);
+  if (refusal) { console.error('[secret] ' + refusal); return { ok: false, detail: refusal }; }
   const tok = await waAccessToken();
   // ensure secret exists (ignore 409 already-exists)
   await waFetch('https://secretmanager.googleapis.com/v1/projects/' + HAR_PROJECT + '/secrets?secretId=' + encodeURIComponent(name), {
@@ -5161,8 +5359,28 @@ async function harSecretSet(name: string, value: string): Promise<boolean> {
     method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify({ payload: { data: Buffer.from(value, 'utf8').toString('base64') } }),
   });
-  return !!(r && r.ok);
+  if (r && r.ok) return { ok: true };
+  let detail = 'HTTP ' + (r ? r.status : '?');
+  try { const j: any = await r.json(); if (j && j.error && j.error.message) detail += ': ' + j.error.message; } catch (_e) { /* keep the status */ }
+  console.error('[secret] write of ' + name + ' failed -- ' + detail);
+  return { ok: false, detail };
 }
+// [GH-CONFIG-V1] config/github holds everything about the GitHub surface EXCEPT the tokens,
+// which live in Secret Manager and are never read by anything that answers a request. What is
+// here is deliberately all non-secret: which identity slugs exist, which one is the default,
+// an owner -> identity map so the right account is chosen by the repository being addressed,
+// an optional repository allowlist, and an api_base for GitHub Enterprise Server.
+//
+// A MISSING DOCUMENT IS A VALID STATE and returns {}. The tools read this on every session and
+// an install that has never opened the panel must not see an error -- it must see a feature
+// that has not been configured yet, which is a different thing and is what the tools say.
+async function ghConfig(): Promise<any> {
+  try {
+    const d = await db.collection('config').doc('github').get();
+    return d.exists ? (d.data() as any) : {};
+  } catch (_e) { return {}; }
+}
+
 function harKeyName(provider: string): string { return provider === 'gemini' ? 'chat-key-gemini' : 'chat-key-claude'; }
 async function harKey(provider: string): Promise<string> {
   const env = provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.ANTHROPIC_API_KEY;
@@ -5232,13 +5450,26 @@ async function harVmStatus(): Promise<any> {
   if (j._http !== 200) return { provisioned: !!j._http, state: 'UNKNOWN', http: j._http };
   return { provisioned: true, state: j.status || 'UNKNOWN' };
 }
+// [GCP-VMBTN-ACTS-V1] THE REASON COMPUTE GAVE IS THE ONLY USEFUL PART OF A REFUSAL, AND IT WAS DROPPED.
+// This returned { ok:false, http:403 } and threw the body away, so a missing
+// compute.instances.start on the control-plane identity was indistinguishable at the console
+// from a wrong zone, a deleted instance or a disabled API -- three different fixes behind one
+// number. Compute answers a refusal with { error: { message } }; that message is passed through
+// verbatim (it names the permission) and the console prints it next to the button. The shape is
+// unchanged and additive: ok/http/op are still there, so the MCP vm_start/vm_stop tools and any
+// caller reading them are untouched.
+// waFetch can answer null (no response at all), which the old code would have dereferenced --
+// it is a distinct outcome from a refusal and says so instead of reporting a phantom HTTP 0.
 async function harVmAction(action: string): Promise<any> {
   const tok = await waAccessToken();
   const r = await waFetch('https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/instances/' + WS_VM + '/' + action, {
     method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: '{}',
   });
+  if (!r) return { ok: false, http: 0, error: 'the Compute API did not answer', instance: WS_VM, zone: WS_ZONE };
   const j: any = await r.json().catch(() => ({}));
-  return { ok: !!(r && r.ok), http: r && r.status, op: j && j.name };
+  if (r.ok) return { ok: true, http: r.status, op: j && j.name };
+  const msg = (j && j.error && j.error.message) || (j && j.error_description) || ('Compute answered HTTP ' + r.status);
+  return { ok: false, http: r.status, error: msg, instance: WS_VM, zone: WS_ZONE, project: HAR_PROJECT };
 }
 // resolve the box's internal (RFC1918) IP so the control-plane can reach ops-exec over the VPC connector
 async function harBoxInternalIp(): Promise<string> {
@@ -6488,6 +6719,101 @@ app.get('/api/fleet/agents', waGate(async (req, res) => {
   res.json({ agents: list });
 }));
 // ---- strain delete (session + Face-ID/elevation gated; backs up to the Mycelium then removes) ----
+// ---------------------------------------------------------------------------
+// [GH-TOOLS-V1] THE GITHUB PANEL. Modelled on /api/keys directly above, including the part
+// that matters most: THE CREDENTIAL IS VERIFIED BEFORE IT IS STORED. A token that is expired,
+// revoked, or scoped to the wrong account is rejected at the moment it is pasted, with the
+// account name it actually authenticates as -- rather than being written to Secret Manager and
+// discovered to be wrong later by an agent, in a different context, with no way to tell whether
+// the tool or the token is at fault.
+//
+// NO ROUTE HERE EVER RETURNS A TOKEN. /status answers presence and the resolved login only.
+// ---------------------------------------------------------------------------
+app.get('/api/github/status', waGate(async (req, res) => {
+  const c = await ghConfig();
+  const slugs: string[] = Array.isArray(c.identities) && c.identities.length ? c.identities : ['default'];
+  const out: any[] = [];
+  for (const s of slugs) {
+    const t = await harSecretGet(pcGhSecretName(s));
+    if (!t) { out.push({ identity: s, stored: false }); continue; }
+    let login = null, err = null, type = null;
+    try {
+      const r = await waFetch('https://api.github.com/user', {
+        headers: { Authorization: 'Bearer ' + t.trim(), Accept: 'application/vnd.github+json',
+                   'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'paracoding' } });
+      if (r && r.ok) { const j: any = await r.json(); login = j && j.login; type = j && j.type; }
+      else { err = 'HTTP ' + (r ? r.status : '?') + ' -- the stored token is expired, revoked or invalid'; }
+    } catch (e: any) { err = String(e && e.message ? e.message : e); }
+    out.push({ identity: s, stored: true, login, account_type: type, error: err });
+  }
+  res.json({ identities: out, default_identity: c.default_identity || 'default',
+             owners: c.owners || {}, repos: c.repos || [], api_base: c.api_base || 'https://api.github.com' });
+}));
+
+app.post('/api/github/token', waGate(async (req, res) => {
+  const slug = String((req.body && req.body.identity) || 'default').trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(slug)) {
+    res.status(400).json({ error: 'identity must be lowercase letters, digits and hyphens, 1-32 characters' }); return;
+  }
+  const token = String((req.body && req.body.token) || '').trim();
+  if (!token) { res.status(400).json({ error: 'no token' }); return; }
+
+  let login: string | null = null;
+  try {
+    const r = await waFetch('https://api.github.com/user', {
+      headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json',
+                 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'paracoding' } });
+    if (!r || !r.ok) {
+      res.status(400).json({ error: 'GitHub rejected that token (HTTP ' + (r ? r.status : '?') + '). '
+        + 'Nothing was stored. A fine-grained token must not be expired and must have at least '
+        + 'read access to the repositories you want to use.' });
+      return;
+    }
+    const j: any = await r.json(); login = j && j.login;
+  } catch (e: any) {
+    res.status(400).json({ error: 'could not reach GitHub to verify the token: ' + String(e && e.message ? e.message : e) + '. Nothing was stored.' });
+    return;
+  }
+
+  const w = await harSecretSetX(pcGhSecretName(slug), token);
+  if (!w.ok) {
+    res.status(500).json({ error: 'GitHub accepted the token but it could not be stored: '
+      + (w.detail || 'unknown Secret Manager error')
+      + (String(w.detail || '').indexOf('PERMISSION_DENIED') >= 0
+         ? '  --  this install has never created a secret by this name, so the control plane needs '
+           + 'create-and-add on it. Create ' + pcGhSecretName(slug) + ' and grant this service '
+           + 'roles/secretmanager.secretAccessor and roles/secretmanager.secretVersionAdder on '
+           + 'THAT SECRET ONLY.'
+         : '') });
+    return;
+  }
+  try {
+    const c = await ghConfig();
+    const ids = Array.isArray(c.identities) ? c.identities.slice() : [];
+    if (ids.indexOf(slug) < 0) ids.push(slug);
+    await db.collection('config').doc('github').set(Object.assign({}, c, {
+      identities: ids, default_identity: c.default_identity || slug,
+    }), { merge: true });
+  } catch (_e) { /* the token is stored; the index is a convenience */ }
+  res.json({ ok: true, identity: slug, login });
+}));
+
+app.post('/api/github/config', waGate(async (req, res) => {
+  const b: any = req.body || {};
+  const patch: any = {};
+  if (b.default_identity != null) patch.default_identity = String(b.default_identity).trim().toLowerCase();
+  if (b.api_base != null) patch.api_base = String(b.api_base).trim().replace(/\/+$/, '');
+  if (Array.isArray(b.repos)) patch.repos = b.repos.map((x: any) => String(x).trim().toLowerCase()).filter(Boolean);
+  if (b.owners && typeof b.owners === 'object') {
+    const o: any = {};
+    for (const k of Object.keys(b.owners)) o[String(k).trim().toLowerCase()] = String(b.owners[k]).trim().toLowerCase();
+    patch.owners = o;
+  }
+  if (!Object.keys(patch).length) { res.status(400).json({ error: 'nothing to change' }); return; }
+  await db.collection('config').doc('github').set(patch, { merge: true });
+  res.json({ ok: true, config: await ghConfig() });
+}));
+
 app.post('/api/strain/delete', waGate(async (req, res) => {
   if (!waElevatedOk(req)) { res.status(401).json({ error: 'Face ID required' }); return; }
   const agentId = String((req.body && req.body.agentId) || '');
@@ -8836,9 +9162,34 @@ app.post('/api/strains/provision', waSafe(async (req: express.Request, res: expr
   const role = String((req.body && req.body.role) || '').trim();
   const display = String((req.body && req.body.display_name) || role).trim();
   if (!STRAIN_RE.test(role)) { res.status(400).json({ error: 'role must match fleet-<name> or work-runner' }); return; }
-  await db.collection('strains').doc(role).set({ role, display_name: display || role, status: 'active', created_by: 'passkey:' + WA_USER, created_at: FieldValue.serverTimestamp() }, { merge: true });
-  await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_provisioned', message: 'provisioned strain ' + role + ' (' + (display || role) + ') — active on next control-plane deploy', timestamp: FieldValue.serverTimestamp() });
-  res.json({ ok: true, role, status: 'active' });
+  // [SEC-STRAIN-CLASSES-V1] THE FIELD PC_TOOLS_ENFORCE READS HAD NO WRITER, WHICH IS THE WHOLE
+  // REASON THE FLAG ENFORCED NOTHING. pcToolClasses reads strains/<role>.tool_classes. Before
+  // this, the only writer of any field named tool_classes in the tree was /api/sessions/mint,
+  // and that one writes session_keys.tool_classes -- a DIFFERENT collection, read by a
+  // DIFFERENT function (pcNarrowClasses). So every strain took the absent-means-every-class
+  // branch at pcToolClasses:821 and PC_TOOLS_ENFORCE=1 withheld nothing from anybody. Turning
+  // the flag on was never sufficient; there was no supported way to populate what it reads.
+  // Validation below is deliberately IDENTICAL to the mint endpoint's so the two writers of
+  // this vocabulary cannot drift into accepting different names for the same class.
+  //
+  // AN EXPLICIT EMPTY ARRAY IS REFUSED HERE, AND THE ASYMMETRY WITH MINT IS THE POINT.
+  // pcNarrowClasses reads [] on a KEY as the read-only floor. pcToolClasses reads [] on a
+  // STRAIN through 'Array.isArray(raw) && raw.length', which is FALSE for [], which returns
+  // PC_ALL_CLASSES. So an operator writing [] to mean 'nothing' would silently grant
+  // EVERYTHING -- the exact inversion this endpoint exists to end. Refuse it and say what to
+  // write instead, rather than accepting a value whose meaning is the opposite of its shape.
+  const rawtc = (req.body || {}).tool_classes;
+  let stcl: string[] | null = null;
+  if (typeof rawtc !== 'undefined') {
+    if (!Array.isArray(rawtc)) { res.status(400).json({ error: 'tool_classes must be an array of class names; known: ' + PC_ALL_CLASSES.join(',') }); return; }
+    if (!rawtc.length) { res.status(400).json({ error: 'an empty tool_classes array on a STRAIN means EVERY class, not none: pcToolClasses treats absent and empty alike. Write ["read"] for sight-only, or omit the field to leave the strain unrestricted.' }); return; }
+    const badtc = rawtc.filter((x: any) => typeof x !== 'string' || PC_ALL_CLASSES.indexOf(x) < 0);
+    if (badtc.length) { res.status(400).json({ error: 'unknown tool class ' + JSON.stringify(badtc).slice(0, 120) + '; known: ' + PC_ALL_CLASSES.join(',') }); return; }
+    stcl = rawtc.map((x: any) => String(x));
+  }
+  await db.collection('strains').doc(role).set({ role, display_name: display || role, status: 'active', created_by: 'passkey:' + WA_USER, created_at: FieldValue.serverTimestamp(), ...(stcl === null ? {} : { tool_classes: stcl }) }, { merge: true });
+  await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_provisioned', message: 'provisioned strain ' + role + ' (' + (display || role) + ') — active on next control-plane deploy' + (stcl === null ? '' : ' — tool_classes RESTRICTED to [' + stcl.join(',') + ']'), timestamp: FieldValue.serverTimestamp() });
+  res.json({ ok: true, role, status: 'active', tool_classes: stcl, note: stcl === null ? 'unrestricted: this strain holds every tool class' : 'pcToolClasses caches for up to ' + PC_CLASS_TTL_MS + 'ms, so this takes effect within a minute' });
 }));
 app.post('/api/strains/retire', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
@@ -10268,6 +10619,16 @@ app.post('/api/sessions/mint', waSafe(async (req: express.Request, res: express.
 // POSITION IS LOAD-BEARING: this block sits BELOW the module-scope declarations of
 // STRAIN_NEVER_PASTEABLE and PC_KEY_TTL_MS that it reads. Both are `const`; a read above the
 // initializer compiles clean and throws ReferenceError at require time (revision 00245-jur).
+// [SEC-FRESH-INSTALL-V1] THIS SEED USED TO TELL EVERY NEW STRAIN TO WAIT FOR A PASSKEY TAP
+// THAT THIS INSTALL NEVER ASKS FOR. Its Doctrine line read 'STAGE, NEVER SHIP: propose
+// privileged work, the human approves with a passkey.' install.sh ships PC_AUTO_APPROVE=1 and
+// PC_REQUIRE_PASSKEY=0, so there is no approval console, nothing waits, and a staged job is
+// signed and executed in the same call. An agent reading this on a first run was told to
+// expect a step that does not exist -- the same defect class as the v8.5 inverted defaults,
+// where shipped prose asserted a posture the product does not ship. Operator report
+// 2026-08-18: agents were confused on first start. This is one of the two documents they read
+// before anything else, so it says what is actually true here, including that a fresh install
+// has no history to be missing.
 const SL_SEED_LESSONS = [
   '# LESSONS -- <STRAIN>',
   '',
@@ -10275,16 +10636,32 @@ const SL_SEED_LESSONS = [
   'by server-side reflection. A strain with no lessons file starts worse than an older strain: that',
   'was the old default and it is the reason this seed exists.',
   '',
+  'THIS IS A SEED, WHICH MEANS THIS INSTALL IS NEW. Nothing below was learned here -- it is the',
+  'starting posture, not experience. If this file still looks like this after real work, nothing',
+  'has been written back and that is worth saying out loud.',
+  '',
   '## Lane',
   '- I own ONE lane and do not speak for the whole fleet.',
   '',
   '## Doctrine',
-  '- STAGE, NEVER SHIP: propose privileged work, the human approves with a passkey.',
+  '- PRIVILEGED WORK RUNS IMMEDIATELY. This install ships PC_AUTO_APPROVE=1: a staged job is',
+  '  signed, executed and journalled in the same call. There is no approval queue and nobody',
+  '  taps anything. So be sure BEFORE the call, not after -- batch a privileged sequence into',
+  '  one job and read the job log rather than trusting the status field.',
   '- The container is ephemeral; the lake is the only durable memory.',
   '- Verify from the journal and from real bytes -- never claim fleet state from memory.',
   '',
+  '## How work reaches the code here',
+  '- The repository is seeded and buildable. git_archive returns the WHOLE ref in one call --',
+  '  use it to get a tree to build. git_read/git_list are for reading single files. Never',
+  '  rebuild a checkout out of diffs; git_diff is capped and truncates without saying so.',
+  '- Change code with git_propose (whole files), verify the treeOid it returns against one you',
+  '  built locally, then git_push by compare-and-swap. There is no force push.',
+  '- Deploy is three steps: build, deploy at ZERO traffic behind a tag, verify the tagged URL,',
+  '  then shift traffic. Read the serving revision out of the service, not out of the deploy.',
+  '',
   '## Open threads',
-  '- (none yet)',
+  '- (none yet -- this install has no history)',
 ].join('\n');
 async function slMintSessionKey(role: string, label: string): Promise<string> {
   // Same mechanism as POST /api/sessions/mint: pcs_ + 24 random bytes, only sha256(key) is
@@ -10453,9 +10830,32 @@ app.post('/api/sessions/revoke', waSafe(async (req: express.Request, res: expres
 // runtime stage are the same image -- so reaching this line failing would be news.
 console.log('[mcp2]', assertMcp2Loadable());
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Paracoding Control Plane & MCP SSE Server online on port ${PORT}`);
-});
+// [SEC-IAP-JWKS-COLDCACHE-V1] Open the port with usable IAP keys, not without them. When the
+// passkey is off, a verified IAP assertion is the ONLY thing waSessionOk can admit on, and that
+// check is synchronous -- it cannot wait for the JWKS itself. So the wait happens here, once.
+//
+// BOUNDED, AND IT LISTENS EITHER WAY. Cloud Run's startup probe on this service is a TCP check
+// with a 240s timeout, so a few hundred milliseconds is free; but a hang here would be a revision
+// that never becomes ready, which is worse than the bug being fixed. The race caps the wait at 5s
+// and listens regardless. If the fill did not finish, that is said on stderr rather than being
+// discovered later from 401s -- the service still fails CLOSED, exactly as before this change.
+function pcListen(): void {
+  app.listen(PORT, () => {
+    console.log(`Paracoding Control Plane & MCP SSE Server online on port ${PORT}`);
+  });
+}
+if (!PC_REQUIRE_PASSKEY && PC_IAP_AUD) {
+  let filled = false;
+  Promise.race([
+    pcIapRefreshKeys().then(() => { filled = true; }),
+    new Promise((r) => setTimeout(r, 5000)),
+  ]).then(() => {
+    if (!filled) console.error('[iap-jwks] first fill did not complete in 5s; listening anyway, early requests may be refused');
+    pcListen();
+  });
+} else {
+  pcListen();
+}
 
 // =============== FLOW HOOD FRONT DOOR (operator ruling 2026-07-31) ===============
 // One auth opens everything for WA_SESSION_MIN. Approving a job still costs a fresh,

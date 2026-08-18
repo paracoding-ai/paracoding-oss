@@ -1,0 +1,195 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  [SEC-LOGIN-RECOVER-V1]  THE RECOVERABLE LOCKED STAGE.
+
+  What this is: the document served, under a 401, in place at whichever console URL was
+  asked for, WHEN THE PASSKEY IS OFF (PC_REQUIRE_PASSKEY=0). locked.html still serves the
+  passkey posture and is unchanged; waSendLocked() picks between the two.
+
+  WHY IT EXISTS. With the passkey off, a verified IAP assertion is the only thing
+  waSessionOk() can admit on, and locked.html has nothing to offer that caller: its three
+  flows are unlock, first-setup and enrol, all of which need WebAuthn. On an install with no
+  credential registered and no WA_BOOTSTRAP_SECRET it therefore rendered its terminal
+  branch -- "No way in from here", a page whose own advice is to go and re-run the installer
+  bootstrap from a shell. The operator met that page after nothing worse than a cold start
+  ([SEC-IAP-JWKS-COLDCACHE-V1]) and it told him he was locked out of his own console. He was
+  not. A reload fixed it.
+
+  THIS PAGE DOES THE RELOAD. That is the whole idea and it is smaller than it sounds:
+
+  IF YOU CAN READ THIS PAGE, GOOGLE HAS ALREADY LET YOU IN. IAP sits at the edge; a caller it
+  has not authenticated gets IAP's own redirect to the Google sign-in and never reaches this
+  app at all. So there is no Google prompt for this page to raise, and it deliberately loads
+  no third-party script to try. What is in doubt is never "is this a real human" -- IAP has
+  settled that -- it is only whether THIS PROCESS can currently verify the assertion IAP
+  attached, and whether the verified address is on WA_APPROVER_EMAILS.
+
+  GET /api/webauthn/status ANSWERS THE FIRST QUESTION EXACTLY. Its `iap` field is
+  `!!PC_IAP_AUD && !!pcIapEmail(req)` -- computed through the SAME key cache waSessionOk()
+  uses. So `iap:false` on a freshly started container is precisely the cold-cache state, and
+  `iap` flipping to true is a direct signal that a retry will now succeed. We poll it with a
+  short backoff instead of guessing at a delay.
+
+  AND A RELOAD COVERS THE SECOND CASE FOR FREE. If the IAP session has genuinely expired,
+  navigating is what hands the browser to IAP, which runs the Google flow itself and returns
+  the caller here. One action, both branches, no popup and no ?next= to get wrong.
+
+  THE LOOP GUARD IS THE LOAD-BEARING PART. This page is served AT the URL it was requested
+  for, so a reload that fails lands back on this page, which would reload again: an
+  unbounded spin, on the front door, with no server-side way out. Automatic reloads are
+  therefore capped (PC_MAX_AUTO) and counted in sessionStorage. The counter carries a
+  timestamp and resets after PC_EPISODE_MS so that a cold start today cannot exhaust the
+  budget for an unrelated refusal tomorrow. Past the cap the page STOPS, states what it
+  measured, and waits for a human click.
+
+  NO BASE64 AND NO data: URL ANYWHERE IN THIS FILE. blob-audit.mjs fails the BUILD on an
+  encoded document under src/, and blob-baseline.json allows none.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0a0f">
+  <meta name="referrer" content="no-referrer">
+  <title>Sign in</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           background:#0a0a0f; color:#e8e8ea;
+           font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+    .card { width:min(92vw,430px); padding:32px 28px; border:1px solid #1e2430; border-radius:14px;
+            background:#0e1116; text-align:center; }
+    .brand { letter-spacing:.28em; font-size:11px; color:#8a8f98; text-transform:uppercase; }
+    h1 { margin:6px 0 20px; font-size:22px; font-weight:600; color:#d8b45a; }
+    button { width:100%; padding:13px 18px; font-size:15px; font-weight:600; cursor:pointer;
+             border:0; border-radius:9px; background:#d8b45a; color:#14100a; }
+    button:disabled { opacity:.5; cursor:default; }
+    .msg { margin-top:16px; font-size:14px; min-height:20px; }
+    .err { color:#ef6b6b; }
+    .ok  { color:#5fd08a; }
+    .hint { margin-top:18px; font-size:12px; color:#6f757e; }
+    .spin { display:inline-block; width:13px; height:13px; margin-right:8px; vertical-align:-2px;
+            border:2px solid #3a4150; border-top-color:#d8b45a; border-radius:50%;
+            animation:pcspin .8s linear infinite; }
+    @keyframes pcspin { to { transform:rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <!-- pc-locked-stage: the stable marker install.sh's self-test greps for. It is on BOTH
+       this page and locked.html, so the check asserts "an anonymous caller gets the locked
+       stage" without asserting WHICH of the two postures is deployed, and without keying on
+       a brand word that a rebrand is free to change. -->
+  <div class="card" data-pc-locked-stage="1">
+    <div class="brand">Paracoding.AI</div>
+    <h1>Sign in</h1>
+    <div id="pane"><button id="go" disabled><span class="spin"></span>Checking…</button></div>
+    <div class="msg" id="msg"></div>
+    <div class="hint" id="hint"></div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var msg = $('msg'), hint = $('hint'), go = $('go');
+
+  var PC_MAX_AUTO   = 2;         // automatic reloads before we stop and ask for a click
+  var PC_EPISODE_MS = 60000;     // a counter older than this belongs to a different episode
+  var PC_POLLS      = [400, 800, 1600, 2400];   // backoff while the key cache warms
+  var PC_KEY        = 'pc_login_tries';
+
+  function say(t, cls) { msg.innerHTML = ''; msg.textContent = t || ''; msg.className = 'msg' + (cls ? ' ' + cls : ''); }
+  function busy(t) { msg.innerHTML = '<span class="spin"></span>'; msg.appendChild(document.createTextNode(t)); msg.className = 'msg'; }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // sessionStorage can throw (Safari private mode, embedded webviews). A recovery page that
+  // dies on its own loop guard is worse than one that simply never auto-retries, so every
+  // access is wrapped and the failure mode is "no automatic reload", not "blank page".
+  function readTries() {
+    try {
+      var raw = window.sessionStorage.getItem(PC_KEY);
+      if (!raw) return 0;
+      var v = JSON.parse(raw);
+      if (!v || typeof v.n !== 'number' || typeof v.t !== 'number') return 0;
+      if (Date.now() - v.t > PC_EPISODE_MS) return 0;   // stale: a different episode
+      return v.n;
+    } catch (e) { return 0; }
+  }
+  function writeTries(n) {
+    try { window.sessionStorage.setItem(PC_KEY, JSON.stringify({ n: n, t: Date.now() })); } catch (e) {}
+  }
+  function clearTries() { try { window.sessionStorage.removeItem(PC_KEY); } catch (e) {} }
+
+  // Re-request THIS url. With the session check now passing the server returns the real page
+  // instead of this one, so the reload IS the whole handoff and the caller lands where they
+  // were headed. If instead the IAP session has lapsed, IAP intercepts this navigation and
+  // runs the Google sign-in itself. The query string is dropped deliberately: it can carry a
+  // one-time token and neither form should survive into history.
+  function retry(auto) {
+    if (auto) writeTries(readTries() + 1); else clearTries();
+    say('Signing you in…', 'ok');
+    window.location.replace(window.location.pathname);
+  }
+
+  async function status() {
+    var r = await fetch('/api/webauthn/status', { credentials: 'include', cache: 'no-store' });
+    return await r.json();
+  }
+
+  function offerButton(label, note, cls) {
+    go.disabled = false;
+    go.textContent = label;
+    go.onclick = function () { go.disabled = true; retry(false); };
+    if (note) { hint.textContent = note; }
+    if (cls) { msg.className = 'msg ' + cls; }
+  }
+
+  async function boot() {
+    var tries = readTries();
+    var st = null;
+
+    busy('Checking your session…');
+    try { st = await status(); }
+    catch (e) {
+      say('Cannot reach the console.', 'err');
+      offerButton('Try again', 'The server did not answer. It may still be starting up.');
+      return;
+    }
+
+    // The cold-cache window. `iap` is computed through the same key cache the session check
+    // uses, so we are watching the exact state that decides the retry, not waiting a guess.
+    if (!st.iap) {
+      for (var i = 0; i < PC_POLLS.length && !st.iap; i++) {
+        busy('Waiting for the console to finish starting…');
+        await sleep(PC_POLLS[i]);
+        try { st = await status(); } catch (e) { /* keep the earlier answer and keep trying */ }
+      }
+    }
+
+    if (st.iap) {
+      if (tries < PC_MAX_AUTO) { retry(true); return; }
+      // We have a verified Google identity and the console still refused, twice. That is no
+      // longer a timing problem, so stop reloading and name the likely cause instead of
+      // spinning on the front door.
+      say('Google signed you in, but the console refused the session.', 'err');
+      offerButton('Try once more',
+        'Your account is authenticated but may not be on the approver list (WA_APPROVER_EMAILS), '
+        + 'or this install requires a passkey. Retrying will not fix either.');
+      return;
+    }
+
+    // No verified IAP identity. Either IAP is not in front of this service, or the sign-in
+    // has lapsed -- and a navigation is exactly what lets IAP put that right.
+    say('Your sign-in needs refreshing.', 'err');
+    offerButton('Sign in with Google',
+      'This sends you back through Google. If it returns you here, IAP may not be enabled '
+      + 'on this service.');
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

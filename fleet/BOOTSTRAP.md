@@ -27,6 +27,13 @@ Never echo, log, or write the key.
 whoami hands you what is already known. Do not re-derive it, and do not contradict it
 without measuring first.
 
+IF IT SAYS THIS INSTALL HAS NO FLEET MEMORY YET, THAT IS NORMAL AND IT MEANS YOU ARE FIRST.
+A new install has measured nothing, so there is no prior context to go looking for and nothing
+you can be contradicting. It is not a read failure. What it does mean is that whatever you
+leave behind IS the context the next session gets -- so write back what you measure, in the
+same session, or it is gone. The repository is NOT empty in that state: install.sh seeded the
+shipped release tree into it, and git_archive hands you the whole thing in one call.
+
 Write back, in the same session, anything you measured, corrected, or were told:
 
   measured   a tool returned it -- put the job id, path, or revision in evidence

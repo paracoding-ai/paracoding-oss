@@ -1,35 +1,38 @@
-# release manifest v10.0
-# generated from source commit f90c62943af74154887395e9e9478db8af1c7596
+# release manifest v10.2
+# generated from source commit 0efc8d20ecc15e20665774acfdaa9b582b6712ce
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 d793f1efae3654cf     16302  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 b2feedda8e7894e9      4074  NOTICE
-d98adf60ca2d9757     12940  README.md
-4c00cfcfeb7d6d7c     12021  SECURITY.md
-bf94f2aa04ed9dd6    374078  install.sh
+17cfc151e593e690     18966  README.md
+7c4dc19905d92da6     12021  SECURITY.md
+743abbc898c708e0    398444  install.sh
 d026c02745cfd8ae     45586  uninstall.sh
-803c12b661a5a4a7    151497  workstation.sh
+00eef184c990af61     14689  upgrade.sh
+1a2c35f49245f087    120055  workstation.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-9e8ad3fda1ef6f34       426  agent-plugin/plugin.json
-20e61656b84e9132     11584  control-plane/Dockerfile
+804f56e672c89039       426  agent-plugin/plugin.json
+b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
 8e56fc9bee8a929e      1104  control-plane/package.json
 652f180d90bcb303     36871  control-plane/route-audit.mjs
-e381892666a73016     25839  control-plane/route-baseline.json
+c20f13925c05f467     25930  control-plane/route-baseline.json
 06552f3a3ea14007       257  control-plane/tsconfig.json
 0185af4b61634a5a     67494  control-plane/mcp2026/CONFORMANCE.md
 fe5d3e41d95ee509     23060  control-plane/mcp2026/DUAL-ERA.md
 415023a6d54977cf     74093  control-plane/mcp2026/conformance.mjs
 6b8c38a492d565cf     53525  control-plane/src/dash.html
-59439c5f73a52721     37212  control-plane/src/gittools.ts
+0c9134137a518c51     29480  control-plane/src/ghtools.ts
+70b9fb50d0107b4b     38263  control-plane/src/gittools.ts
 1308f3f465cf1114     23327  control-plane/src/gppatch.ts
-5943af689bf4a6b0    161564  control-plane/src/harness.html
-42bb20a42aa276ae    762288  control-plane/src/index.ts
-83201c9415cfce34     19007  control-plane/src/locked.html
+ec5bb9de632e980d    173740  control-plane/src/harness.html
+fb177fccc6d96ee2    790426  control-plane/src/index.ts
+d659e940bd31caa4     19474  control-plane/src/locked.html
+296dac8ac2408861      9834  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
 0822f926ce6e5727     32916  control-plane/src/mcp2026.ts
 81310ff02144a71a      5032  control-plane/src/brand/favicon.ico
@@ -66,7 +69,7 @@ c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 62536782273b880a     23472  devgate/RUNBOOK.md
 ed20628d307bcf14     11437  devgate/apply-classification-fix.py
 8e099e146bdd4a35    166999  devgate/smoke.py
-2ccee0db10507c3d      7630  fleet/BOOTSTRAP.md
+0845c10daf7783fb      8180  fleet/BOOTSTRAP.md
 5337e239d6214e18      4486  fleet/cowork-prompts.md
 1e5354a315f022bf      3477  fleet/strains/fleet-advisor.md
 c6196041bd1b1197      3761  fleet/strains/fleet-gcp.md

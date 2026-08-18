@@ -1,9 +1,9 @@
-# Paracoding — v10.0
+# Paracoding — v10.2
 
 Paracoding is an agent platform that installs into **your own** Google Cloud project in one
 command. Agents propose. You commit. Then it builds the next version of itself.
 
-bash install.sh
+./install.sh
 
 One command, no arguments, and a GCP project with billing enabled. The installer runs
 enables APIs, creates Firestore, mints three service accounts, generates every secret into
@@ -183,30 +183,112 @@ than putting IAP in front of a console that would be readable by anyone the mome
 off. If it cannot enable IAP it says so and prints the command to enable it yourself, rather
 than reporting a clean install. `uninstall.sh` removes both services.
 
+**The 401 that used to meet you on the very first login is fixed in this release, and it is
+worth saying what it was.** You would authenticate with Google, land on the console, and get
+a black locked page saying no. A browser refresh got you straight in, and it looked random.
+It was not random and it was not your setup: IAP verifies its assertion against Google's
+public keys, the fetch of those keys was fire-and-forget, and the first request after a cold
+start arrived before the keys did -- so a caller carrying a perfectly valid assertion was
+read as having no identity at all. Per Cloud Run INSTANCE, which is exactly why it seemed to
+come and go. Boot now waits for the first key fetch before it starts listening, bounded by a
+five-second race so a slow fetch cannot hang the service, and **an empty key set is refused**
+rather than cached -- one malformed response used to install a key map that satisfied the
+one-hour freshness check and matched nothing, locking every caller out for a full hour with
+no recovery but a redeploy. If you have seen the black page on an older install, that was
+this, and upgrading ends it.
+
+## Upgrading a live install
+
+    bash upgrade.sh                          upgrade the install in your current project
+    bash upgrade.sh --project P --region R   say which one explicitly
+
+**`install.sh` has always been the upgrade path and still is** -- it adopts every resource it
+finds, describes before it creates, and never rotates a secret, so running a newer release
+over a live install is the supported move rather than a trick. The version marker carries
+`<version> <commit>`, so the installer decides for itself whether a run is an upgrade, the
+same build again, or a downgrade it refuses by name.
+
+`upgrade.sh` therefore **owns nothing `install.sh` owns** -- it delegates to it. Two copies of
+a provisioning rule is how the two drift. What it adds is the three things `install.sh` cannot
+do, because `install.sh` does not know it is upgrading anything:
+
+1. **It refuses when there is nothing to upgrade.** No install marker in the project means
+   `install.sh` would build a NEW install there -- correct for `install.sh`, and a surprise
+   deployment with a bill for something called `upgrade`. More than one marker is refused too,
+   rather than guessing which lane you meant.
+2. **It reads the region off your running services instead of defaulting.** Cloud Run is
+   regional and the marker is not, so a guessed region passes every other check and then
+   builds a second fleet somewhere else. An explicit `--region` that disagrees with where the
+   install actually runs is refused with both names, because that is a typo, not an
+   instruction.
+3. **It writes down the way back first, and verifies the result off the services.** The
+   revisions serving right now are printed as named rollback commands BEFORE anything moves,
+   which is when they are easy to find rather than at 02:00. Afterwards it re-reads the
+   serving revision of each surface and checks it carries this release's commit -- because a
+   deploy message is a statement of intent, not evidence. Exit 31 means it did not.
+
+It does not judge your version ordering. `install.sh` refuses a downgrade with both versions
+named, and that refusal lives in exactly one place.
+
+## Where the installer stops for you
+
+**Once, and you may press ENTER through it.** Step 6d asks which OTHER Google accounts may
+sign in -- the account you install with is very often not the account your Claude app signs
+in with, and that is cheaper to answer here than to discover as a refusal afterwards. It is
+also editable later in Settings, so an empty answer costs you nothing.
+
+Nothing else stops. The workstation question is gone because there is no longer a question
+(see below), and the passkey stop is gone because a default install ships
+`PC_REQUIRE_PASSKEY=0`. The installer no longer refuses to start without a terminal, which
+means an unattended run -- Cloud Shell you walked away from, or a script -- reaches the end.
+
+Open Cloud Shell and point the installer at a project that has billing linked -- Cloud Shell
+already provides `gcloud`, `python3`, `openssl`, `curl` and an interactive terminal. Step 0
+checks everything it needs and stops with the exact missing permission rather than the
+symptom.
 
 ## The workstation VM
 
-`workstation.sh` ships in this release and creates the VM later, on its own:
+**`install.sh` now builds it, at step 9/10, and leaves it STOPPED.** That is the change in
+this release and the two halves of it matter equally. Built, because the console's start,
+stop and Remote Desktop buttons and the `vm_*` tools all need a machine to point at, and an
+install that ships those controls wired to nothing is a worse first hour than one that costs
+a disk. Stopped, because a running VM bills by the hour and nobody asked for it to be
+running -- a stopped instance costs only its disk, which at the shipped 50 GB is cents a
+week. Press start in the console when you want it.
 
-    bash workstation.sh              asks: none, linux or windows
-    bash workstation.sh linux        non-interactive, scriptable
-    bash workstation.sh windows
+    bash install.sh --no-vm      install everything else and create no VM at all
 
-It is safe to re-run -- an existing VM is adopted rather than recreated -- and running it
-twice with different flavours leaves you with both, side by side. The Windows box is given
-no public IP and is reachable only over IAP TCP forwarding: the single firewall rule it
-creates allows RDP from IAP's range and from nowhere else.
+`workstation.sh` still ships and still works standalone -- for building the VM later if you
+used `--no-vm`, or for rebuilding it on its own:
+
+    bash workstation.sh                          build it
+    bash workstation.sh --project P --region R   non-interactive, scriptable
+    bash workstation.sh none                     resolve flags and project, create nothing
+
+**There is one workstation and it runs Linux.** The Windows box was removed in this release,
+not deprecated: measured on a real corporate install, Cowork does not run on it, so the
+machine could not do the one job it existed for. Shipping a choice where one arm is known
+not to work is a trap with a billing consequence, and Windows carried the larger disk of the
+two. The prompt went with it -- a question with one possible answer is a stop, not a choice.
+
+It is safe to re-run: an existing VM is adopted rather than recreated. An existing Windows
+workstation from an earlier release is left alone by this script and is still found and
+removed by `uninstall.sh`, because dropping a name from the teardown sweep is how a machine
+keeps billing after an operator believes they have deleted everything.
+
+The box is given no public IP where a Cloud NAT can be provisioned, and OS Login is enforced
+so password and key SSH are refused. You reach it over IAP TCP forwarding.
 
 **The Claude desktop app is preinstalled, and the startup log says how.** Linux registers
 Anthropic's apt repository (`downloads.claude.ai/claude-desktop/apt/stable`), pins its
 signing key to a fingerprint, and installs `claude-desktop`, so later updates arrive with
-`apt-get upgrade`. Windows downloads Anthropic's published setup redirect and refuses any
-file whose Authenticode signature is not Anthropic's. Both are DEFAULTS written onto the
-instance as metadata, so you can override or disable either without cutting a new release:
-`PC_CLAUDE_APT_REPO`, `PC_CLAUDE_APT_KEY`, `PC_CLAUDE_APT_FPR`, `PC_CLAUDE_WIN_URL`, or the
-per-instance keys `pc-claude-deb-url` and `pc-claude-win-url`. If a platform's install does
-not succeed the script does not pretend it did: it logs that "Claude" on that box means the
-Claude Code CLI plus a dedicated Chrome app window for claude.ai, and leaves you with those.
+`apt-get upgrade`. These are DEFAULTS written onto the instance as metadata, so you can
+override or disable them without cutting a new release: `PC_CLAUDE_APT_REPO`,
+`PC_CLAUDE_APT_KEY`, `PC_CLAUDE_APT_FPR`, or the per-instance key `pc-claude-deb-url`. If the
+install does not succeed the script does not pretend it did: it logs that "Claude" on that
+box means the Claude Code CLI plus a dedicated Chrome app window for claude.ai, and leaves
+you with those.
 
 ## Using this from another agent client
 

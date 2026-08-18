@@ -43,7 +43,7 @@ what an auto-run job can do to your project, because when a job auto-runs there 
 human credential in the path to borrow. Every job is still journalled, including the
 ones an older build would have refused.
 
-`PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 bash install.sh` restores the older system entire --
+`PC_AUTO_APPROVE=0 PC_GUARDRAILS=1 ./install.sh` restores the older system entire --
 the per-job tap and the runtime refusals both. Both variables are read from the
 environment, so they are a Cloud Run configuration revision and **no job can arm or
 disarm them.**
