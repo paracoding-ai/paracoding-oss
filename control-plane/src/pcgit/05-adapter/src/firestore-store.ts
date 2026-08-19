@@ -146,7 +146,6 @@ interface FileDoc {
  * predecessor behind and nothing deleted it. Measured: 12 sequential overwrites
  * of one 1.2 MB file left 12 live blobs, 14.4 MB retained for a 1.2 MB file,
  * and `unlink` reclaimed only the current key, orphaning 13.2 MB permanently.
- * Bucket versioning is on, so each orphan retains noncurrent generations too.
  * The PATH-KEYED scheme this replaced leaked nothing — the crash-safety was
  * bought with an O(number of overwrites) storage leak.
  *

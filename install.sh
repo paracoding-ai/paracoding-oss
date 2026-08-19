@@ -742,8 +742,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="161db682a66d9b32ba2015b94e2e9b758548eb38"
-PC_VERSION="10.4"
+PC_RELEASE="c451cfa31372f1d7f0b17b242f4619bfad8b5015"
+PC_VERSION="10.5"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -2533,11 +2533,17 @@ fi
 # THE SETTINGS ARE RE-ASSERTED ON EVERY RUN, INCLUDING AN ADOPTED BUCKET. A bucket this
 # installer made earlier is already right; a bucket an operator made by hand may not be, and a
 # lake with per-object ACLs or public access is not something to discover later.
+#
+# --no-versioning IS ASSERTED, NOT MERELY OMITTED, AND THAT DISTINCTION IS THE POINT. Leaving the
+# flag out only stops this installer turning versioning ON; it does nothing to a bucket that
+# already has it, which is exactly the adopted bucket this block exists for. Suspending it is not
+# destructive -- generations already retained stay retained -- so this changes what happens NEXT
+# and touches nothing that exists.
 retry gcloud storage buckets update "gs://$PC_LAKE_BUCKET" --project "$PROJECT" \
-  --uniform-bucket-level-access --public-access-prevention >/dev/null \
-  || die "could not enforce uniform bucket-level access and public access prevention on
-gs://$PC_LAKE_BUCKET. Refusing to point the control plane at a lake whose access model is
-unknown."
+  --uniform-bucket-level-access --public-access-prevention --no-versioning >/dev/null \
+  || die "could not enforce uniform bucket-level access, public access prevention and
+no-versioning on gs://$PC_LAKE_BUCKET. Refusing to point the control plane at a lake whose
+access model is unknown."
 # roles/storage.objectAdmin ON THIS BUCKET ONLY -- never the project-wide role. The control
 # plane reads, writes and deletes lake objects and does nothing else with Cloud Storage.
 # --condition=None is not decoration: against a policy that already CONTAINS a condition,
@@ -2556,8 +2562,12 @@ echo
 # HERE, beside the lake, because the two are one storage step and separating them is what caused
 # the omission to go unnoticed.
 #
-# OBJECT VERSIONING IS ON, and that is the difference between this and the lake. A git object
-# store that can lose a write loses history, and history is the only thing it holds. Public
+# NO OBJECT VERSIONING, HERE OR ON THE LAKE. Every object this system writes to either bucket is
+# a PCV1 envelope, so a retained noncurrent generation is ciphertext, not a backup -- unreadable
+# once the vault epoch moves, and billed for as long as it sits there. It buys nothing on a git
+# object store in particular, because blobs are content-addressed: a write either creates a name
+# that did not exist or rewrites a name with the identical bytes, so there is no prior version
+# worth keeping. History is what git holds, and git holds it in the objects themselves. Public
 # access prevention is ENFORCED and uniform bucket-level access is on, as standing policy.
 PC_SOURCE_BUCKET="${PROJECT}-${PC_LP}${PC_TOK}source"
 if gcloud storage buckets describe "gs://$PC_SOURCE_BUCKET" --project "$PROJECT" >/dev/null 2>&1; then
@@ -2571,7 +2581,7 @@ else
     || die "the source/git bucket gs://$PC_SOURCE_BUCKET is still absent after a create attempt
 (exit $PC_SB_RC). BUCKET NAMES ARE GLOBALLY UNIQUE, so the likeliest cause is that this exact
 name already belongs to somebody else's project -- create a bucket of your own in $REGION with
-uniform bucket-level access, public access prevented and object versioning ON, grant
+uniform bucket-level access and public access prevented, grant
 roles/storage.objectAdmin on it to
 $CP_SA, and set GIT_BUCKET to its name on $MC_SVC yourself."
   echo "  created gs://$PC_SOURCE_BUCKET in $REGION"
@@ -2579,17 +2589,17 @@ fi
 # Re-asserted on every run, including an adopted bucket, for the same reason the lake is:
 # a bucket somebody made by hand may not carry these, and finding that out later is worse.
 retry gcloud storage buckets update "gs://$PC_SOURCE_BUCKET" --project "$PROJECT" \
-  --uniform-bucket-level-access --public-access-prevention --versioning >/dev/null \
-  || die "could not enforce uniform bucket-level access, public access prevention and object
-versioning on gs://$PC_SOURCE_BUCKET. Refusing to use a git object store whose access model or
-durability is unknown."
+  --uniform-bucket-level-access --public-access-prevention --no-versioning >/dev/null \
+  || die "could not enforce uniform bucket-level access, public access prevention and
+no-versioning on gs://$PC_SOURCE_BUCKET. Refusing to use a git object store whose access model
+is unknown."
 # THE SAME BUCKET-SCOPED ROLE THE LAKE GETS, AND FOR THE SAME REASON. $CP_SA is the identity
 # BOTH Cloud Run services run as, so this one grant covers the console and the MCP service --
 # and the git tools are served by the MCP service. Never the project-wide storage role.
 retry gcloud storage buckets add-iam-policy-binding "gs://$PC_SOURCE_BUCKET" --project "$PROJECT" \
   --member="serviceAccount:$CP_SA" --role=roles/storage.objectAdmin --condition=None >/dev/null \
   || die "could not grant roles/storage.objectAdmin on gs://$PC_SOURCE_BUCKET to $CP_SA."
-echo "  source/git bucket gs://$PC_SOURCE_BUCKET -- versioning ON, public access PREVENTED"
+echo "  source/git bucket gs://$PC_SOURCE_BUCKET -- public access PREVENTED"
 echo "  $CP_SA -> roles/storage.objectAdmin on THAT BUCKET ONLY"
 # [SEC-EXECBUCKET-V1] THE THIRD BUCKET, AND IT EXISTS TO RETIRE THE BIGGEST GRANT IN THE SYSTEM.
 # The executor holds project-wide roles/datastore.user -- read AND write on every document in
@@ -2635,7 +2645,7 @@ fi
 # Re-asserted on every run, adopted or not, exactly as the lake and the source bucket are: a
 # bucket somebody made by hand may carry neither, and a claim store that is publicly readable
 # tells the world which approvals have been spent.
-retry gcloud storage buckets update "gs://$PC_EXEC_BUCKET" --project "$PROJECT" --uniform-bucket-level-access --public-access-prevention >/dev/null || die "could not enforce uniform bucket-level access and public access prevention on
+retry gcloud storage buckets update "gs://$PC_EXEC_BUCKET" --project "$PROJECT" --uniform-bucket-level-access --public-access-prevention --no-versioning >/dev/null || die "could not enforce uniform bucket-level access, public access prevention and no-versioning on
 gs://$PC_EXEC_BUCKET. Refusing to put the single-use claim and the execution journal in a
 bucket whose access model is unknown."
 # --condition=None for the same reason it is used on the lake: against a policy that already
@@ -5372,7 +5382,7 @@ PC_RET_DIR="$HERE/.retention"
 mkdir -p "$PC_RET_DIR" || die "could not create $PC_RET_DIR"
 PC_CB_BUCKET="${PROJECT}_cloudbuild"
 # THE GUARD THAT MATTERS MORE THAN THE POLICY. The data lake holds agent memory and the wiki;
-# the source bucket IS the git object store and carries versioning. An age rule on either of
+# the source bucket IS the git object store and holds your whole history. An age rule on either of
 # those is not a storage saving, it is data loss. They are named here and compared by value,
 # so a future edit that points the loop at the wrong variable stops the install instead.
 for _pc_lb in "$PC_CB_BUCKET" "$PC_STAGE_BUCKET"; do

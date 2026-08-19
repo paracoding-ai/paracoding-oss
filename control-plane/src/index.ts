@@ -379,6 +379,24 @@ app.use((req: any, res: any, next: any) => {
 
 app.use(express.json());
 
+// [SEC-AUDIT-V105-CORS-WILDCARD] WHY THE WILDCARD IS SAFE HERE, AND WHEN IT STOPS BEING SAFE.
+// This runs on BOTH surfaces and sets Access-Control-Allow-Origin: * on every route, with
+// OPTIONS answered 200 unconditionally. That is deliberate: the public MCP surface exists for
+// browser-based MCP clients on origins this server cannot enumerate in advance, and locking the
+// origin down would break exactly the clients it is here to serve.
+// It is safe ONLY because Access-Control-Allow-Credentials is never set anywhere in this
+// middleware. Per the fetch/CORS spec, a wildcard origin without that header means the browser
+// will NOT attach cookies, and will not expose the response to script, for any cross-origin
+// request made in credentialed mode -- so the console session cookie (gate_session) and the IAP
+// cookie never ride along cross-origin, and a bearer-token route still needs a token the
+// attacker does not have. That is the entire reason this wildcard is not exploitable today.
+// DO NOT ADD Access-Control-Allow-Credentials TO THIS MIDDLEWARE. The instant this handler
+// pairs `*` (or a reflected origin) with credentials: true, every cookie-authenticated console
+// route (waSessionOk, the passkey gate, IAP) becomes readable cross-origin by any page on the
+// internet that gets a logged-in operator to load it -- the exact CSRF-via-CORS hole this
+// comment exists to keep someone from reintroducing under a "just fix the CORS error" commit.
+// If a future change genuinely needs credentialed cross-origin requests, it needs a real origin
+// allow-list on THIS middleware first, not a credentials flag bolted onto the wildcard.
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -618,6 +636,14 @@ app.post('/api/queue/claim', async (req, res) => {
   try {
     const callerId = assertIdentity(req);
     const { role } = req.body;
+    // [SEC-AUDIT-V105-QUEUE-CLAIM-SCOPE] callerId is the AGENT_TOKENS VALUE for this bearer --
+    // the same "role name" principal that the MCP-side equivalents (buildMcpServer's who(a),
+    // used directly as `.where('assigned_role', '==', agentId)` at the list/claim tools) already
+    // treat as one namespace with assigned_role. This route trusted the CLIENT-SUPPLIED `role`
+    // instead, so any holder of a valid agent token could claim another role's queued work by
+    // naming it in the body. Refuse instead of silently substituting callerId, so a caller that
+    // passes a mismatched role gets an explicit 403 rather than a claim that quietly changed identity.
+    if (role !== callerId) { res.status(403).json({ error: 'forbidden: role does not match caller identity' }); return; }
     const snapshot = await db.collection('work_items')
       .where('assigned_role', '==', role)
       .where('status', '==', 'pending')
@@ -2058,8 +2084,9 @@ const ctxBuild = async () => {
       return memOk({ scope: sc, created, existing });
     } catch (e: any) { return memErr('CREATE_RELATIONS_FAILED', String((e && e.message) || e)); } });
 
-  // The three delete_* tools RETRACT. Nothing is erased: status becomes "retracted" and
-  // object versioning is the undo. NOTE THE SCOPE, because it is narrower than it looks: the
+  // The three delete_* tools RETRACT. Nothing is erased: status becomes "retracted" and the
+  // record stays readable -- that IS the undo, and it is the only one. NOTE THE SCOPE, because
+  // it is narrower than it looks: the
   // DATA LAKE has no delete tool, so a stray lake write cannot be undone by any role. The
   // REPOSITORY is NOT covered by that -- the git tools can remove a path outright. Hard
   // deletion of a memory record is a gated job, never a tool call.
@@ -3122,7 +3149,12 @@ function waSessionOk(req: express.Request): boolean {
   // Google-authenticated human, not an open door. It is still weaker than a passkey and the gate
   // says so on screen.
   if (!PC_REQUIRE_PASSKEY) {
-    const em = pcIapEmail(req);
+    // [SEC-AUDIT-V105-IAP-AUD-GUARD] FAIL-CLOSED: no PC_IAP_AUD, no IAP god-mode -- the same
+    // rule every sibling call site already applies (see the pcIapGodEmail and pcIapStatusOk
+    // guards). pcIapEmail() itself only checks audience `if (PC_IAP_AUD && ...)`, so calling it
+    // unconditionally here meant that with PC_IAP_AUD unset, an IAP assertion minted for ANY
+    // IAP-protected app -- not just this one -- would satisfy this gate's passkey-off path.
+    const em = PC_IAP_AUD ? pcIapEmail(req) : '';
     if (em && WA_APPROVER_EMAILS.length && WA_APPROVER_EMAILS.indexOf(em) >= 0) return true;
   }
   // HFC4 fail-closed: never VERIFY a session when the signing secret is missing/weak (an empty-key
@@ -9150,7 +9182,27 @@ async function strainSeedIfEmpty(): Promise<void> {
     const s = await db.collection('strains').limit(1).get();
     if (!s.empty) return;
     for (const role of STRAIN_SEED) {
-      await db.collection('strains').doc(role).set({ role, display_name: role, status: 'active', pasteable: STRAIN_PASTEABLE.has(role), hidden: STRAIN_NEVER_PASTEABLE.has(role), created_by: 'system:seed', created_at: FieldValue.serverTimestamp() });
+      const _seedDoc: any = { role, display_name: role, status: 'active', pasteable: STRAIN_PASTEABLE.has(role), hidden: STRAIN_NEVER_PASTEABLE.has(role), created_by: 'system:seed', created_at: FieldValue.serverTimestamp() };
+      // [SEC-AUDIT-V105-ONBOARDER-CLASSES] THIS DOES NOT TOUCH pcToolClasses' GLOBAL RULE.
+      // Absent/empty tool_classes still means "every class" for every OTHER seeded strain --
+      // every strain document already in a live fleet has no tool_classes field, and inverting
+      // that default would strip tools from the entire running roster. Out of scope, on purpose.
+      // fleet-onboarder is different: it is where OAUTH_ROLE lands every unbound OAuth connector
+      // (fail-closed least-privilege target, see SEC-OAUTH-FAILCLOSED-ROLE-V1), and with no
+      // tool_classes of its own it inherited PC_ALL_CLASSES -- stage_privileged_job, run_command,
+      // gcp_api, vm_* included -- for an identity nobody has bound to a human yet. All it needs
+      // to do is answer whoami (exempt from class checks entirely, see the `name !== 'whoami'`
+      // carve-outs in the registerTool override) and let the connector read its own onboarding
+      // memory/journal while it waits on the consent page. 'read' is the narrowest non-empty
+      // class that covers that --
+      // pcToolClasses treats an empty array the same as absent ("every class"), so 'read' alone,
+      // not [], is what actually narrows it. write/stage/infra/browser are withheld.
+      // UPGRADE NOTE: strainSeedIfEmpty() only runs `if (!s.empty) return` -- i.e. only on a
+      // virgin strains collection. An operator upgrading an already-seeded fleet keeps whatever
+      // fleet-onboarder document already exists (no tool_classes field, still PC_ALL_CLASSES)
+      // until it is migrated by hand; this does not retro-fix a live install.
+      if (role === 'fleet-onboarder') _seedDoc.tool_classes = ['read'];
+      await db.collection('strains').doc(role).set(_seedDoc);
     }
     await db.collection('journal').add({ agent_id: 'human_operator', action: 'strains_seeded', message: 'strain registry seeded with ' + STRAIN_SEED.length + ' canonical roles', timestamp: FieldValue.serverTimestamp() });
   } catch (e) {}
@@ -9293,7 +9345,12 @@ async function a2aServeCard(req: any, res: any, role: string): Promise<void> {
   const b = oaPubBase(req);
   const rows = await strainList(false);
   const row = rows.find((r: any) => r.role === role);
-  if (!row || row.status !== 'active') { res.status(404).json({ error: 'no active strain "' + role + '"' }); return; }
+  // [SEC-AUDIT-V105-HIDDEN-CARD] /.well-known/agents already withholds hidden roles (r.hidden
+  // !== true) from the public roster, but this route served the full agent card for one anyway
+  // if the caller already knew (or guessed) its name -- hidden was a roster-listing filter, not
+  // an access control. A hidden strain must 404 exactly as an absent or inactive one does, with
+  // the SAME body, so a prober cannot distinguish "hidden" from "does not exist" by response shape.
+  if (!row || row.status !== 'active' || row.hidden === true) { res.status(404).json({ error: 'no active strain "' + role + '"' }); return; }
   res.setHeader('Content-Type', 'application/json');
   res.json(a2aCard(row.role, row.display_name || row.role, b));
 }
@@ -10323,11 +10380,18 @@ function oaChallenge(req: any, res: any): void {
 //      model reads the instruction and corrects itself instead of retrying blind.
 //
 // PC_SESSION_ENFORCE is the cutover switch, read at module load.
-//   unset / '0' -> resolve bound chats, NEVER deny. Mint and prove keys while every
-//                  existing chat keeps working. This is the safe landing state.
-//   '1'         -> enforce. Flipping it is a Cloud Run env update (a config revision),
-//                  not a rebuild of this code, so it rolls back in seconds.
-const PC_ENFORCE = String(process.env.PC_SESSION_ENFORCE || '') === '1';
+//   '0'                -> the explicit escape hatch: resolve bound chats, NEVER deny. For a
+//                         hand-rolled deploy that has not yet minted/proven keys for every chat.
+//   unset / anything else -> ENFORCE. [SEC-AUDIT-V105-ENFORCE-DEFAULT] the installer sets this
+//                         to '1' on both surfaces, so this default was already a no-op for
+//                         every installed system -- it only mattered for a hand-rolled deploy
+//                         that omitted the var, and for that deploy "unset" silently meant
+//                         "resolve bound chats, never deny", which is exactly the gap that lets
+//                         an OAuth-authenticated-but-unbound connector resolve to the default
+//                         role with a live toolset instead of the "no identity, no tools" denial
+//                         the rest of this comment block promises. Absent or unrecognised must
+//                         read as enforcing; only an explicit '0' opts back out.
+const PC_ENFORCE = String(process.env.PC_SESSION_ENFORCE || '1') !== '0';
 // [PC-KEY-TTL-V1] Session keys had no expiry: a key pasted into a chat transcript stayed
 // valid forever and only an explicit revoke could kill it. That is the same defect the
 // OAuth refresh tokens had ([SEC-OAUTH-RT-EXP]) and it gets the same fix -- stamp an exp

@@ -867,7 +867,8 @@ _PCV1_DECRYPT_REFUSAL = (
     "DAMAGED -- an unguarded edit_file/write_file overwrite leaves the PCV1 magic in place -- or "
     "it may be from another epoch or another key. This runner will NOT decode ciphertext as text. "
     "Confirm with the lane-fetch two-liner (" + _PCV1_TWOLINER + "). If that also fails, treat the "
-    "object as DAMAGED: restore it from object versioning. Do NOT overwrite it and do NOT 'repair' "
+    "object as DAMAGED and SAY SO. There are no noncurrent generations to restore from -- the "
+    "buckets do not keep them. Do NOT overwrite it and do NOT 'repair' "
     "it with write_file -- that erases the last evidence of what it was.")
 
 # Starts with PCV1 but is shorter than the fixed 34-byte overhead.
@@ -875,8 +876,8 @@ _PCV1_TRUNC_REFUSAL = (
     "REFUSED: {p} carries the PCV1 magic but is only {n} bytes. A valid envelope is at least 34 "
     "(4 magic + 1 epoch + 1 flags + 12 nonce + 16 tag), so this object is TRUNCATED or DAMAGED. "
     "It cannot be decrypted and it must NOT be written to: an edit or a write here would replace "
-    "a damaged envelope with plaintext and erase the last evidence of what it held. Restore it "
-    "from object versioning (gcloud storage ls -a gs://{b}/{p}).")
+    "a damaged envelope with plaintext and erase the last evidence of what it held. There is no "
+    "noncurrent generation to restore from either: report it and stop.")
 
 # [PCV1-RUNNER-SEAL-V1] The old blanket edit refusal is GONE. It said "edit_file
 # writes PLAINTEXT", which was true and is now false: edit_file decrypts, edits,

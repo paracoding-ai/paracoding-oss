@@ -1,20 +1,20 @@
-# release manifest v10.4
-# generated from source commit 161db682a66d9b32ba2015b94e2e9b758548eb38
+# release manifest v10.5
+# generated from source commit c451cfa31372f1d7f0b17b242f4619bfad8b5015
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 d793f1efae3654cf     16302  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 b2feedda8e7894e9      4074  NOTICE
-61fcacf6884acc73     23780  README.md
-7ed899626416b71e     12021  SECURITY.md
-7e3357c6dfcbf51d    399363  install.sh
-d026c02745cfd8ae     45586  uninstall.sh
-29142446b7a28bef     14689  upgrade.sh
+645c188fed6cb20e     23780  README.md
+d6a229ca2709e1fc     12021  SECURITY.md
+adab4311d23ead4a    400193  install.sh
+8911f8e58c6fcaee     45553  uninstall.sh
+7cd96ce3ad2f989d     14689  upgrade.sh
 1a2c35f49245f087    120055  workstation.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-f901c604736d25a8       426  agent-plugin/plugin.json
+5d0f96f9282f4036       639  agent-plugin/plugin.json
 b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
@@ -29,8 +29,8 @@ fe5d3e41d95ee509     23060  control-plane/mcp2026/DUAL-ERA.md
 0c9134137a518c51     29480  control-plane/src/ghtools.ts
 70b9fb50d0107b4b     38263  control-plane/src/gittools.ts
 1308f3f465cf1114     23327  control-plane/src/gppatch.ts
-2342053c5934a010    184731  control-plane/src/harness.html
-9f40c9dbf86172c1    793407  control-plane/src/index.ts
+f7f26bf2880c1dc5    186872  control-plane/src/harness.html
+736a3ea368cfb807    799363  control-plane/src/index.ts
 d659e940bd31caa4     19474  control-plane/src/locked.html
 296dac8ac2408861      9834  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
@@ -43,7 +43,7 @@ d659e940bd31caa4     19474  control-plane/src/locked.html
 ec2b16e67eed3245      2265  control-plane/src/pcgit/05-adapter/src/backend.ts
 1a5af2857ff495b3      2528  control-plane/src/pcgit/05-adapter/src/errors.ts
 ae3de5050ee56742     32611  control-plane/src/pcgit/05-adapter/src/firestore-gcs-fs.ts
-0cbbcf7edbfbcca3     33975  control-plane/src/pcgit/05-adapter/src/firestore-store.ts
+f6105164847f658c     33896  control-plane/src/pcgit/05-adapter/src/firestore-store.ts
 a7e9737859e8c08d     20292  control-plane/src/pcgit/05-adapter/src/gcs-store.ts
 09bec9ba1b60302a      5447  control-plane/src/pcgit/05-adapter/src/pack-cache.ts
 bf255687e0882621      2129  control-plane/src/pcgit/05-adapter/src/paths.ts
@@ -110,7 +110,7 @@ f02514995dbbf094      7168  runner/fleet_mode.py
 c44ea2e7b22c3036      2178  runner/reset-errored-items.py
 5d8a88e4ca57f419      4738  runner/runner.py
 f3b14c18b442175e     11976  runner/sweep_runner.py
-c2f267975563f023     94639  runner/work_item_runner.py
+8bdd144e31fdc64e     94714  runner/work_item_runner.py
 99c4a67aac610a75      3027  wiki/_index.json
 71b8aebd9209c5b6      1198  wiki/_release.txt
 9732414ce3d3e1c0     15401  wiki/_shell.html

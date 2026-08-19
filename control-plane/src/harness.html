@@ -1029,6 +1029,37 @@ window.pcWhimsyOn = function(){
        legible string on screen. Flat ink here -- the token exists for exactly this. */
     --ttl-bg:none;--ttl-ink:var(--ink);
   }
+  /* [BRAND-DRAWER-PIN-V105] THE SETTINGS DRAWER IS A DARK ISLAND AND THE LIGHT THEME MADE IT
+     ILLEGIBLE. #pcl paints its OWN surface in literals (#0f0a1e, ~20 of them, zero var()
+     indirection) but its TEXT reads --ink, so under the light palette the drawer computed
+     color:rgb(26,28,28) on background:rgb(15,10,30) -- near-black on near-black. MEASURED on the
+     shipped 10.4 build, with the drawer open: the accordion rows for API keys, Session pastes and
+     Allowed Google accounts render as pale pills with near-white text, and the provider pill goes
+     dark-on-dark. It is the drawer you open to CHANGE the theme, so the one control that gets you
+     out is the one that breaks.
+     TWO WAYS OUT: tokenise every literal in both layers, or pin the tokens THEY see. Pinning is the
+     smaller change and it cannot drift -- a custom property set on a nearer ancestor beats
+     html[data-theme] by INHERITANCE, not specificity, so this holds with no !important and without
+     touching any palette. The WHOLE effective dark set, because a partial pin is exactly how the
+     light theme leaked in here in the first place.
+     Found by porting a downstream rebrand back: that install hit this the day it shipped a light
+     theme and fixed it locally. This is the fix coming home. */
+  #pcl,#pcl-btn,#pcl-ov,.modal{
+    --g1:#123a56;--g2:#0f4a47;--g3:#175339;
+    --ink:#ffffff;--ink-rgb:255,255,255;
+    --ink-soft:rgba(255,255,255,.82);--ink-dim:rgba(255,255,255,.62);
+    --glass:rgba(255,255,255,.12);--glass-2:rgba(255,255,255,.18);--glass-line:rgba(255,255,255,.28);
+    --sunk-rgb:6,18,26;
+    --gold:#ffd77a;--acc1:#ffe9a8;--acc2:#e0982e;--acc-rgb:240,194,74;
+    --acc-ink:#3a2a06;--acc-ink-2:#241a00;
+    --chip-bg:linear-gradient(135deg,#fff,#eaf7ff);
+    --chip-bg-2:linear-gradient(135deg,#fff,#dff6ff);--chip-ink:#0e3a52;
+    --msg-ag:rgba(6,18,26,.30);--msg-me:rgba(255,255,255,.22);
+    --shadow:0 10px 30px rgba(10,40,60,.28);
+    --hdr-bg:rgba(9,4,20,.5);--hbtn-ink:rgba(233,246,241,.78);
+    --ttl-bg:linear-gradient(90deg,var(--acc1),var(--acc2));--ttl-ink:transparent;
+    color:var(--ink);
+  }
   html[data-theme="green"]{--g1:#123a56;--g2:#0f4a47;--g3:#175339;--gold:#ffd77a}
   html[data-theme="orange"]{--g1:#7a3a12;--g2:#5a260e;--g3:#2a1206;--gold:#ffcf8a}
   html[data-theme="blue"]{--g1:#123a6a;--g2:#12306a;--g3:#0a1430;--gold:#9ec7ff}

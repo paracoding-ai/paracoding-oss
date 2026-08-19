@@ -600,8 +600,8 @@ if [ -n "$PC_HELD" ]; then
   storage, not compute. When you are sure, remove them yourself:
       gcloud storage rm -r gs://${PROJECT}-${PC_LP}${PC_TOK}datalake --project $PROJECT
       gcloud storage rm -r gs://${PROJECT}-${PC_LP}${PC_TOK}source   --project $PROJECT
-  Take a copy of anything you want first. A bucket with object versioning on -- which the
-  source bucket has -- still goes entirely, versions included."
+  Take a copy of anything you want first. Neither bucket keeps noncurrent versions, so what
+  is there is all there is."
   echo "
   THE KMS KEYRINGS AND KEYS CANNOT BE DELETED BY ANYONE, so no command is offered for
   them. Cloud KMS has no delete for a keyring and none for a crypto key; the strongest act
