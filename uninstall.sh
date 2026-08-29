@@ -26,7 +26,7 @@
 # [SEC-UNINSTALL-VM-V1] WHAT DOES GET DELETED THAT DID NOT BEFORE: the workstation instance,
 # the IAP-only RDP firewall rule, the Cloud NAT and its router, and the pc-workstation
 # service account. Those are the only resources this product creates that bill BY THE HOUR,
-# they are created by exact name at 5d/10 and by workstation.sh, and until now an uninstall
+# they are created by exact name at 9/10 and by workstation.sh, and until now an uninstall
 # could print its closing line with paracoding-workstation-win still running.
 set -u
 PROJECT=""; REGION="us-east1"; KEEP=0
@@ -215,7 +215,7 @@ done
 if [ "$KEEP" -eq 0 ]; then
   gcloud secrets delete "pc-${PC_LP}install-marker" --project "$PROJECT" --quiet 2>/dev/null
 fi
-# pc-workstation IS OURS. install.sh 5d/10 creates it for the VM, and until now it was
+# pc-workstation IS OURS. install.sh 9/10 creates it for the VM, and until now it was
 # absent from this list and from the known-names list below -- so an uninstall deleted the
 # other two, left this one standing, and then reported it as "NOT OURS TO REMOVE ... most
 # likely from an older install". It was ours, from this version, made minutes earlier.
@@ -415,8 +415,8 @@ fi
 # [SEC-UNINSTALL-VM-V1] COMPUTE. Three listings, one call each, never a call per object.
 # A Compute Engine API that has NEVER BEEN ENABLED on this project cannot be hiding an
 # instance, a firewall rule or a router, so that one error is an EMPTY answer rather than a
-# blind spot -- and it is the common case, because 5d/10 defaults to no workstation and
-# nothing else here touches Compute. Every OTHER failure is a blind spot and is reported as
+# blind spot -- and it is the common case on a --no-vm or --minimal install, where 9/10
+# never runs and nothing else here touches Compute. Every OTHER failure is a blind spot and is reported as
 # one. The two are told apart by the message, exactly as the bucket describes below are.
 PC_L=$(gcloud compute instances list --project "$PROJECT" --format='value(name)' 2>&1); PC_RC=$?
 if [ $PC_RC -ne 0 ]; then

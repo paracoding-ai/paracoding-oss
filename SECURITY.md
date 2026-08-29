@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v10.5**
+**Paracoding — v12.0**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim

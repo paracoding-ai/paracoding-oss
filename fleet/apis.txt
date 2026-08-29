@@ -1,0 +1,80 @@
+# fleet/apis.txt -- THE DECLARATION OF EVERY GOOGLE CLOUD API THIS PRODUCT NEEDS.
+#
+# WHY THIS FILE EXISTS. The API set used to be written down in exactly one place -- a
+# `gcloud services enable` line inside install.sh -- and nothing compared it against what
+# the product actually calls. An audit of a live project found FIVE APIs that code in this
+# tree reaches and the installer never enabled. They worked only because that project had
+# accumulated them for unrelated reasons over a long life, so the failure would have shown
+# up on a fresh customer install and nowhere the developers could see it.
+#
+# WHO READS IT.
+#   install.sh              keeps an EMBEDDED COPY of [install-batch], because it must run
+#                           as ONE FILE a stranger downloads and cannot depend on a sibling
+#                           file being present. Marker [SEC-API-DECLARED-V1].
+#   pipeline/check-apis.py  FAILS CI when the installer and this file disagree. It is the
+#                           only thing standing between "derived" and "invented".
+#
+# FORMAT. One API host per line inside a section. Blank lines ignored; everything from a
+# `#` to end of line ignored. Sections are [install-batch], [install-later] and [optional].
+# The check compares SETS, so ordering here is for humans -- but keep the batch in the same
+# order install.sh uses it, because a diff of the two is the fastest way to read a change.
+
+[install-batch]
+# Enabled together at step 1/10, before anything is deployed, with a hard die on failure.
+# This set must match install.sh's batch EXACTLY -- check-apis.py compares them.
+run.googleapis.com                  # control plane, mcp and gate-exec services
+cloudbuild.googleapis.com           # builds the container images
+artifactregistry.googleapis.com     # holds them
+firestore.googleapis.com            # sessions, memory graph, work-item bus, journal
+secretmanager.googleapis.com        # api keys, github tokens, approval material
+iam.googleapis.com                  # service accounts and the custom audit role
+logging.googleapis.com              # job logs -- the gate UI is not evidence, this is
+compute.googleapis.com              # the workstation VM and its network
+cloudresourcemanager.googleapis.com # project and IAM policy; also the org/project lookup
+serviceusage.googleapis.com         # chicken-and-egg: enabling anything at all needs this
+cloudkms.googleapis.com             # signs privileged jobs
+iap.googleapis.com                  # fronts the console
+aiplatform.googleapis.com           # DEFAULT chat transport for BOTH Claude and Gemini
+storage.googleapis.com              # the data lake, and every `gcloud storage` call
+cloudscheduler.googleapis.com       # runner/pipeline schedules; 2/10 grants admin on it
+iamcredentials.googleapis.com       # gittools ciImpersonate() -> the CI ref-moved notice
+monitoring.googleapis.com           # control-plane reads it
+cloudbilling.googleapis.com         # cost reporting
+generativelanguage.googleapis.com   # Gemini Studio transport -- see the note at the end
+cloudfunctions.googleapis.com       # pipeline/secret-destroy-preflight.py's gen1/gen2 scan
+
+[install-later]
+# Required, but enabled at the point of use rather than in the batch, and deliberately left
+# there. Moving one up here is a real change, not tidying: read why it is late first.
+pubsub.googleapis.com               # install.sh:2814 -- its own die, with its own message
+
+[optional]
+# Enabled inside a conditional block that WARNS rather than dies. An install without these
+# is a working install with a feature switched off.
+bigquery.googleapis.com             # install.sh:3602 -- WARN-not-die. Promoting it to the
+                                    # 1/10 batch would turn an optional feature into a
+                                    # fatal install failure, which is why it is not there.
+
+# ---------------------------------------------------------------------------------------
+# MEASURED. 30 days ending 2026-08-23, on a long-lived sibling install, Cloud Monitoring metric
+# serviceruntime.googleapis.com/api/request_count summed per service. Recorded so the next
+# person can tell a deliberate inclusion from an accident without re-running the audit.
+#
+#   firestore 633079   bigquery 311732   compute 44636   run 12318   aiplatform 11884
+#   logging 5311       cloudkms 5115     cloudbuild 4702  secretmanager 4066  pubsub 1644
+#   iamcredentials 1558  artifactregistry 1166  iam 776  cloudresourcemanager 543
+#   serviceusage 439   cloudscheduler 152  iap 27   monitoring 19   storage 6
+#   generativelanguage 0
+#
+# TWO OF THOSE NUMBERS ARE OPEN QUESTIONS, NOT CONCLUSIONS.
+#
+# storage = 6 is far LOWER than a data lake should produce. Either most lake traffic is
+# accounted to storage-api/storage-component instead of storage, or the lake is much
+# quieter than assumed. Nobody has established which. Do not read this as evidence that
+# storage does not matter -- read it as a question nobody has answered.
+#
+# generativelanguage = 0 means the Gemini Studio transport was not exercised at all in the
+# window. harGeminiTransport() (control-plane/src/index.ts:3587) selects it only when
+# CHAT_GEMINI_PROVIDER=studio AND a real key is present, so zero is the EXPECTED reading
+# for a fleet running the Vertex default. It is enabled on the operator's explicit
+# instruction. If that transport is retired, this line and install.sh's go together.

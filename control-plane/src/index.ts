@@ -17,6 +17,15 @@ import * as crypto from 'crypto';
 // keeps the previous revision serving. Fail-closed beats an empty gate page.
 import * as fs from 'fs';
 import * as path from 'path';
+// [EXEC-LONGRUN-V1] Node's own HTTP clients, used by exactly one function in this file
+// (waPostLong, beside waCallExec). Global fetch is undici, whose headersTimeout is a fixed
+// 300s that no per-call option raises, and Node does not export undici, so a dispatcher means
+// reaching through globalThis[Symbol.for('undici.globalDispatcher.1')] -- undocumented, and on
+// a path that carries a KMS-signed approval envelope. Two stdlib imports instead. NO new npm
+// dependency: `grep -n "^import \* as node"` on this file returns exactly these two lines, and
+// package.json is untouched -- both modules are Node stdlib.
+import * as nodeHttp from 'http';
+import * as nodeHttps from 'https';
 const pcHtml = (f: string): string => fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
@@ -483,16 +492,11 @@ const PC_SURFACE_MAP: { [k: string]: string } = {
   'GET /api/dash/summary': 'console',
   'GET /api/dash/usage': 'console',
   'GET /api/dash/gcp': 'console',
-  'GET /api/vm/status': 'console',
-  'POST /api/vm/start': 'console',
-  'POST /api/vm/stop': 'console',
   'GET /api/security/pqc-tls': 'console',
   'POST /api/security/pqc-tls': 'console',
   'POST /api/ops/token': 'console',
   'GET /api/ops/session': 'console',
   'POST /api/ops/end': 'console',
-  'POST /api/shell': 'console',
-  'GET /api/shell/health': 'console',
   'GET /api/models': 'console',
   'GET /api/usage': 'console',
   'GET /api/keys/status': 'console',
@@ -786,12 +790,22 @@ app.post('/api/confirm/stage', async (req, res) => {
 // doc.get() behind a Map with a TTL, last-known-good on error, because this sits on the hot
 // path of every MCP request.
 const PC_TOOLS_ENFORCE = String(process.env.PC_TOOLS_ENFORCE || '') === '1';
-const PC_ALL_CLASSES = ['read', 'write', 'stage', 'infra', 'browser'];
+const PC_ALL_CLASSES = ['read', 'write', 'stage', 'infra'];
 const PC_TOOL_CLASS: any = {
   git_read: 'read',
   git_list: 'read',
   git_log: 'read',
   git_diff: 'read',
+  // [TOOL-SURFACE-V1] git_grep WAS ABSENT FROM THIS TABLE, AND THAT ABSENCE WITHHELD IT FROM
+  // EVERY ROLE ON EVERY INSTALL. Counted: index.ts + gittools.ts + ghtools.ts register 63
+  // distinct tool names; this table classified 62. The one unclassified name was git_grep, so
+  // it fell to 'other' -- a class no strain document holds and pcNarrowClasses can never
+  // produce -- and with PC_TOOLS_ENFORCE=1 (install.sh sets it on BOTH services) it was
+  // unregistered for fleet-advisor, for the operator, for everyone. The only trace was the
+  // token 'git_grep:other' buried in a tool_surface_withheld journal line nobody reads.
+  // 'read' is the honest class and grants nothing new: git_grep searches the same refs that
+  // git_read already serves whole files from, in one request instead of N.
+  git_grep: 'read',
   // [PCGIT-ARCHIVE-TOOL-V1] 'read', and it grants nothing git_read does not: the archive is
   // the same reach in one request. GET /git/archive already gates its session-key branch on
   // this exact class, so classifying it any other way would let one path serve what the other
@@ -838,10 +852,8 @@ const PC_TOOL_CLASS: any = {
   get_time: 'read',
   read_job_log: 'read',
   run_status: 'read',
-  vm_status: 'read',
   list_my_messages: 'read',
   check_answer: 'read',
-  browser_tabs: 'read',
   append_journal: 'write',
   post_work_item: 'write',
   complete_work_item: 'write',
@@ -856,12 +868,6 @@ const PC_TOOL_CLASS: any = {
   run_command: 'stage',
   gcp_api: 'infra',
   run_roll: 'infra',
-  vm_start: 'infra',
-  vm_stop: 'infra',
-  vm_resize: 'infra',
-  browser_open: 'browser',
-  browser_navigate: 'browser',
-  browser_eval: 'browser',
 };
 const pcClassCache: Map<string, any> = new Map();
 const PC_CLASS_TTL_MS = 60000;
@@ -941,6 +947,59 @@ function pcNarrowClasses(base: any, raw: any): string[] {
   }
   if (!want.length) want = PC_KEY_FLOOR_CLASSES;
   return b.filter((x: string) => want.indexOf(x) >= 0);
+}
+
+// ================== [TOOL-SURFACE-V1] REFUSE, DO NOT DISAPPEAR ==================
+// WHAT WAS WRONG, MEASURED. A Claude Max/Pro user adds this server as a custom connector.
+// A tools/list request CARRIES NO ARGUMENTS -- the MCP schema has nowhere to put one -- so the
+// `agent` session key CANNOT travel on it. pcExtract() therefore sees no tools/call, and
+// pcResolveIdentity takes its enumeration carve-out and answers with the BEARER role. That
+// bearer is OAUTH_ROLE, which install.sh pins to fleet-onboarder, whose seeded tool_classes is
+// exactly ['read'] (SEC-AUDIT-V105-ONBOARDER-CLASSES). With PC_TOOLS_ENFORCE=1 the shadow in
+// buildMcpServer then declined to register every non-read tool, so the ONLY list the connector
+// ever saw was 28 read tools: 23 write + 2 stage + 5 infra, plus git_grep stranded in 'other',
+// were never enumerated (3 browser_* are separately env-gated off). A model cannot call a tool
+// it never enumerated. Pasting a fleet-advisor key into the chat did not help either: the key
+// fixes the ROLE on tools/call, but the client is holding a cached tool list with no write_file
+// in it and has no reason to ask for another. The product shipped read-only through its own
+// connector, and no log line said so.
+//
+// WHY A STUB AND NOT A CARVE-OUT IN pcResolveIdentity. The tempting patch is "enumerate the
+// full surface when the request contains no tools/call". That makes ENUMERATION depend on
+// REQUEST SHAPE, and request shape is caller-chosen: one body carrying both tools/list and
+// tools/call, or any later path that reuses a built server across methods, and a widened
+// server is sitting there holding LIVE handlers. This instead registers the withheld tool with
+// its REAL name, REAL description and REAL inputSchema -- and a handler that is NOT the real
+// handler. The real handler is bound ONLY on the fall-through, i.e. only where the class check
+// PASSED. Enumeration cannot become authorization by CONSTRUCTION rather than by invariant:
+// there is no ordering, batch shape or cache state in which the refusing registration yields
+// the capability, because the capability is not in that closure at all.
+//
+// WHY WIDENING IS SAFE HERE AT ALL: every MCP request rebuilds the server. POST /mcp resolves
+// identity, then calls buildMcpServerAdmitted(role, tc) fresh; the modern branch calls
+// deps.tools(role) AGAIN for tools/call and resolves the handler out of THAT list
+// (mcp2026.ts, the tools/call dispatch). Nothing survives a request except pcSessCache and
+// pcClassCache, which are 60s caches of the ANSWER to "what does this principal hold", not of
+// the tool table. The class check was ALREADY a call-time check; it was merely also being used
+// as an enumeration filter, and only that second job is being taken away from it.
+//
+// COST: one refusal string per withheld tool per build, built lazily inside the closure only
+// when the tool is actually called. The wire cost is the schema of ~31 more tools on tools/list
+// for an unbound connector -- which is the entire point: the model must SEE what it may ask for.
+function pcRefusalTool(name: string, klass: string, why: string, held: string[]): any {
+  return async () => ({
+    content: [{ type: 'text', text:
+      'REFUSED: `' + name + '` is tool class `' + klass + '` and this connection does not hold that class.\n\n'
+      + why + '\n\n'
+      + 'Classes this connection holds: ' + (held.length ? held.join(', ') : '(none)') + '.\n'
+      + 'THIS CALL DID NOTHING. The tool is LISTED so you can see the fleet has it and ask for the '
+      + 'right credential; listing is not permission. Pass a session key that holds `' + klass
+      + '` as the `agent` argument ON THE CALL -- it is the line beginning PC-SESSION-KEY in this '
+      + 'chat bootstrap paste, and the operator mints one at the Flow Hood (Autoclave, New strain '
+      + 'session). A role NAME is not a key and resolves to nothing. Do not retry this call '
+      + 'unchanged; do not report the work as done.' }],
+    isError: true
+  });
 }
 
 // ============================ [MCP-RESULT-CAP-V1] ============================
@@ -1489,22 +1548,54 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     // config revision away from not existing, which is the same prose-not-boundary failure this
     // is meant to end. So: unregistered, unconditionally, and therefore absent from tools/list
     // in BOTH eras -- a tool the subagent cannot see is one it cannot be talked into trying.
+    //
+    // [TOOL-SURFACE-V1] THAT LAST SENTENCE IS NOW WRONG ABOUT tools/list AND WAS ALWAYS WRONG
+    // ABOUT THE KEY PATH. A session key travels in params.arguments.agent, and tools/list HAS
+    // no arguments -- so keyClasses is ALWAYS undefined during enumeration and _pcHard is
+    // ALWAYS null there. The key restriction has therefore never hidden anything from any tool
+    // list; it only ever refused a CALL, and it refused it as an SDK "Unknown tool" error that
+    // named neither the class nor the fix. Both branches now register a REFUSING handler
+    // instead of returning undefined. The boundary is byte-for-byte the same -- the real
+    // handler is unreachable on both -- and it is now legible to the model that hit it.
+    let _pcH: any = handler;
+    let _pcDenied = false;
     if (name !== 'whoami' && _pcHard && !_pcHard.has(klass)) {
       _pcHardN++;
       _pcWithheld.push(name + ':' + klass + ':key');
-      return undefined;
-    }
-    if (name !== 'whoami' && !_pcAllowed.has(klass)) {
+      _pcH = pcRefusalTool(name, klass,
+        'The SESSION KEY presented on this call carries a tool_classes restriction that does not '
+        + 'include `' + klass + '`. pcNarrowClasses can only ever SUBTRACT from the strain set, and '
+        + 'no tool argument reaches it, so nothing you send on this call can widen it.',
+        Array.from(_pcHard as Set<string>));
+      _pcDenied = true;
+    } else if (name !== 'whoami' && !_pcAllowed.has(klass)) {
       _pcWithheld.push(name + ':' + klass);
-      if (PC_TOOLS_ENFORCE) return undefined;
+      // PC_TOOLS_ENFORCE governs THIS branch exactly as it did: off means observe-only and the
+      // REAL handler is registered, unchanged. Only the shape of the enforced outcome moved,
+      // from invisible to visible-and-refusing. The flag's meaning is untouched.
+      // OAUTH_ROLE is a module-scope const declared far below; reading it here is safe for the
+      // same reason STRAIN_SEED is read below (STRAIN-TDZ-V1) -- buildMcpServer runs only from
+      // a REQUEST handler, never during module evaluation. Do not hoist this.
+      if (PC_TOOLS_ENFORCE) {
+        _pcH = pcRefusalTool(name, klass,
+          'The strain `' + agentId + '` does not hold `' + klass + '` in its tool_classes. If this '
+          + 'is an unbound OAuth connector it is acting as the fail-closed identity ' + OAUTH_ROLE
+          + ', which holds `read` only until you present a key for a strain that holds more.',
+          Array.from(_pcAllowed));
+        _pcDenied = true;
+      }
     }
     // [MCP-RESULT-CAP-V1] ONE wrap, here, and BOTH eras inherit it: the legacy SDK
     // receives the wrapped handler through _pcReg, and the modern 2026-07-28 branch
     // calls t.handler out of _pcTools -- which is now the SAME wrapped function.
     // Wrapping at either call site alone would cap one era and leave the other
     // uncapped, and the two would drift apart on the next edit.
-    const _pcCapped = pcCapWrap(name, spec, handler);
-    _pcTools.push({ name: name, spec: spec, handler: _pcCapped });
+    const _pcCapped = pcCapWrap(name, spec, _pcH);
+    // [TOOL-SURFACE-V1] `denied` is recorded, not consulted: every consumer of __pcTools
+    // (mcpServeModern, harChatToolset) reads name/spec/handler and is unaffected. It exists so
+    // a test or an audit can assert "this build refused N tools" against the registry itself
+    // rather than by string-matching a result.
+    _pcTools.push({ name: name, spec: spec, handler: _pcCapped, denied: _pcDenied });
     return _pcReg(name, spec, _pcCapped);
   };
   void (async () => {
@@ -1515,11 +1606,14 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
         // [WP4B-KEY-CLASSES-V1] 'would_withhold' is a LIE the moment one tool was actually
         // withheld by a key restriction, and an audit line that misreports a real refusal as a
         // hypothetical is worse than no line. Any hard withholding makes this a WITHHELD record.
-        action: (PC_TOOLS_ENFORCE || _pcHardN) ? 'tool_surface_withheld' : 'tool_surface_would_withhold',
-        message: (PC_TOOLS_ENFORCE ? 'Withheld ' : 'WOULD have withheld ') + _pcWithheld.length
+        // [TOOL-SURFACE-V1] By that same standard 'withheld' became a lie here: an enforced tool
+        // is no longer ABSENT, it is LISTED AND REFUSING. Same trigger, honest verb. The
+        // observe-only value is untouched, because in that mode nothing happens at all.
+        action: (PC_TOOLS_ENFORCE || _pcHardN) ? 'tool_surface_refused' : 'tool_surface_would_withhold',
+        message: (PC_TOOLS_ENFORCE ? 'Listed-but-REFUSING ' : 'WOULD have withheld ') + _pcWithheld.length
           + ' tool(s) from ' + agentId + ' (classes held: '
           + Array.from(_pcAllowed).join(',') + '): ' + _pcWithheld.join(' ')
-          + (_pcHardN ? ' -- of these, ' + _pcHardN + ' (marked :key) were ACTUALLY withheld, '
+          + (_pcHardN ? ' -- of these, ' + _pcHardN + ' (marked :key) are refused '
             + 'unconditionally, by the presented session key\'s tool_classes restriction '
             + '(effective: ' + Array.from(_pcHard as Set<string>).join(',') + '); '
             + 'PC_TOOLS_ENFORCE does not govern those.' : ''),
@@ -2353,7 +2447,14 @@ const ctxBuild = async () => {
       const ref = db.collection('chat_history').doc();
       await ref.set({
         id: ref.id, agent_id: who(a), role: a.role, text: a.text,
-        tags: a.tags || [], session: a.session || '',
+        // [TAGS-COERCE-V1] THE THIRD SITE, and the one that does not throw -- which is why it is
+        // the worse of the three. A bare string here is written to Firestore as a string, and
+        // every reader of chat_history.tags in this file is already `Array.isArray(...) ? ... :
+        // <empty>` (the decision/closure predicates, the topic tally, the history search), so a
+        // string-tagged entry is stored successfully and is then invisible to every one of them.
+        // A silent write that can never be read back is a worse outcome than a TypeError, so the
+        // same coercion is applied here and the malformed field is dropped at the boundary.
+        tags: Array.isArray(a.tags) ? a.tags : [], session: a.session || '',
         timestamp: FieldValue.serverTimestamp()
       });
       return { content: [{ type: 'text', text: `logged ${a.role} turn ${ref.id} as ${who(a)}` }] };
@@ -2446,7 +2547,19 @@ const ctxBuild = async () => {
       // is written, rather than falling back to plaintext. resolveKey's write-boundary check above
       // still runs FIRST and is unchanged; owner/tags metadata and the text/plain contentType
       // intent are carried through it.
-      await harWriteLake(r.key!, a.content || '', 'text/plain; charset=utf-8', { owner: me, tags: (a.tags || []).join(',') });
+      // [TAGS-COERCE-V1] Array.isArray, not `|| []`. MEASURED with grep on this file: three
+      // sites read a.tags off tool input -- these two joins and the chat_history store below.
+      // `(a.tags || []).join(',')` defends against ABSENT and against null, and against nothing
+      // else: a caller that sends tags as a bare string (which the zod schema rejects on the MCP
+      // path, but this handler is also reached from the console tool dispatcher) reaches .join on
+      // a String, which has no such method, and the tool throws a TypeError instead of writing
+      // the file. The read side already coerces this way -- see the Array.isArray guards on
+      // h.tags in refresh() and on r.tags in the history search -- so this is the write side
+      // catching up with a rule the file already follows, not a new one.
+      // DELIBERATELY NOT DONE: coercing a bare string INTO a one-element array. That would
+      // invent a tag the caller did not send; dropping a malformed field and writing the object
+      // is the behaviour every other guard in this file already has.
+      await harWriteLake(r.key!, a.content || '', 'text/plain; charset=utf-8', { owner: me, tags: (Array.isArray(a.tags) ? a.tags : []).join(',') });
       const where = r.key!.startsWith('shared/') ? 'SHARED drop zone' : `${me}'s private folder`;
       return { content: [{ type: 'text', text: `wrote gs://${DATA_LAKE_BUCKET}/${r.key} (${(a.content || '').length} chars) — ${where}` }] };
     });
@@ -2461,7 +2574,8 @@ const ctxBuild = async () => {
       const buf = Buffer.from(a.base64_data, 'base64');
       // [PCV1-LAKE-TOOLS-V1] Same vault path as write_file. The caller's content_type intent is preserved in
       // custom metadata when the body is encrypted, because the stored bytes are then binary.
-      await harWriteLake(r.key!, buf, a.content_type || 'application/octet-stream', { owner: me, tags: (a.tags || []).join(',') });
+      // [TAGS-COERCE-V1] Same guard, same reason as write_file above.
+      await harWriteLake(r.key!, buf, a.content_type || 'application/octet-stream', { owner: me, tags: (Array.isArray(a.tags) ? a.tags : []).join(',') });
       const where = r.key!.startsWith('shared/') ? 'SHARED drop zone' : `${me}'s private folder`;
       const link = `https://storage.googleapis.com/${DATA_LAKE_BUCKET}/${r.key}`;
       return { content: [{ type: 'text', text: `wrote gs://${DATA_LAKE_BUCKET}/${r.key} (${buf.length} bytes) — ${where}\nLink: ${link}` }] };
@@ -2650,117 +2764,6 @@ const ctxBuild = async () => {
       return { content: [{ type: 'text', text: now.toISOString() + " / " + now.toLocaleString("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) }] };
     });
 
-  // [SEC-CDP-UNCONFIGURED-V1] NO CDP ENDPOINT MEANS NO BROWSER TOOLS.
-  // browser_tabs / browser_open / browser_navigate (and browser_eval behind PC_BROWSER_EVAL)
-  // all reach the workstation Chrome through harCdp(), which needs a bridge listening on
-  // WS_CDP_PORT on a running workstation VM. NOTHING in any installer provisions that bridge
-  // and nothing will in v3. Before this guard the tools registered on every install and
-  // returned {ok:false,error:'workstation not running'} on first call -- registered, then
-  // failed, which is the shape that pulled v3.
-  //
-  // WS_CDP_PORT IS THE DISCRIMINATOR, and it is the honest one: the port had a default of
-  // '8025' that nothing listens on, so the default was a guess dressed as configuration.
-  // An explicit WS_CDP_PORT is the only signal a deployer has actually stood a bridge up.
-  // This follows the PC_BROWSER_EVAL precedent immediately below: unset == not registered.
-  const _cdpPort = String(process.env.WS_CDP_PORT || '');
-  if (_cdpPort === '') {
-    console.log('[cp] browser tools NOT registered: WS_CDP_PORT unset. browser_tabs, '
-      + 'browser_open, browser_navigate' + (String(process.env.PC_BROWSER_EVAL || '') === '1' ? ', browser_eval' : '')
-      + ' need a Chrome DevTools Protocol bridge on the workstation VM, which no installer '
-      + 'provisions. They are withheld rather than registered to fail on first call. To enable '
-      + 'them stand up the bridge, then set WS_CDP_PORT (and CDP_TOKEN) on this service.');
-  } else {
-  server.registerTool('browser_tabs',
-    { description: 'List open tabs in the workstation Chrome (title + url). For browser work PREFER this + browser_eval over screenshot/vision — it is far cheaper and deterministic.', inputSchema: { ...AG } },
-    async () => { const j = await harCdp('Target.getTargets', {}); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
-  server.registerTool('browser_open',
-    { description: 'Open a URL in a NEW tab of the workstation Chrome.', inputSchema: { url: z.string(), ...AG } },
-    async (a: any) => { const j = await harCdp('Target.createTarget', { params: { url: a.url } }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
-  server.registerTool('browser_navigate',
-    { description: 'Navigate the active workstation Chrome tab to a URL.', inputSchema: { url: z.string(), ...AG } },
-    async (a: any) => { const j = await harCdp('Page.navigate', { params: { url: a.url }, targetId: a.targetId || '' }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
-  // PC-CDP-RPC-V1: browser_eval is an ungated mutation primitive against a browser
-  // holding the operator's live sessions. It registers ONLY when the deployer opts in.
-  // Unset == not registered, which is the OSS default.
-  if (String(process.env.PC_BROWSER_EVAL || '') === '1') {
-    server.registerTool('browser_eval',
-      { description: 'Run JavaScript in the active workstation Chrome tab and return its result. Use for clicking (document.querySelector(sel).click()), reading (el.innerText), filling inputs, and scraping the DOM — prefer this over screenshots/coordinate-clicking.', inputSchema: { js: z.string(), ...AG } },
-      async (a: any) => { const j = await harCdp('Runtime.evaluate', { params: { expression: a.js }, targetId: a.targetId || '' }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
-  }  // PC-CDP-RPC-V1 end browser_eval guard
-  }  // [SEC-CDP-UNCONFIGURED-V1] end WS_CDP_PORT guard
-  // [SEC-VM-UNCONFIGURED-V1] NO INSTANCE CONFIGURED MEANS NO VM TOOLS.
-  // The VM is a y/n install option that DEFAULTS TO NO, so "unconfigured" is the common case,
-  // not the corner. All four tools addressed an instance from DEFAULTS -- a guessed instance
-  // name and zone -- that no installer creates:
-  //   vm_status   built a Compute REST URL against a project segment that is usually empty
-  //               and failed on first call;
-  //   vm_start / vm_stop / vm_resize are WORSE. They STAGE a pending_confirms row, so the
-  //               operator gets an approval card and spends a Face ID on a gcloud command
-  //               naming an instance that does not exist. The cost lands on the human before
-  //               anything discovers the instance is absent.
-  // BOTH variables are required and neither has a usable default here. A default instance
-  // name is a guess, and a guessed name is indistinguishable at runtime from one we cannot
-  // see. Unset == withheld, the same contract registerGitTools() uses for GIT_REPO_ID.
-  const _wsVm = String(process.env.WS_VM || '');
-  const _wsZone = String(process.env.WS_ZONE || '');
-  if (_wsVm === '' || _wsZone === '') {
-    const _vmAbsent = [_wsVm === '' ? 'WS_VM' : '', _wsZone === '' ? 'WS_ZONE' : '']
-      .filter(function (s) { return s !== ''; }).join(' and ');
-    console.log('[cp] VM tools NOT registered: ' + _vmAbsent + ' unset. vm_status, vm_start, '
-      + 'vm_stop and vm_resize address a Compute instance that this deployment does not '
-      + 'declare, and the three staged ones would cost a human approval before failing. They '
-      + 'are withheld rather than registered to fail on first call. To enable them create the '
-      + 'instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.');
-  } else {
-  server.registerTool('vm_status',
-    { description: 'Status of the workstation browser box (state, machine type, internal IP). Direct Compute REST, no gcloud.', inputSchema: { ...AG } },
-    async () => { const s = await harVmStatus(); const mt = await harVmMachine(); const ip = await harBoxInternalIp(); return { content: [{ type: 'text', text: JSON.stringify({ ...s, machineType: mt, internalIp: ip }) }] }; });
-  // VERIFY-GREP: VM-GATE-STAGED-V1
-  // NEW BUG #1. vm_start / vm_stop / vm_resize used to call the legacy harVmAction/harVmSetType helpers IMMEDIATELY (no call-parens spelled here on purpose -- see ed-vmgate-complete.py: this comment used to trip the vm-ladder forbid checks on the legacy vm helpers):
-  // no pending_confirms row, no Face ID, no journal entry. vm_resize even STOPS a running instance as a
-  // side effect, so anything holding a connector token could kill the operator's workstation mid-session -- and
-  // an advisor started the VM twice against a standing order because the rule existed but the mechanism
-  // never did. All three now STAGE to the human gate using the SAME document shape as
-  // stage_privileged_job / run_command / run_roll (job_id, staged_by: who(a), command_type,
-  // arguments.command, status 'pending', created_at) and return the job id. Nothing touches the VM until
-  // The operator approves and gate-exec runs the command AS them. vm_status is a READ and stays direct (above):
-  // reads are not gated.
-  // No defaults here: this block is unreachable unless BOTH are non-empty (the guard above), so
-  // the old hardcoded fallbacks were dead code that shipped an instance name from this fleet's
-  // own history into every downloader's tree. Use the values the guard above already validated.
-  const HARVM_NAME = _wsVm;
-  const HARVM_ZONE = _wsZone;
-  const HARVM_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
-  const HARVM_T = ' ' + HARVM_NAME + ' --zone ' + HARVM_ZONE + ' --project ' + HARVM_PROJECT + ' --quiet';
-  const HARVM_DESC = 'gcloud compute instances describe ' + HARVM_NAME + ' --zone ' + HARVM_ZONE + ' --project ' + HARVM_PROJECT + ' --format="value(status,machineType)"';
-  // A DISTINCT command_type per action (vm_start / vm_resize / vm_stop), deliberately NOT 'run_cmd':
-  // reusing run_cmd drops these into the same supersede bucket as every other staged job, where they
-  // silently retire one another. gcloud is on the executor and is allowlisted, and the command is the
-  // whole audit record the operator reads on the approval card.
-  async function harVmGateStage(a: any, cmdType: string, human: string, cmd: string): Promise<any> {
-    const ref = db.collection('pending_confirms').doc();
-    const _vargs: any = { command: cmd, vm: HARVM_NAME, zone: HARVM_ZONE, human: human };
-    const _adm = await pcAdmitStage(who(a), cmdType, _vargs);
-    if (!_adm.ok) return { mode: 'refused', staged: false, duplicate_of: _adm.duplicate_of || null, note: _adm.refusal };
-    await ref.set({ job_id: ref.id, staged_by: who(a), command_type: cmdType, arguments: _vargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha });
-    // Journal the ATTEMPT at stage time, so a VM action is visible even when the operator refuses it.
-    await db.collection('journal').add({ agent_id: who(a), action: 'stage_job', message: 'Staged ' + cmdType + ' (' + ref.id + ') on ' + HARVM_NAME + ': ' + human + ' -- NOT executed; awaiting the operator approval at the gate.', timestamp: FieldValue.serverTimestamp() });
-    // [SEC-AUTORUN-SCOPE-V1] This returned STAGED and pointed at a gate that is deleted, so
-    // every vm_start / vm_stop / vm_resize parked forever while reporting success.
-    const _auto = await pcAutoRun(ref, ref.id, cmdType, cmd, false, a.confirm === true);
-    if (_auto) return { mode: 'ran', job_id: ref.id, command_type: cmdType, result: _auto };
-    return { mode: 'staged', job_id: ref.id, command_type: cmdType, staged_by: who(a), note: 'STAGED and NOT run: PC_AUTO_APPROVE is off and there is no approval console. Set PC_AUTO_APPROVE=1, or run the command yourself.' };
-  }
-  server.registerTool('vm_start',
-    { description: 'START the workstation. With PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) this RUNS -- the standing order that only the operator starts the VM was enforced by a human tap that no longer exists, so treat starting it as a real action you are taking on their behalf and say so. Returns { mode: "ran", result } when it executed, or { mode: "staged", job_id } when PC_AUTO_APPROVE is off -- in which case the box is untouched and the job sits unrun, because there is no approval console to go and tap. Read the result with read_job_log.', inputSchema: { ...AG } },
-    async (a: any) => { const cmd = 'gcloud compute instances start' + HARVM_T + ' || { echo "start failed at the current machine type; retrying at e2-medium"; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type e2-medium && gcloud compute instances start' + HARVM_T + '; }; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_start', 'START ' + HARVM_NAME + ' (falls back to e2-medium if there is no capacity at the current size)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
-  server.registerTool('vm_stop',
-    { description: 'STOP the workstation browser box. With PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) this RUNS IMMEDIATELY and can kill a session the operator is working in -- there is no approval step in front of it any more, so ask them in chat first and only call this once they have said yes. Returns { mode: "ran", result } when it executed, { mode: "staged" } only if PC_AUTO_APPROVE is off.', inputSchema: { ...AG } },
-    async (a: any) => { const cmd = 'gcloud compute instances stop' + HARVM_T + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_stop', 'STOP ' + HARVM_NAME, cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
-  server.registerTool('vm_resize',
-    { description: 'Set the workstation machine type (e.g. e2-medium, e2-standard-2). A resize STOPS the instance first, so it can kill the operator session -- and with PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1) it RUNS IMMEDIATELY rather than waiting for a tap. Ask in chat first. Returns { mode: "ran", result } when it executed.', inputSchema: { machine_type: z.string(), ...AG } },
-    async (a: any) => { const mt = String((a && a.machine_type) || '').trim(); if (mt.length > 40 || !/^[a-z][a-z0-9]*-[a-z0-9-]+$/.test(mt)) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'blocked: machine_type must look like e2-medium or e2-standard-2 (lowercase letters, digits and hyphens only) -- got: ' + mt.slice(0, 40) }) }] }; } const cmd = 'gcloud compute instances stop' + HARVM_T + '; gcloud compute instances set-machine-type' + HARVM_T + ' --machine-type ' + mt + '; ' + HARVM_DESC; const r = await harVmGateStage(a, 'vm_resize', 'RESIZE ' + HARVM_NAME + ' to ' + mt + ' (STOPS it first; does NOT start it again)', cmd); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
-  }  // [SEC-VM-UNCONFIGURED-V1] end WS_VM/WS_ZONE guard
   // VERIFY-GREP: F13-JOBLOG-OWNERSHIP-V1
   // F13. read_job_log had no ownership check: any principal holding any connector token read any job's
   // stdout_tail (up to 6 KB of privileged output staged by other strains). who(a) is the token-bound
@@ -4055,6 +4058,97 @@ async function waApprovalEnvelope(jobId: string): Promise<any> {
     approval_sig_exp: jx.approval_sig_exp,
   };
 }
+// ============ [EXEC-LONGRUN-V1] THE SECOND 300-SECOND CEILING, AND IT IS IN THIS PROCESS ============
+// The executor call below was a bare `waFetch(GATE_EXEC_URL + '/run', ...)`, and waFetch is
+// `(globalThis as any).fetch` -- one line, at the top of this file, MEASURED by grep: a single
+// definition, so every outbound call in this process is undici. undici applies its OWN 300-second
+// headersTimeout, and gate-exec sends no response headers until the command it is running has
+// finished. So an executor job over about five minutes was killed BY THE CALLER, and the console
+// reported "could not reach the executor" -- a message that points at the network, the platform
+// and the far end, and is wrong about all three.
+//
+// WHY RAISING Cloud Run's timeoutSeconds DOES NOT FIX IT: that is a different 300s ceiling, from a
+// different vendor, that happens to land on the same number. Lifting the platform one leaves this
+// one exactly where it was, which is why the obvious fix looks like it should work and does not.
+//
+// WHY NOT A GLOBAL DISPATCHER: setting one lifts the ceiling for EVERY outbound call this process
+// makes -- token fetches, GCS reads, BigQuery -- which is a far larger blast radius than the
+// problem needs, and it removes a bound that is correct nearly everywhere. This is one explicit,
+// configurable timeout on the paths that actually need it.
+//
+// WHY node:https RATHER THAN fetch-with-a-dispatcher: Node does not export undici, so a dispatcher
+// means reusing the constructor off globalThis[Symbol.for('undici.globalDispatcher.1')]. That
+// works today and is undocumented. This request carries a KMS-signed approval envelope and an
+// identity token; it does not get to depend on an internal symbol.
+//
+// THE DEFAULT IS DELIBERATELY LONGER THAN gate-exec's OWN Cloud Run timeout, so a real refusal or
+// error from the executor always wins the race against a guess made from this side. Tunable with
+// EXEC_HTTP_TIMEOUT_MS, floored at 60s so a typo cannot produce a timeout shorter than a normal job.
+const PC_EXEC_HTTP_TIMEOUT_MS = Math.max(60000, Number(process.env.EXEC_HTTP_TIMEOUT_MS || 1860000));
+function waPostLong(urlStr: string, headers: { [k: string]: string }, body: string, timeoutMs: number): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    let u: URL;
+    try { u = new URL(urlStr); } catch (e) { reject(new Error('waPostLong: bad url')); return; }
+    // Scheme chosen from the URL rather than hardcoded https. gate-exec and every model host are
+    // https in production; the http branch exists so this function can be driven against a local
+    // server that accepts a connection and never answers, which is the ONLY way to exercise the
+    // timeout behaviour this whole block is about.
+    const mod: any = u.protocol === 'http:' ? nodeHttp : nodeHttps;
+    const req = mod.request({
+      protocol: u.protocol, hostname: u.hostname,
+      port: u.port || (u.protocol === 'http:' ? 80 : 443),
+      path: u.pathname + u.search, method: 'POST',
+      headers: Object.assign({}, headers, { 'Content-Length': Buffer.byteLength(body) }),
+    }, (res: any) => {
+      const chunks: any[] = [];
+      res.on('data', (c: any) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    // OUR deadline, and it NAMES ITSELF and its env var in the error. The failure this replaces
+    // surfaced as a bare 'fetch failed' with no number in it, so nobody reading a dead job could
+    // tell which of the two 300s ceilings had fired.
+    req.setTimeout(timeoutMs, () => { req.destroy(new Error('waPostLong: no response within ' + timeoutMs + 'ms (EXEC_HTTP_TIMEOUT_MS)')); });
+    req.on('error', (e: any) => reject(e));
+    req.end(body);
+  });
+}
+// ============ [MODEL-LONGRUN-V1] THE SAME CEILING SITS ON THE MODEL CALLS ============
+// waPostLong above was written for the executor, where the ceiling was actively killing jobs. It
+// is not special to that path. MEASURED by grep on this file: THREE model POST sites --
+// harClaudePost (Anthropic /v1/messages and Vertex :rawPredict), harChatGemini (the toolless
+// Gemini path) and harGeminiPost (the tool-capable one) -- and all three were plain waFetch, i.e.
+// all three carried undici's 300s headersTimeout. A non-streaming completion sends NO response
+// headers until the whole answer has been generated, so the ceiling is real, not theoretical.
+//
+// THIS ONE IS LATENT RATHER THAN LIVE AND IS STILL WORTH FIXING. Ordinary rounds on this install
+// finish in seconds; what a 300s cap costs is the LONGEST, most expensive request of a build --
+// a 16-round tool loop against a large context -- and it costs it as a bare `fetch failed` at the
+// worst possible moment, with the tokens already paid for.
+//
+// A SHIM, NOT A REWRITE. All three sites are `const r = await waFetch(url, {...}); await r.json()`,
+// so this returns the same four members fetch's Response gives those sites (ok, status, json,
+// text). json() THROWS on an unparseable body exactly as fetch's does, which is what the
+// parse_error catch at two of the three sites is already written against, so no error handling
+// changes. NON-POST FALLS THROUGH to the ordinary global fetch: waPostLong is POST-only by
+// construction (it always sets Content-Length and always writes a body) and quietly mishandling a
+// GET here would be a worse bug than the one being fixed.
+//
+// DELIBERATELY NOT DONE: streaming. With SSE the headers arrive immediately and no timeout of this
+// shape can ever apply, and the tokens become available to the progress bubble as they are made.
+// That is the real fix and a much larger change; it is recorded here as the intended direction
+// rather than quietly skipped.
+const PC_MODEL_HTTP_TIMEOUT_MS = Math.max(60000, Number(process.env.MODEL_HTTP_TIMEOUT_MS || 1800000));
+async function waFetchLong(url: string, init: any): Promise<any> {
+  const method = String((init && init.method) || 'GET').toUpperCase();
+  if (method !== 'POST') return await waFetch(url, init);
+  const r = await waPostLong(String(url), (init && init.headers) || {}, String((init && init.body) || ''), PC_MODEL_HTTP_TIMEOUT_MS);
+  return {
+    ok: r.status >= 200 && r.status < 300,
+    status: r.status,
+    async json(): Promise<any> { return JSON.parse(r.text); },
+    async text(): Promise<string> { return r.text; },
+  };
+}
 async function waCallExec(scriptB64: string, token: string, jobId: string, assertion: any = null): Promise<any> {
   const idt = await waIdToken(GATE_EXEC_URL);
   // [SEC-EXEC-NO-DATASTORE-V1] A MISSING JOB IS REFUSED HERE, WITHOUT A ROUND TRIP. The
@@ -4063,14 +4157,16 @@ async function waCallExec(scriptB64: string, token: string, jobId: string, asser
   // every caller's existing error handling reads it unchanged.
   const _appr = await waApprovalEnvelope(jobId);
   if (!_appr) return { http: 404, error: 'refused: job ' + String(jobId) + ' has no approval document to execute' };
-  const r = await waFetch(GATE_EXEC_URL + '/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + idt },
-    // [SEC-ASSERT-FORWARD-V1] gate-exec verifies the operator assertion ITSELF, independently
-    // of anything the control plane claims. Forwarding it is what lets PC_REQUIRE_ASSERTION=1.
-    body: JSON.stringify({ script_b64: scriptB64, access_token: token, job_id: jobId, assertion: assertion || undefined, approval: _appr }),
-  });
-  const txt = await r.text();
+  // [EXEC-LONGRUN-V1] waPostLong, not waFetch. Everything about the request is otherwise
+  // IDENTICAL -- same URL, same two headers, same body object, same JSON -- so the only thing
+  // that changed is which deadline the caller applies to the response.
+  // [SEC-ASSERT-FORWARD-V1] gate-exec verifies the operator assertion ITSELF, independently
+  // of anything the control plane claims. Forwarding it is what lets PC_REQUIRE_ASSERTION=1.
+  const r = await waPostLong(GATE_EXEC_URL + '/run',
+    { 'Content-Type': 'application/json', Authorization: 'Bearer ' + idt },
+    JSON.stringify({ script_b64: scriptB64, access_token: token, job_id: jobId, assertion: assertion || undefined, approval: _appr }),
+    PC_EXEC_HTTP_TIMEOUT_MS);
+  const txt = r.text;
   try { const j = JSON.parse(txt); j.http = r.status; return j; } catch (e) { return { http: r.status, raw: txt }; }
 }
 
@@ -5154,7 +5250,7 @@ app.get('/', (req: any, res: any) => {
 // unauthenticated path: a fresh clone is closed by default and unauthenticated requests get 403.
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
   const p = req.path;
-  const isHarness = p === '/chat' || p.startsWith('/api/shell') || p === '/api/chat' || p.startsWith('/api/keys') || p.startsWith('/api/vm/') || p.startsWith('/api/ops/') || p.startsWith('/api/security/');
+  const isHarness = p === '/chat' || p === '/api/chat' || p.startsWith('/api/keys') || p.startsWith('/api/ops/') || p.startsWith('/api/security/');
   if (isHarness) {
     if (!waSessionOk(req)) {
       if (p === '/chat') { waSendLocked(res); return; }
@@ -5180,22 +5276,10 @@ const HAR_HARNESS_HTML: string = pcHtml('harness.html');
 // withheld) and the refusal is applied at BOTH the single read chokepoint and each route.
 const WS_VM = process.env.WS_VM || '';
 const WS_ZONE = process.env.WS_ZONE || '';
-// Returns '' when the workstation IS configured, else the names of the missing variables.
-function harVmUnset(): string {
-  return [WS_VM === '' ? 'WS_VM' : '', WS_ZONE === '' ? 'WS_ZONE' : ''].filter((s) => s !== '').join(' and ');
-}
 const HAR_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
 // ops-exec fast-shell: token that authenticates the control-plane -> on-box ops-exec (:8022).
 // Same value lives in the box's `ops-token` instance metadata. Passed as OPS_TOKEN env at deploy.
 const OPS_TOKEN = process.env.OPS_TOKEN || '';
-// PC-CDP-RPC-V1: the CDP bridge has its OWN secret, separate from the ops token.
-// [SEC-CDP-SPLIT-V1] put it in Secret Manager as pc-cdp-token and the bridge reads
-// it from /opt/cdp-token and matches it against the X-Cdp-Token header ONLY. An ops
-// token presented to :8025 is refused, and this token does NOT buy bash -lc as root
-// on the box. Mounted into Cloud Run as CDP_TOKEN=pc-cdp-token:latest by the
-// workstation installer. Empty string == the bridge refuses every call, which is
-// the correct behaviour for a deploy that never enabled the workstation.
-const CDP_TOKEN = process.env.CDP_TOKEN || '';
 // "off the gate once in the morning" window: gcloud-as-you stays live this long off a single gate auth.
 // The control-plane owns the window (durable); the box only ever sees short-lived (~1h) forwarded tokens.
 const OPS_WINDOW_MS = Number(process.env.OPS_WINDOW_HOURS || 12) * 3600 * 1000;
@@ -5475,55 +5559,6 @@ async function disableOldClaudeKey(oldKey: string) {
   } catch (e) {}
 }
 
-// ---- Compute Engine REST (start/stop/status of the workstation) ----
-async function harVmInstance(): Promise<any> {
-  // [SEC-VM-UNCONFIGURED-V1] The single chokepoint every Compute READ goes through
-  // (harVmStatus, harVmMachine, harBoxInternalIp and thus /api/shell*). Refuse before the
-  // fetch: with no name the URL degrades to the zone's LIST endpoint, which can answer 200 and
-  // make an unconfigured install look provisioned. _http 0 is the existing "no answer" value
-  // and every caller already handles it -- harVmStatus reports provisioned:false, and
-  // harBoxInternalIp returns '' so the shell routes report the box as not running.
-  if (harVmUnset() !== '') return { _http: 0 };
-  const tok = await waAccessToken();
-  const r = await waFetch('https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/instances/' + WS_VM, { headers: { Authorization: 'Bearer ' + tok } });
-  if (!r) return { _http: 0 };
-  if (!r.ok) return { _http: r.status };
-  const j: any = await r.json(); j._http = 200; return j;
-}
-async function harVmStatus(): Promise<any> {
-  const j = await harVmInstance();
-  if (j._http === 404) return { provisioned: false, state: 'NOT_FOUND' };
-  if (j._http !== 200) return { provisioned: !!j._http, state: 'UNKNOWN', http: j._http };
-  return { provisioned: true, state: j.status || 'UNKNOWN' };
-}
-// [GCP-VMBTN-ACTS-V1] THE REASON COMPUTE GAVE IS THE ONLY USEFUL PART OF A REFUSAL, AND IT WAS DROPPED.
-// This returned { ok:false, http:403 } and threw the body away, so a missing
-// compute.instances.start on the control-plane identity was indistinguishable at the console
-// from a wrong zone, a deleted instance or a disabled API -- three different fixes behind one
-// number. Compute answers a refusal with { error: { message } }; that message is passed through
-// verbatim (it names the permission) and the console prints it next to the button. The shape is
-// unchanged and additive: ok/http/op are still there, so the MCP vm_start/vm_stop tools and any
-// caller reading them are untouched.
-// waFetch can answer null (no response at all), which the old code would have dereferenced --
-// it is a distinct outcome from a refusal and says so instead of reporting a phantom HTTP 0.
-async function harVmAction(action: string): Promise<any> {
-  const tok = await waAccessToken();
-  const r = await waFetch('https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/instances/' + WS_VM + '/' + action, {
-    method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: '{}',
-  });
-  if (!r) return { ok: false, http: 0, error: 'the Compute API did not answer', instance: WS_VM, zone: WS_ZONE };
-  const j: any = await r.json().catch(() => ({}));
-  if (r.ok) return { ok: true, http: r.status, op: j && j.name };
-  const msg = (j && j.error && j.error.message) || (j && j.error_description) || ('Compute answered HTTP ' + r.status);
-  return { ok: false, http: r.status, error: msg, instance: WS_VM, zone: WS_ZONE, project: HAR_PROJECT };
-}
-// resolve the box's internal (RFC1918) IP so the control-plane can reach ops-exec over the VPC connector
-async function harBoxInternalIp(): Promise<string> {
-  const j = await harVmInstance();
-  if (j._http !== 200) return '';
-  try { return (j.networkInterfaces && j.networkInterfaces[0] && j.networkInterfaces[0].networkIP) || ''; } catch (e) { return ''; }
-}
-
 // ---- Ops session: the 12h "off-the-gate-once" window (control-plane owned; box never holds durable creds) ----
 // Stored in Firestore ops_session/current: { window_start, window_expiry, token, token_expiry }.
 // The harness silently re-mints a fresh ~1h Google token and pushes it here; we forward it to the box.
@@ -5571,9 +5606,9 @@ async function harOpsToken(req: any): Promise<{ token: string; err?: string }> {
   return { token: '' };   // no window, no token: box-authed (OPS_TOKEN) shell only, as today
 }
 
-// ============ OPS CONSOLE TOOLS (advisor 2026-07-25): status_digest / dispatch / check ============
+// ============ OPS CONSOLE TOOLS (advisor 2026-07-25): status_digest / check ============
 // v6: EVERY STRAIN gets the console, scoped to its own lane. The advisor keeps the
-// fleet-wide view; a strain sees its own desk. NO CLAUDE BUS: dispatch can only create Gemini work
+// fleet-wide view; a strain sees its own desk. There is no bus: work items are a shared list
 // (Vertex -> GCP billing). Claude work happens in a Claude surface you are already sitting in --
 // this console (per-message on the card) or a Cowork chat (flat-rate Max). New tool: cowork_prompt,
 // which hands you the paste-ready bootstrap for a strain so you can port the work to Cowork.
@@ -5583,7 +5618,24 @@ const HAR_CHAT_MAX_TOKENS = Number(process.env.CHAT_MAX_TOKENS || 4096);
 // Was 'xhigh'. Only 'high' is special-cased below -- it means "send no output_config at all",
 // because high IS the API default. Every other value, including this one, is sent explicitly.
 const HAR_CHAT_EFFORT = String(process.env.CHAT_EFFORT || 'medium');
-const HAR_BUS_SUBSTRATE = String(process.env.BUS_SUBSTRATE || 'gemini');
+// [CHAT-GEMINI-DEFAULT-V1] WHICH SUBSTRATE A REQUEST THAT NAMES NONE LANDS ON, AND WHY IT IS AN
+// ENV AND NOT A LITERAL. This release ships GEMINI as the floor and Claude as the escalation.
+// THE OPERATIONAL REASON, and it is not a preference: this deployment CANNOT OBTAIN VERTEX QUOTA
+// FOR CLAUDE. HAR_MODELS_DEFAULT above already puts gemini-3.7-flash first, harChatGemini and
+// harGeminiPost already default to the Vertex transport (see [CHAT-VERTEX-DEFAULT-V2]), and
+// harVertexGeminiRegion pins the 3.x publisher models to the global endpoint -- so a fresh
+// install with no key of any kind, landing here, chats. Landing on Claude instead, it depends on
+// a Vertex allocation this project is not going to be granted.
+// CLAUDE IS NOT REMOVED AND IS NOT DEGRADED. It remains reachable two ways: CHAT_CLAUDE_PROVIDER
+// =anthropic plus a saved Anthropic key (harClaudeProvider / harChatResolved decide that, and
+// nothing here touches them), and as an explicit one-click pick in the console -- an explicit
+// provider in a request body still wins over this constant at every site that reads it.
+// WHY AN ENV RATHER THAN A LITERAL: a literal cannot express "Gemini for an install with no
+// Claude path, Claude for one that has it". CHAT_DEFAULT_PROVIDER=claude restores the previous
+// behaviour with a config revision and NO REBUILD. Anything other than the two known values falls
+// to gemini rather than being trusted, because an unrecognised substrate name is a typo and a
+// typo must not silently pick the expensive side.
+const HAR_CHAT_DEFAULT_PROVIDER = (String(process.env.CHAT_DEFAULT_PROVIDER || 'gemini').trim().toLowerCase() === 'claude') ? 'claude' : 'gemini';
 
 // [SEC-NO-OPERATOR-DOCTRINE-V1] These two strings are SENT TO THE MODEL as system prompt, and every
 // downloader gets them. They used to carry this operator's private billing doctrine -- a share of
@@ -5595,11 +5647,9 @@ const HAR_BUS_SUBSTRATE = String(process.env.BUS_SUBSTRATE || 'gemini');
 // surfaces is restated as CAPABILITY (source + deploy access) rather than as wallet -- which is the
 // basis the rest of this prompt already uses, so the routing decision is unchanged.
 const HAR_LAW_BUS = [
-  'BUS LAW: the bus is GEMINI ONLY, and it runs on Vertex against this deployment\'s own project.',
-  'There is NO Claude bus. This is enforced, not advisory -- the dispatch tool REFUSES Claude work.',
-  'If Gemini cannot do a piece of work it PARKS (status needs_claude / needs_cowork / needs_supervisor)',
-  'and a Claude surface picks it up -- either this console or a Cowork chat. NEVER dispatch Claude work',
-  'to the bus and never tell the operator you have; the tool will refuse you.',
+  'BUS LAW: there is no bus. The operator drives from an MCP client.',
+  'Work items are a shared list, not a queue anything claims. Nothing runs unattended.',
+  'A parked status (needs_claude / needs_cowork / needs_supervisor) is a note for a human, not a handover to a runner.',
 ].join(' ');
 
 // [HAR-BUILD-TRUTH-V60] THIS PARAGRAPH USED TO BE FALSE AND THE FALSEHOOD COST THE OPERATOR A DAY.
@@ -5642,10 +5692,32 @@ const HAR_LAW_SURFACES = [
   'if a tool would refuse you, say which tool and why; if it would not, do the work.',
 ].join(' ');
 
-// The exact sequence that was measured working, including the two flags whose absence produces
+// The exact sequence that was measured working, including the flags whose absence produces
 // errors that read like permission problems and are not. Written out because a model that has to
 // guess these will guess wrong twice and then conclude, reasonably but incorrectly, that it lacks
 // the rights to build.
+//
+// [HAR-BUILD-LOGDIR-V1] THIS PROMPT TOLD THE AGENT TO SUBMIT BUILDS WHOSE LOGS IT CANNOT READ,
+// AND THEN THE FAILURE HID ITSELF. The recipe named three non-optional flags and asserted that
+// --default-buckets-behavior was the one that governs the LOG bucket. It is not: with that flag
+// set and --gcs-log-dir absent, Cloud Build still writes to its own regional logs bucket
+// (gs://<PROJECT NUMBER>-<REGION>-cloudbuild-logs), which the executor service account holds no
+// storage.objects.get on. The build then comes back FAILURE with its only step still QUEUED --
+// dead before it ran a single instruction -- on "Failure setting up GCS logging: failed to create
+// GCS logging client ... Error 403 ... does not have storage.objects.get access".
+// WHY THAT IS THE WORST SHAPE A FAILURE CAN HAVE HERE: the evidence lives in the bucket the agent
+// is locked out of, so `gcloud builds log` and `gcloud storage cat` both answer 403 as well. The
+// agent sees a FAILURE, a QUEUED step, and no reason -- and the honest conclusion it reaches from
+// that is "I lack the rights to build", which is precisely the wrong conclusion this whole block
+// was written to prevent. So the prompt was manufacturing the misdiagnosis it warns about.
+// THE FIX IS ONE FLAG: --gcs-log-dir pointed at the installer-created staging bucket the executor
+// already holds objectAdmin on, so the logs land somewhere readable and a real failure reports a
+// real reason. THIS FIX AND ITS MEASUREMENT COME FROM THE DOWNSTREAM FORK, WHICH HIT IT ON A LIVE
+// INSTALL AND RECORDED THE BEFORE/AFTER BUILD IDS; it is ported here as prompt guidance, and this
+// tree has NOT re-run that build, which is why no build id or digest of ours is quoted below.
+// --default-buckets-behavior IS KEPT, NOT DELETED. It still governs SOURCE staging. What changed
+// is that the prompt no longer claims to know what its absence does, because that claim was the
+// wrong one and was not re-measured.
 const HAR_LAW_BUILD = [
   'BUILD AND DEPLOY (measured working from this surface; PROJECT=' + String(process.env.GCP_PROJECT || '<project>'),
   'REGION=' + String(process.env.GCP_REGION || '<region>') + '):',
@@ -5657,9 +5729,18 @@ const HAR_LAW_BUILD = [
   'gcloud builds submit /tmp/<name> --tag <REGION>-docker.pkg.dev/<PROJECT>/cloud-run-source-deploy/<name>:<tag>',
   '--service-account=projects/<PROJECT>/serviceAccounts/<the executor SA> --region=<REGION>',
   '--gcs-source-staging-dir=gs://run-sources-<PROJECT>-<REGION>/builds',
+  '--gcs-log-dir=gs://run-sources-<PROJECT>-<REGION>/buildlogs',
   '--default-buckets-behavior=regional-user-owned-bucket --async --format=value(id)',
-  'THREE FLAGS ARE NOT OPTIONAL AND ALL THREE FAIL CONFUSINGLY IF OMITTED. Without',
-  '--default-buckets-behavior the API answers INVALID_ARGUMENT about logs_bucket. Without',
+  'FOUR FLAGS ARE NOT OPTIONAL AND ALL FOUR FAIL CONFUSINGLY IF OMITTED. Keep',
+  '--default-buckets-behavior -- it governs SOURCE staging -- but it does NOT redirect logs.',
+  'Without --gcs-log-dir the build writes to gs://<PROJECT NUMBER>-<REGION>-cloudbuild-logs, which',
+  'you have no storage.objects.get on, and comes back FAILURE with its only step still QUEUED --',
+  'dead before it ran anything -- on "Failure setting up GCS logging ... Error 403 ... does not',
+  'have storage.objects.get access". THAT FAILURE HIDES ITSELF: the logs are in the bucket you are',
+  'locked out of, so `gcloud builds log` and `gcloud storage cat` answer 403 too. It is NOT a sign',
+  'that you cannot build -- add the flag and submit again. If you must read a build that already',
+  'failed this way, use the Cloud Logging API instead: POST logging.googleapis.com/v2/entries:list',
+  'with filter resource.type="build" AND resource.labels.build_id="<id>". Without',
   '--gcs-source-staging-dir you get "The user is forbidden from accessing the bucket',
   '[<PROJECT>_<REGION>_cloudbuild]" -- that is the bucket Cloud Build picks for itself, which nothing',
   'granted you rights on; gs://run-sources-<PROJECT>-<REGION> is created by the installer and the',
@@ -5714,7 +5795,7 @@ const HAR_OPS_STATE_DOC = String(process.env.OPS_STATE_DOC || '').trim();
 const HAR_OPS_SYSTEM = [
   'You are the operator\'s mission-control advisor for Paracoding.AI (Agentic Fungi) -- their autonomous GCP agent fleet.',
   'GROUND TRUTH FIRST -- read before you claim. read_graph and search_nodes are your authoritative memory; status_digest is the current fleet state; read_journal shows live runs. Never guess; never call something broken without reading it.' + (HAR_OPS_STATE_DOC ? ' The operator also maintains a state document for this install: read_lake("' + HAR_OPS_STATE_DOC + '") before you claim anything it covers.' : ''),
-  'YOUR TOOLS -- read: status_digest, read_journal, read_lake (shared/... plus your own agents/<your role>/... folder), list_work_items (returns ids), read_job_log, cowork_prompt. Clean: cancel_work_item / complete_work_item (bookkeeping -- do it directly for junk or finished items, it is yours). Dispatch: create Gemini bus work for any strain.',
+  'YOUR TOOLS -- read: status_digest, read_journal, read_lake (shared/... plus your own agents/<your role>/... folder), list_work_items (returns ids), read_job_log, cowork_prompt. Clean: cancel_work_item / complete_work_item (bookkeeping -- do it directly for junk or finished items, it is yours).',
   HAR_LAW_BUS,
   HAR_LAW_SURFACES,
   HAR_LAW_BUILD,
@@ -5726,7 +5807,7 @@ function harStrainSystem(agentId: string): string {
   return [
     'You are ' + agentId + ', a strain in the operator\'s Paracoding.AI fleet (public brand: Agentic Fungi). You own ONE lane -- your own -- not the whole fleet. The operator is talking to you in the Flowhood console.',
     'GROUND TRUTH FIRST. Before you claim anything about your work, check it: status_digest shows your lane, read_journal shows what actually ran, list_work_items shows your queue with ids. Never guess.',
-    'YOUR GEMINI TWIN IS YOUR HANDS. dispatch creates a bus work item assigned to YOU. The work-runner then runs it AS ' + agentId + ' -- with your credentials, your private folder (agents/' + agentId + '/), your LESSONS. So: you think and judge here; your twin does the labour on the bus. Use check and list_work_items to see what it produced, then read_lake it and judge it.',
+    'YOUR DESK. list_work_items shows the shared list for this lane. Nothing claims those items and nothing runs them unattended. Use check and list_work_items to see what is on the list, then read_lake it and judge it.',
     'YOUR SCOPE -- read_lake: shared/... and agents/' + agentId + '/... only. list_work_items / check / cancel / complete: YOUR items only. status_digest: your lane. You cannot see or touch another strain\'s desk; ask the operator to take it to the advisor if it is fleet-wide.',
     HAR_LAW_BUS,
     HAR_LAW_SURFACES,
@@ -5745,8 +5826,7 @@ function harToolDefs(agentId: string): any[] {
   const mine = boss ? 'any strain' : 'you (' + agentId + ')';
   return [
     { name: 'status_digest', description: boss ? 'Live FLEET overview: every strain, what each is doing, backlog counts, gate jobs, recent events. Use for "where are we / report / refresh".' : 'Your lane: what you are working on, your queue, your recent runs, anything of yours parked for a human.', input_schema: { type: 'object', properties: {} } },
-    { name: 'dispatch', description: 'Create a GEMINI bus work item for ' + mine + ' to do real work (research, drafting, file edits, bulk changes). Runs on the next ~5-min tick, as that strain, billed to GCP. The bus is Gemini-only -- there is no Claude route.', input_schema: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, strain: { type: 'string', description: boss ? 'target strain, defaults fleet-infra' : 'ignored -- always you' } }, required: ['title'] } },
-    { name: 'check', description: 'Status of recent bus items for ' + mine + ' -- what the twin picked up, finished, blocked or parked.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } },
+    { name: 'check', description: 'Status of recent work items for ' + mine + ' -- what is pending, finished, blocked or parked.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } },
     { name: 'read_journal', description: 'Recent fleet journal entries (work runs, cache numbers, gate events). VERIFY here before claiming anything.', input_schema: { type: 'object', properties: { limit: { type: 'number' } } } },
     { name: 'read_lake', description: 'Read a lake file for ground truth. Allowed: shared/... and agents/' + agentId + '/... .', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
     { name: 'list_work_items', description: 'List work items WITH ids for ' + mine + '. status defaults pending; use "all" for any, or needs_claude / needs_cowork / needs_supervisor to see parked work.', input_schema: { type: 'object', properties: { status: { type: 'string' }, role: { type: 'string' } } } },
@@ -5815,28 +5895,6 @@ async function harStatusDigest(agentId: string): Promise<string> {
   return lines.join('\n').slice(0, 6000);
 }
 
-async function harDispatch(input: any, agentId: string): Promise<string> {
-  const boss = agentId === 'fleet-advisor';
-  const title = String((input && input.title) || '').trim();
-  if (!title) return 'dispatch failed: a title is required.';
-  const detail = String((input && input.detail) || '');
-  let strain = agentId;
-  if (boss) {
-    strain = String((input && input.strain) || 'fleet-infra').trim().toLowerCase();
-    if (strain && strain.indexOf('fleet-') !== 0) strain = 'fleet-' + strain;
-    if (!strain) strain = 'fleet-infra';
-  }
-  const asked = String((input && input.route) || '').toLowerCase();
-  if (asked === 'claude') {
-    return 'REFUSED: there is no Claude bus -- the bus is Gemini only by configuration. Dispatch it as Gemini, or if it genuinely needs Claude judgement do it HERE in this console, or call cowork_prompt and hand them a bootstrap for a Cowork chat.';
-  }
-  try {
-    const ref = db.collection('work_items').doc();
-    await ref.set({ id: ref.id, title, assigned_role: strain, substrate: HAR_BUS_SUBSTRATE, status: 'pending', source: 'ops-chat', dispatched_by: agentId, payload: { detail, source: 'ops-chat' }, created_at: FieldValue.serverTimestamp() });
-    harJournalAs(agentId, 'ops_dispatch', 'dispatched "' + title.slice(0, 90) + '" -> ' + strain + ' on ' + HAR_BUS_SUBSTRATE + ' (' + ref.id + ')');
-    return 'Dispatched: "' + title + '" -> ' + strain + ' on ' + HAR_BUS_SUBSTRATE + ' (item ' + ref.id + ', pending). Runs on the next ~5-min tick, as ' + strain + ', billed to GCP.';
-  } catch (e: any) { return 'dispatch failed: ' + String((e && e.message) || e); }
-}
 
 async function harCheck(input: any, agentId: string): Promise<string> {
   const boss = agentId === 'fleet-advisor';
@@ -5852,7 +5910,7 @@ async function harCheck(input: any, agentId: string): Promise<string> {
     }
     rows.sort((a: any, b: any) => (((b.created_at && b.created_at._seconds) || 0) - ((a.created_at && a.created_at._seconds) || 0)));
     rows = rows.slice(0, lim);
-    if (!rows.length) return boss ? 'Nothing dispatched from this console yet.' : 'No bus items for ' + agentId + ' yet. Use dispatch to give your twin something.';
+    if (!rows.length) return boss ? 'No work items sourced from this console yet.' : 'No work items for ' + agentId + ' yet.';
     return 'LAST ' + rows.length + ':\n' + rows.map((r: any) => { const st = String(r.status || '?').toUpperCase(); const flag = HAR_PARKED.indexOf(String(r.status)) >= 0 ? '  <-- PARKED, needs a human' : ''; return '  [' + st + ']  ' + String(r.title || '').slice(0, 74) + '  (' + r.id + ')' + flag; }).join('\n');
   } catch (e: any) { return 'check failed: ' + String((e && e.message) || e); }
 }
@@ -5973,9 +6031,9 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
     '',
     'DOCTRINE: STAGE, NEVER SHIP - propose with stage_privileged_job, the operator approves with their passkey. EVERY STAGED JOB SITS ON THE GATE UNTIL A HUMAN APPROVES OR DENIES IT: nothing supersedes anything automatically any more, so several of your jobs, and several from another chat of your own role, all wait side by side and each is approved on its own with its own passkey tap. Two things are refused at STAGE time instead, loudly, without touching anything already waiting: staging a byte-identical copy of a job already on the gate, and staging past PC_PENDING_MAX_PER_ROLE jobs waiting from your role. Retire a proposal you no longer want with POST /api/jobs/supersede, which records who did it and why. Jobs still EXPIRE after WA_JOB_TTL_MIN unapproved, and that now carries a reason you can read. Every staged job: anchor-assert inputs, syntax-gate before deploy, back up what it changes, auto-rollback on failure, stream its log to shared/state/<job>.log - the gate executor has a ~3-4 min HARD timeout and a killed job returns EMPTY stdout.',
     '',
-    'BUS LAW: the bus is GEMINI ONLY (Vertex, GCP-billed). There is no Claude bus. Work Gemini cannot do parks and comes back to a Claude surface.',
+    'BUS LAW: there is no bus. The operator drives from an MCP client. Work items are a shared list rather than a queue anything claims. Nothing runs unattended.',
     '',
-    'TRAPS: the container is ephemeral - the lake is the only durable memory. MCP read_file PREPENDS a banner line + blank line NOT in the stored object; strip both on any read-then-write. fleet-work-runner does NOT hot-load. deploy-cp-harness.sh is RETIRED (exit 1): the control plane is built from the git STORE (Firestore repos/<repoId>/refs + lake <repoId>/.git/objects/), reached with the git_* tools - git_push onto memory-v1, then a staged deploy-store.py --commit <oid> --tag <tag>.',
+    'TRAPS: the container is ephemeral - the lake is the only durable memory. MCP read_file PREPENDS a banner line + blank line NOT in the stored object; strip both on any read-then-write. deploy-cp-harness.sh is RETIRED (exit 1): the control plane is built from the git STORE (Firestore repos/<repoId>/refs + lake <repoId>/.git/objects/), reached with the git_* tools - git_push onto memory-v1, then a staged deploy-store.py --commit <oid> --tag <tag>.',
     '',
     'YOUR ASSIGNMENT: ' + (task || 'Ask the operator what they want first.'),
     '',
@@ -5988,7 +6046,6 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
 async function harRunChatTool(name: string, input: any, agentId: string): Promise<string> {
   const who = agentId || 'fleet-advisor';
   if (name === 'status_digest') return await harStatusDigest(who);
-  if (name === 'dispatch') return await harDispatch(input || {}, who);
   if (name === 'check') return await harCheck(input || {}, who);
   if (name === 'read_journal') return await harReadJournalTool(input || {});
   if (name === 'read_lake') return await harReadLakeTool(input || {}, who);
@@ -6206,7 +6263,9 @@ async function harClaudePost(apiModel: string, key: string, body: any): Promise<
     delete out.model;                                        // on Vertex the model id lives in the URL
     out.anthropic_version = HAR_VERTEX_ANTHROPIC_VERSION;    // and is required in the body
   }
-  const rr = await waFetch(url, { method: 'POST', headers, body: JSON.stringify(out) });
+  // [MODEL-LONGRUN-V1] model POST site 1 of 3 (Claude: Anthropic /v1/messages AND Vertex
+  // :rawPredict, both assembled above and both posted from this one line).
+  const rr = await waFetchLong(url, { method: 'POST', headers, body: JSON.stringify(out) });
   const jj: any = await rr.json();
   return { r: rr, j: jj };
 }
@@ -6285,7 +6344,23 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
 async function harChatClaude(apiModel: string, key: string, system: string, msgs: any[]): Promise<{ text: string; usage: any; model?: string; effort?: string }> {
   const buildBody = (withTtl: boolean, withEffort: boolean) => {
     const body: any = {
-      model: apiModel, max_tokens: 1024, system,
+      // [CHAT-MAX-TOKENS-V1] WAS THE LITERAL 1024, AND IT WAS THE LAST ONE LEFT.
+      // HAR_CHAT_MAX_TOKENS (CHAT_MAX_TOKENS, default 4096 here) already governs the
+      // Claude tool loop beside this function. THIS path -- plain, non-tool chat -- was
+      // still pinned at 1024 output tokens for no recorded reason, so a long answer was
+      // truncated while the identical question asked through a tool round was not. Same
+      // constant now, so CHAT_MAX_TOKENS means one thing on every Claude path.
+      // THE DEFAULT IS NOT CHANGED WITH IT. Upstream's constant defaults to 16000 and
+      // this one to 4096; taking their number as well would raise the ceiling on every
+      // Claude turn of a fresh install -- a spend change riding in on a consistency fix.
+      // This install's services carry CHAT_MAX_TOKENS explicitly, so the literal moves
+      // nothing here and the default stays this tree's own.
+      // [CHAT-GEMINI-MAXTOK-V1] THAT PARAGRAPH USED TO END "GEMINI IS DELIBERATELY GIVEN NO
+      // CEILING ... flagged, not done", and it is no longer true, so it is retracted here
+      // rather than left to mislead the next reader. Both Gemini paths now set
+      // generationConfig.maxOutputTokens from this same constant. The reasoning for doing it,
+      // including the fact that it IS a new ceiling, is written out at harChatGemini().
+      model: apiModel, max_tokens: HAR_CHAT_MAX_TOKENS, system,
       messages: msgs.map((m, i) => {
         const block: any = { type: 'text', text: String(m.text || m.content || '') };
         if (msgs.length >= 2 && i === msgs.length - 2) block.cache_control = withTtl ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
@@ -6330,7 +6405,24 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
   // of the argument, including why stating it rather than just asserting it is part of the
   // fix, is at harClaudePost() above.
   const contents = msgs.map((m) => ({ role: m.role === 'me' ? 'user' : 'model', parts: [{ text: String(m.text || m.content || '') }] }));
-  const payload = { systemInstruction: { parts: [{ text: system }] }, contents };
+  // [CHAT-GEMINI-MAXTOK-V1] VERIFIED ABSENT BEFORE IT WAS ADDED: `grep -n maxOutputTokens` on
+  // this file returned NOTHING -- neither Gemini path, toolless or tool-capable, sent a
+  // generationConfig of any kind, while every Claude path has sent max_tokens:
+  // HAR_CHAT_MAX_TOKENS since [CHAT-MAX-TOKENS-V1]. So CHAT_MAX_TOKENS meant one thing on one
+  // substrate and nothing at all on the other, which is the two-registries shape this file keeps
+  // paying for -- and it matters more now that [CHAT-GEMINI-DEFAULT-V1] makes Gemini the
+  // substrate a provider-less request lands on.
+  // SAY PLAINLY WHAT THIS IS: it is a NEW CEILING ON GEMINI, not the removal of an old one. The
+  // previous note in harChatClaude() flagged exactly that and declined to do it; this release
+  // does it, for parity, and the honest cost is that a Gemini answer longer than
+  // HAR_CHAT_MAX_TOKENS is now truncated where before it was not. The mitigation is that it is
+  // the SAME env-tunable constant (CHAT_MAX_TOKENS, default 4096 in this tree): raising it raises
+  // both substrates together, with a config revision and no rebuild, which was the whole point of
+  // naming it once.
+  // NOTHING ELSE GOES IN generationConfig. No temperature, no topP, no candidateCount -- this
+  // block exists to make ONE setting mean the same thing on both substrates, and every other
+  // field would be a sampling change riding in on a consistency fix.
+  const payload = { systemInstruction: { parts: [{ text: system }] }, contents, generationConfig: { maxOutputTokens: HAR_CHAT_MAX_TOKENS } };
   let url = 'https://generativelanguage.googleapis.com/v1beta/models/' + apiModel + ':generateContent?key=' + encodeURIComponent(key);
   let headers: any = { 'Content-Type': 'application/json' };
   let hostDesc = 'host=generativelanguage.googleapis.com transport=studio';
@@ -6355,7 +6447,8 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
     hostDesc = 'host=' + vhost + ' transport=vertex region=' + region + ' project=' + project;
   }
   
-  const r = await waFetch(url, {
+  // [MODEL-LONGRUN-V1] model POST site 2 of 3 (Gemini, toolless path -- AI Studio or Vertex).
+  const r = await waFetchLong(url, {
     method: 'POST', headers,
     body: JSON.stringify(payload),
   });
@@ -6387,16 +6480,6 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
 
 // ---- pages (gated: must have a console session; otherwise the locked document, in place) ----
 app.get('/chat', (req: express.Request, res: express.Response) => { if (pcCanonicalHostRedirect(req, res)) return; /* [PC-CANONICAL-HOST-V48] */ if (!waSessionOk(req)) { waSendLocked(res); return; } res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.setHeader('Cache-Control', 'no-store, max-age=0'); res.send(HAR_HARNESS_HTML); });
-
-// ---- VM control ----
-// [SEC-VM-UNCONFIGURED-V1] Same refusal the MCP tools make, on the HTTP surface. These three stay
-// wrapped in waGate exactly as before -- the guard is ADDED INSIDE the handler, not substituted for
-// the session check -- so the route audit still sees three guarded registrations at column zero and
-// the public/guarded split does not move. start/stop additionally mutate, so refusing here stops an
-// unconfigured install from issuing Compute writes against a name it invented.
-app.get('/api/vm/status', waGate(async (req, res) => { const _u = harVmUnset(); if (_u !== '') { res.status(503).json({ ok: false, error: 'workstation not configured', unset: _u, detail: 'This deployment declares no Compute instance, so there is nothing to ' + 'address. Create the instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.' }); return; } res.json(await harVmStatus()); }));
-app.post('/api/vm/start', waGate(async (req, res) => { const _u = harVmUnset(); if (_u !== '') { res.status(503).json({ ok: false, error: 'workstation not configured', unset: _u, detail: 'This deployment declares no Compute instance, so there is nothing to ' + 'address. Create the instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.' }); return; } res.json(await harVmAction('start')); }));
-app.post('/api/vm/stop', waGate(async (req, res) => { const _u = harVmUnset(); if (_u !== '') { res.status(503).json({ ok: false, error: 'workstation not configured', unset: _u, detail: 'This deployment declares no Compute instance, so there is nothing to ' + 'address. Create the instance and set WS_VM and WS_ZONE (and GCP_PROJECT) on this service.' }); return; } await opsClear('box-stopped'); res.json(await harVmAction('stop')); }));
 
 // ---- [PQC-TLS-TOGGLE-V1] post-quantum TLS ingress toggle ----
 // The knob is compute.sslPolicies field `postQuantumKeyExchange` (API v1, values
@@ -6575,42 +6658,14 @@ app.get('/api/ops/session', waGate(async (req, res) => {
 }));
 app.post('/api/ops/end', waGate(async (req, res) => { await opsClear('manual'); const s = await opsGet(); res.json({ ok: !!(s && s.revoked_at), revoked_seq: (s && s.revoked_seq) || 0 }); }));  // manual "lock ops now" (F14: reports the truth)
 
-// ---- ops-box fast shell: the "big Cloud Shell" ----
-// POST /api/shell {cmd} -> proxies to on-box ops-exec (:8022) over the serverless VPC connector.
-// gcloud runs AS the user via the forwarded gate token (X-User-Token), valid for the 12h ops window —
-// no `gcloud auth login` on the box, no service-account, nothing durable. OPS_TOKEN gates the box.
-// (H1) This route is gated by waGate: no unlocked passkey session => 403 before any proxy happens.
-app.post('/api/shell', waGate(async (req, res) => {
-  const cmd = String((req.body && req.body.cmd) || '');
-  if (!cmd) { res.status(400).json({ error: 'no cmd' }); return; }
-  if (!OPS_TOKEN) { res.status(412).json({ error: 'OPS_TOKEN not configured on control-plane' }); return; }
-  const ip = await harBoxInternalIp();
-  if (!ip) { await opsClear('box-down'); res.status(503).json({ error: 'ops-box not reachable — is the workstation instance running?' }); return; }  // idle-out/stopped => drop window
-  const ot = await harOpsToken(req);
-  if (ot.err) { res.status(401).json({ error: ot.err }); return; }
-  const hdrs: any = { 'X-Ops-Token': OPS_TOKEN, 'Content-Type': 'application/json' };
-  if (ot.token) hdrs['X-User-Token'] = ot.token;   // gcloud runs as the human for this command
-  try {
-    const r = await waFetch('http://' + ip + ':8022/run', { method: 'POST', headers: hdrs, body: JSON.stringify({ cmd }) });
-    const j: any = await r.json().catch(() => ({}));
-    if (j && typeof j === 'object' && !('authed' in j)) j.authed = !!ot.token;
-    res.status(r && r.ok ? 200 : 502).json(j);
-  } catch (e: any) { res.status(502).json((console.error('[gate] error detail withheld from client:', e), { error: 'request failed' })); }
-}));
-// health/reachability of the ops-box shell (used by the terminal view to show on/off + authed)
-app.get('/api/shell/health', waGate(async (req, res) => {
-  const ip = await harBoxInternalIp();
-  if (!ip) { res.json({ up: false, reason: 'box stopped' }); return; }
-  try {
-    const r = await waFetch('http://' + ip + ':8022/healthz', { headers: { 'X-Ops-Token': OPS_TOKEN } });
-    const j: any = await r.json().catch(() => ({}));
-    const s = await opsGet(); const now = Date.now();
-    res.json({ up: !!(r && r.ok), ip, health: j, window_active: !!(s && s.window_expiry && now < s.window_expiry), window_remaining_ms: s && s.window_expiry ? Math.max(0, s.window_expiry - now) : 0 });
-  } catch (e: any) { res.json({ up: false, ip, reason: String((e && e.message) || e) }); }
-}));
-
 // ---- models ----
-app.get('/api/models', waGate(async (req, res) => { res.json(Object.assign({}, harModels(), { effort: HAR_CHAT_EFFORT })); }));
+// [CHAT-GEMINI-DEFAULT-V1] default_provider IS PUBLISHED, because the client cannot otherwise
+// honour a server default it has no way to read. Without it the page must guess, and a page that
+// guesses 'claude' while this process defaults to 'gemini' shows one substrate on the badge and
+// bills the other -- the exact divergence this tag exists to close. The field says what the
+// SERVER would do with a provider-less request; a browser that holds an explicit remembered pick
+// still sends it, and that still wins at /api/chat.
+app.get('/api/models', waGate(async (req, res) => { res.json(Object.assign({}, harModels(), { effort: HAR_CHAT_EFFORT, default_provider: HAR_CHAT_DEFAULT_PROVIDER })); }));
 // ---- token usage + cost readout (READ-ONLY). This is a FIRESTORE read only: it never calls a
 // model and can never cost model credit. Deliberately NO orderBy, so it needs only the single-field
 // index on `ts` and cannot fail on a missing composite index. Everything is wrapped in try/catch and
@@ -6721,6 +6776,18 @@ app.get('/api/keys/status', waGate(async (req, res) => {
   });
 }));
 app.post('/api/keys', waGate(async (req, res) => {
+  // [CHAT-GEMINI-DEFAULT-V1] LEFT EXACTLY AS IT WAS, ON PURPOSE, AND SIGNPOSTED BECAUSE IT IS
+  // BYTE-IDENTICAL TO THE LINE IN POST /api/chat that this release changed. Grepping the
+  // expression `=== 'gemini' ? 'gemini' : 'claude'` finds TWO hits in this file (measured), and
+  // the next person to grep it must not "finish the job" here.
+  // THEY ARE DIFFERENT QUESTIONS. There it means "which substrate should this turn run on",
+  // which has a cost, a quota story and a server default worth publishing. HERE it means "which
+  // key is the human saving in the box he just typed into" -- there is no default to move, no
+  // spend attached, and no such thing as a key with no provider: the console always names one,
+  // and a body that names neither is a malformed save, for which 'claude' is as good an answer
+  // as any and has been the answer since this route was written.
+  // Routing this through HAR_CHAT_DEFAULT_PROVIDER would make CHAT_DEFAULT_PROVIDER=gemini
+  // silently file a pasted Anthropic key under the Gemini secret. Not done.
   const provider = (req.body && req.body.provider) === 'gemini' ? 'gemini' : 'claude';
   const key = String((req.body && req.body.key) || '').trim();
   if (!key) { res.status(400).json({ error: 'no key' }); return; }
@@ -7691,7 +7758,9 @@ async function harGeminiPost(apiModel: string, key: string, payload: any): Promi
     headers['Authorization'] = 'Bearer ' + tok;
     hostDesc = 'host=' + vhost + ' transport=vertex region=' + region + ' project=' + project;
   }
-  const r = await waFetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+  // [MODEL-LONGRUN-V1] model POST site 3 of 3 (Gemini, tool-capable path). This is the one the
+  // 16-round loop hammers, so it is the site the ceiling was most likely to reach first.
+  const r = await waFetchLong(url, { method: 'POST', headers, body: JSON.stringify(payload) });
   let j: any = null;
   try { j = await r.json(); } catch (e: any) { j = { parse_error: String((e && e.message) || e) }; }
   return { r: r, j: j, hostDesc: hostDesc };
@@ -7772,7 +7841,12 @@ async function harChatGeminiOps(apiModel: string, key: string, system: string, m
   // is not a safety bound, it is a bug. 16 fits the prescribed flow twice over and still
   // terminates. The cut-off is reported rather than silent -- see harChatNoTextReport.
   while (guard++ < HAR_CHAT_MAX_ROUNDS) {
-    const payload: any = { systemInstruction: { parts: [{ text: system }] }, contents: contents };
+    // [CHAT-GEMINI-MAXTOK-V1] Same constant, same reasoning as harChatGemini() above. It is set
+    // PER ROUND, which is the same shape harChatClaudeOps has: max_tokens bounds each request in
+    // the loop, not the sum across HAR_CHAT_MAX_ROUNDS rounds. A round cut short here still
+    // reports itself -- see harChatNoTextReport, which is what the operator reads when a turn
+    // ends without text.
+    const payload: any = { systemInstruction: { parts: [{ text: system }] }, contents: contents, generationConfig: { maxOutputTokens: HAR_CHAT_MAX_TOKENS } };
     if (tools.length) payload.tools = tools;
     const { r, j, hostDesc } = await harGeminiPost(apiModel, key, payload);
     if (!r.ok) {
@@ -7829,7 +7903,21 @@ function harChatToolSystem(agentId: string, ts: HarChatTool[]): string {
 
 // ---- chat ----
 app.post('/api/chat', waGate(async (req, res) => {
-  const provider = (req.body && req.body.provider) === 'gemini' ? 'gemini' : 'claude';
+  // [CHAT-GEMINI-DEFAULT-V1] THIS LINE HARDCODED 'claude' AS THE FALL-THROUGH, so the substrate
+  // default was a compile-time constant on the one path in this file that actually spends money.
+  // It is now a WHITELIST OF THE TWO KNOWN VALUES falling through to HAR_CHAT_DEFAULT_PROVIDER,
+  // which /api/models publishes as default_provider -- server and client now read one source.
+  // AN EXPLICIT PROVIDER IN THE BODY STILL WINS, both ways round. That is not incidental: it is
+  // the console's toggle, i.e. the operator picking Claude because Gemini is wrong or stuck on
+  // this particular question, and it is the entire reason the Gemini default is safe to ship.
+  // 'claude' is spelled out rather than left as an else, so an unknown or misspelled provider
+  // falls to the configured default instead of silently meaning Claude.
+  // VERIFY-GREP: the byte-identical expression ALSO EXISTS in POST /api/keys above and is
+  // DELIBERATELY UNCHANGED there -- see the note at that line. Two occurrences, one question
+  // each, and they are different questions.
+  const provider = (req.body && req.body.provider) === 'gemini' ? 'gemini'
+                 : (req.body && req.body.provider) === 'claude' ? 'claude'
+                 : HAR_CHAT_DEFAULT_PROVIDER;
   const modelId = String((req.body && req.body.model) || '');
   const message = String((req.body && req.body.message) || '');
   const agentId = String((req.body && req.body.agentId) || '');
@@ -7936,54 +8024,7 @@ app.post('/api/chat', waGate(async (req, res) => {
 // desktop window in the console. Remote access to the workstation is Chrome Remote
 // Desktop, set up on the box itself. The proxy targeted guacd on :8080, which the
 // workstation startup script never installed, so the route could not have worked in
-// any deployment. vm_start / vm_stop / vm_resize are unaffected: they are lifecycle
-// control and never had anything to do with remote desktop.
-// ---- CDP bridge: drive the workstation Chrome via DevTools Protocol (cheap, deterministic) ----
-const WS_CDP_PORT = process.env.WS_CDP_PORT || '8025';
-async function harCdp(path: string, body: any): Promise<any> {
-  const ip = await harBoxInternalIp();
-  if (!ip) return { ok: false, error: 'workstation not running' };
-  try {
-    const r = await waFetch('http://' + ip + ':' + WS_CDP_PORT + '/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Cdp-Token': CDP_TOKEN }, body: JSON.stringify({ method: path, params: (body && body.params) || {}, targetId: (body && body.targetId) || '' }) });  // PC-CDP-RPC-V1
-    return await r.json();
-  } catch (e: any) { return { ok: false, error: 'cdp bridge: ' + String((e && e.message) || e) }; }
-}
-// ---- our-own GCP: direct Compute REST via CP_SA token (no gcloud, no Cloud Build, no OAuth) ----
-async function harVmSetType(t: string): Promise<boolean> {
-  const tok = await waAccessToken();
-  const r = await waFetch('https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/instances/' + WS_VM + '/setMachineType', { method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ machineType: 'zones/' + WS_ZONE + '/machineTypes/' + t }) });
-  return !!(r && r.ok);
-}
-async function harVmWaitOp(op: string, ms: number): Promise<any> {
-  const tok = await waAccessToken(); const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const r = await waFetch('https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/operations/' + op, { headers: { Authorization: 'Bearer ' + tok } });
-    const j: any = await r.json().catch(() => ({}));
-    if (j && j.status === 'DONE') {
-      if (j.error) { const m = JSON.stringify(j.error); return { ok: false, capacity: /RESOURCE|CAPACITY|EXHAUST|QUOTA|UNAVAIL/i.test(m), error: m }; }
-      return { ok: true };
-    }
-    await new Promise((res) => setTimeout(res, 2500));
-  }
-  return { ok: false, timeout: true };
-}
-async function harVmMachine(): Promise<string> { const j = await harVmInstance(); try { return String((j && j.machineType) || '').split('/').pop() || ''; } catch (e) { return ''; } }
-async function harVmSmartStart(pref: string, safe: string): Promise<any> {
-  const st = await harVmStatus();
-  if (st && st.state === 'RUNNING') return { ok: true, size: await harVmMachine(), note: 'already running' };
-  await harVmSetType(pref);
-  const a = await harVmAction('start');
-  if (!a || !a.op) return { ok: !!(a && a.ok), size: pref, note: 'start submitted (no op id)' };
-  const w = await harVmWaitOp(a.op, 40000);
-  if (w.ok) return { ok: true, size: pref };
-  if (w.capacity) {
-    await harVmSetType(safe);
-    const b = await harVmAction('start');
-    if (b && b.op) { const w2 = await harVmWaitOp(b.op, 40000); return { ok: !!w2.ok, size: w2.ok ? safe : 'failed', fallback: true, error: w2.error }; }
-    return { ok: !!(b && b.ok), size: safe, fallback: true };
-  }
-  return { ok: false, size: 'failed', error: w.error || 'start op did not finish' };
-}
+// any deployment.
 
 // ---- generic GCP REST passthrough: blessed reads run direct (CP_SA); everything else -> human gate ----
 function harGcpHostOk(url: string): boolean {
@@ -8162,39 +8203,6 @@ async function harGcpApi(caller: string, method: string, url: string, body: any,
     return { mode: 'direct', http: r && r.status, body: parsed };
   }
   return await harGcpStage(caller, method, url, body, reason, harGcpDanger(method, url));
-}
-// ---- S32: vm_* mutations ride the SAME trust ladder as every other cloud mutation ----
-// VERIFY-GREP: VM-LADDER-WIRED
-// harGcpBlessedDirect() is GET-only, so a Compute POST can never run direct as CP_SA.
-// harGcpDanger() returns true for POST, so every card below trips the SECOND Face ID.
-async function harVmGateCtx(): Promise<any> {
-  var state = 'unknown';
-  var size = 'unknown';
-  try { const st = await harVmStatus(); if (st && st.state) state = String(st.state); } catch (e) {}
-  try { const m = await harVmMachine(); if (m) size = String(m); } catch (e) {}
-  return { state: state, size: size, ctx: ' [workstation is currently ' + state + ' / ' + size + ']' };
-}
-async function harVmGate(caller: string, action: string, machineType: string): Promise<any> {
-  const me = caller || 'unknown-caller';
-  const base = 'https://compute.googleapis.com/compute/v1/projects/' + HAR_PROJECT + '/zones/' + WS_ZONE + '/instances/' + WS_VM;
-  const c = await harVmGateCtx();
-  if (action === 'start') {
-    if (c.state === 'RUNNING') return { ok: true, mode: 'noop', state: c.state, machine_type: c.size, note: 'workstation is already RUNNING; nothing staged' };
-    return await harGcpApi(me, 'POST', base + '/start', null, 'vm_start requested by ' + me + c.ctx);
-  }
-  if (action === 'stop') {
-    if (c.state === 'TERMINATED') return { ok: true, mode: 'noop', state: c.state, note: 'workstation is already TERMINATED; nothing staged' };
-    return await harGcpApi(me, 'POST', base + '/stop', null, 'vm_stop requested by ' + me + c.ctx);
-  }
-  if (action === 'setMachineType') {
-    const t = String(machineType || '').trim();
-    if (!/^[a-z][a-z0-9-]{1,38}[a-z0-9]$/.test(t)) return { error: 'blocked: machine_type must look like e2-medium or e2-standard-2 (got: ' + t.slice(0, 40) + ')' };
-    if (c.state !== 'TERMINATED' && c.state !== 'unknown') {
-      return { error: 'blocked: Compute setMachineType requires the instance to be TERMINATED, but it is ' + c.state + '. Call vm_stop, have the operator approve that card at your gate URL, then call vm_resize again.', state: c.state, machine_type: c.size };
-    }
-    return await harGcpApi(me, 'POST', base + '/setMachineType', { machineType: 'zones/' + WS_ZONE + '/machineTypes/' + t }, 'vm_resize to ' + t + ' requested by ' + me + c.ctx);
-  }
-  return { error: 'unknown vm action: ' + String(action).slice(0, 40) };
 }
 // =============== end Paracoding Agentic Harness ===============
 // ---- /flow live visibility (advisor v1): idea -> strain -> fruit (HTML served live from the lake) ----
@@ -9139,18 +9147,17 @@ app.use(express.urlencoded({ extended: true }));
 // buildMcpServer (not visible at module scope), so this module deliberately does NOT touch it — the
 // baked roster (seeded here) is what who() enforces; live-provisioning into who() is handled at deploy
 // re-seed and by the A2A rework. All admin endpoints require an unlocked passkey session (waSessionOk).
-const STRAIN_RE = /^(fleet-[a-z0-9-]+|work-runner)$/;
+const STRAIN_RE = /^fleet-[a-z0-9-]+$/;
 // [STRAIN-PASTEABLE-V1] /api/sessions/roles filters on pasteable === true. The seed never
 // wrote that field, so every fresh install showed 'no pasteable strains' and the operator
-// could not mint a session key for ANY strain. onboarder and work-runner stay unpasteable:
-// onboarder is where unclaimed connectors land, work-runner is machinery, neither is a chat.
+// could not mint a session key for ANY strain. onboarder stays unpasteable:
+// onboarder is where unclaimed connectors land and is not a chat.
 // [RELEASE-ROSTER-V1] Derived from STRAIN_SEED on purpose. There were three
 // rosters and they could drift; now there is one list and the extractor has one
 // thing to trim for the public release. Every seeded strain can mint a paste.
 // [RELEASE-ROSTER-V1] One list, one exclusion. STRAIN_SEED is the roster; a
-// strain is pasteable unless it is a SERVICE IDENTITY. work-runner executes
-// queued work and is active and hidden by design -- handing out a paste for it
-// would mint a human key for the thing that runs the queue. The rule lives here
+// strain is pasteable unless it is a SERVICE IDENTITY. fleet-onboarder is
+// where unclaimed connectors land -- handing out a paste for it would mint a human key for machinery. The rule lives here
 // rather than in a second hand-maintained roster that can drift out of step.
 // [STRAIN-TDZ-V1] ORDER IS LOAD-BEARING. STRAIN_PASTEABLE is derived from
 // STRAIN_SEED at module scope, so the seed must be DECLARED FIRST. `const`
@@ -9159,8 +9166,8 @@ const STRAIN_RE = /^(fleet-[a-z0-9-]+|work-runner)$/;
 // listens. That shipped once (revision 00245-jur) and was caught only because
 // the deploy went out at --no-traffic. esbuild here is transpile-only and will
 // never catch it. Do not reorder or separate these three statements.
-const STRAIN_SEED = ['fleet-onboarder', /* [STRAIN-SEED-ONBOARDER-V1] OAUTH_DEFAULT_ROLE names this strain; a wipe-and-reseed without it drops every new connector onto the privileged strain */ 'fleet-advisor', 'fleet-gcp', 'fleet-security', 'work-runner'];
-const STRAIN_NEVER_PASTEABLE = new Set(['work-runner', 'fleet-onboarder']);
+const STRAIN_SEED = ['fleet-onboarder', /* [STRAIN-SEED-ONBOARDER-V1] OAUTH_DEFAULT_ROLE names this strain; a wipe-and-reseed without it drops every new connector onto the privileged strain */ 'fleet-advisor', 'fleet-gcp', 'fleet-security'];
+const STRAIN_NEVER_PASTEABLE = new Set(['fleet-onboarder']);
 const STRAIN_PASTEABLE = new Set(
   STRAIN_SEED.filter((r: string) => !STRAIN_NEVER_PASTEABLE.has(r)));
 async function strainList(activeOnly: boolean): Promise<any[]> {
@@ -9172,7 +9179,7 @@ async function strainList(activeOnly: boolean): Promise<any[]> {
 // this file already gives twice: a hand-maintained roster beside another roster drifts. The
 // two ideas coincide exactly and for one underlying reason -- a SERVICE IDENTITY is neither
 // something a human mints a key for nor something a human assigns work to. fleet-onboarder
-// is where unclaimed connectors land and work-runner executes the queue.
+// is where unclaimed connectors land.
 // THE RUNTIME FLAGS STAY INDEPENDENT, which is what the roleflags comment below is about:
 // this only sets the value written AT SEED TIME, and POST /api/strains/:role/flags can still
 // flip `pasteable` and `hidden` separately afterwards. Deriving the initial value from one
@@ -9252,7 +9259,7 @@ app.post('/api/strains/provision', waSafe(async (req: express.Request, res: expr
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
   const role = String((req.body && req.body.role) || '').trim();
   const display = String((req.body && req.body.display_name) || role).trim();
-  if (!STRAIN_RE.test(role)) { res.status(400).json({ error: 'role must match fleet-<name> or work-runner' }); return; }
+  if (!STRAIN_RE.test(role)) { res.status(400).json({ error: 'role must match fleet-<name>' }); return; }
   // [SEC-STRAIN-CLASSES-V1] THE FIELD PC_TOOLS_ENFORCE READS HAD NO WRITER, WHICH IS THE WHOLE
   // REASON THE FLAG ENFORCED NOTHING. pcToolClasses reads strains/<role>.tool_classes. Before
   // this, the only writer of any field named tool_classes in the tree was /api/sessions/mint,
@@ -10399,6 +10406,80 @@ const PC_ENFORCE = String(process.env.PC_SESSION_ENFORCE || '1') !== '0';
 // rather than a rebuild, exactly like PC_SESSION_ENFORCE above.
 const PC_KEY_TTL_DAYS = Math.max(1, Number(process.env.PC_KEY_TTL_DAYS || 7));
 const PC_KEY_TTL_MS = PC_KEY_TTL_DAYS * 86400000;
+// [PC-KEY-TTL-V2] CUTTING PC_KEY_TTL_DAYS DOES NOT SHORTEN A KEY THAT ALREADY EXISTS.
+// V1 stamps `exp` ABSOLUTE at mint and pcSessionLookup compares that stored number with
+// Date.now(); PC_KEY_TTL_MS is read at the two MINT sites and NOWHERE in the lookup path.
+// So lowering PC_KEY_TTL_DAYS shortens only keys minted AFTER the change -- confirmed here
+// by reading both mint sites and the whole of pcSessionLookup, not inherited from upstream.
+//
+// THE OBVIOUS FIX IS A LOCKOUT. "Recompute expiry from the current TTL" expires every key
+// older than PC_KEY_TTL_DAYS the instant it deploys -- including, on a short TTL, the key
+// the operator is holding.
+//
+// SO: DERIVE, FLOOR, AND DEFAULT TO OFF.
+//   derive  effective expiry = min(stored exp, created_at + current TTL)
+//   floor   at an ANCHORED grace window, so enabling this can never cut a live session on
+//           contact
+//   off     unless PC_KEY_TTL_BACKFILL=1, mirroring PC_SESSION_STAMP_ENFORCE's
+//           observe-then-enforce shape. In observe mode nothing changes except that the
+//           journal counts which keys WOULD be cut, so the blast radius is a measured
+//           number before it is a policy.
+//
+// THE STORED exp IS NEVER REWRITTEN. pcSessionStamp binds an HMAC over kh|role|exp, so
+// moving exp would invalidate the stamp on every key at once and hand [SEC-SESSION-STAMP-V1]
+// a fleet-wide false positive. The derived value decides EXPIRY ONLY; stamp verification
+// keeps reading the stored number.
+//
+// BOTH MINT SITES ALREADY STORE created_at (FieldValue.serverTimestamp()), checked before
+// porting this: without it every key reads as undrifted and the feature would be inert.
+const PC_KEY_TTL_GRACE_MS = Math.max(1, Number(process.env.PC_KEY_TTL_GRACE_HOURS || 12)) * 3600000;
+// THE GRACE FLOOR IS ANCHORED TO A FIXED INSTANT THE OPERATOR SETS, NOT TO Date.now() AND
+// NOT TO PROCESS START. Upstream's adversarial review killed both alternatives:
+//   * `now + grace` recomputes on EVERY request, so it never converges -- a drifted key is
+//     pushed 12h into the future forever and becomes PERMANENTLY UN-EXPIRABLE, and a key
+//     already dead under its stored exp is RESURRECTED by switching this on. A
+//     TTL-tightening flag that revives expired credentials is a security regression wearing
+//     a safety feature's clothes.
+//   * `Date.now()` captured at module load has the same disease more quietly: Cloud Run
+//     starts fresh instances whenever it likes, so every cold start re-opens the window.
+// An explicit epoch is the only form that converges AND is auditable: written down, identical
+// on every instance, and "when did enforcement begin" has an answer.
+const PC_KEY_TTL_BACKFILL_SINCE_MS = (function () {
+  const raw = String(process.env.PC_KEY_TTL_BACKFILL_SINCE || '').trim();
+  if (!raw) return 0;
+  // NEITHER Number() NOR Date.parse() MAY BE TRUSTED WITH A LOOSE STRING HERE, and the
+  // runtime is why:
+  //   Number('2026')   -> 2026        a bare year is finite and positive, so a naive `n > 0`
+  //                                   accepts it as an epoch two seconds after 1970
+  //   Date.parse('0')  -> 2000-01-01  V8 legacy date parsing, not the spec
+  //   Date.parse('-5') -> 2001-05-01  same
+  // Each silently produces an anchor in the deep past, which makes the grace window already
+  // over, which enables enforcement with ZERO grace -- the exact lockout this design exists
+  // to prevent, reachable by one plausible typo in a variable whose own error message
+  // invites "an ISO date". Both forms are validated BY SHAPE before parsing.
+  if (/^[0-9]+$/.test(raw)) {
+    const n = Number(raw);
+    // 1e12 ms is 2001-09-09. Smaller is not a millisecond epoch anyone means.
+    return (Number.isFinite(n) && n >= 1e12) ? n : 0;
+  }
+  if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?$/.test(raw)) return 0;
+  const p = Date.parse(raw);
+  return Number.isFinite(p) && p > 0 ? p : 0;
+})();
+// FAIL SAFE ON A HALF-CONFIGURED ENABLE. Enforcing with no anchor means no grace at all --
+// every drifted key cut the instant this deploys. So enforcement requires BOTH, and asking
+// for one without the other stays in observe mode and says so on every boot.
+const PC_KEY_TTL_BACKFILL = String(process.env.PC_KEY_TTL_BACKFILL || '') === '1'
+  && PC_KEY_TTL_BACKFILL_SINCE_MS > 0;
+if (String(process.env.PC_KEY_TTL_BACKFILL || '') === '1' && PC_KEY_TTL_BACKFILL_SINCE_MS <= 0) {
+  console.error('[key-ttl] PC_KEY_TTL_BACKFILL=1 but PC_KEY_TTL_BACKFILL_SINCE is unset or '
+    + 'unparseable. STAYING IN OBSERVE MODE: enforcing without an anchor gives every drifted '
+    + 'key zero grace and would cut live sessions on deploy. Set PC_KEY_TTL_BACKFILL_SINCE to '
+    + 'the instant enforcement should begin. ACCEPTED FORMS ONLY: milliseconds since epoch as '
+    + 'digits >= 1000000000000, or a full ISO-8601 date such as 2026-08-24 or '
+    + '2026-08-24T12:00:00Z. A bare year, a small integer or free text is REFUSED on purpose '
+    + '-- each of those parses to an anchor near 1970 and would mean zero grace.');
+}
 const PC_SESS_TTL_MS = 60000;
 const pcSessCache: Map<string, any> = new Map();
 
@@ -10418,7 +10499,48 @@ async function pcSessionLookup(key: string): Promise<any> {
     // minted before this patch predate the field, and treating absent-as-expired would cut
     // every live chat the moment this deployed. The deploy backfills them instead.
     const _exp = Number(row.exp || 0);
-    const _expired = _exp > 0 && _exp < now;
+    // [PC-KEY-TTL-V2] The mint time, which V1 already stored and never read back.
+    let _createdMs = 0;
+    try {
+      const _ca: any = row.created_at;
+      if (_ca && typeof _ca.toMillis === 'function') _createdMs = Number(_ca.toMillis()) || 0;
+      else if (typeof _ca === 'number') _createdMs = _ca;
+    } catch (e) { _createdMs = 0; }
+    const _derivedExp = _createdMs > 0 ? (_createdMs + PC_KEY_TTL_MS) : 0;
+    // DRIFT = minted under a LONGER TTL than the one configured now. A key minted under a
+    // SHORTER one is left alone: raising the TTL must not extend a credential already handed
+    // out, which is the same defect pointing the other way.
+    const _ttlDrift = _derivedExp > 0 && _exp > 0 && _derivedExp < _exp;
+    // CLAMPED AT BOTH ENDS, and both clamps were earned by review:
+    //   upper, Math.min(_exp, ...) -- THIS POLICY MAY ONLY SHORTEN, NEVER LENGTHEN. Without
+    //     it the grace floor could push an effective expiry PAST the stored one and revive a
+    //     key that is already dead. With it, a key dead under the stored exp stays dead in
+    //     BOTH modes.
+    //   lower, the anchored floor -- nobody is cut inside the grace window beginning at
+    //     PC_KEY_TTL_BACKFILL_SINCE. Because the anchor is FIXED this converges: once
+    //     since+grace is past, the derived value governs for real.
+    const _effExp = _ttlDrift
+      ? Math.min(_exp, Math.max(_derivedExp, PC_KEY_TTL_BACKFILL_SINCE_MS + PC_KEY_TTL_GRACE_MS))
+      : _exp;
+    const _expired = PC_KEY_TTL_BACKFILL
+      ? (_effExp > 0 && _effExp < now)
+      : (_exp > 0 && _exp < now);
+    if (_ttlDrift) {
+      // COUNT BEFORE CUTTING. Rate-limited for free by the 60s pcSessCache in front of this
+      // read, and fire-and-forget via harJournalAs -- an awaited Firestore write here would
+      // put a round trip on EVERY authenticated request, which is not a price an
+      // observability line gets to charge. Carries a hash prefix, NEVER the key.
+      harJournalAs('control-plane', 'session_ttl_drift',
+        '[key-ttl] ' + kh.slice(0, 12) + '... role=' + String(row.role || '') +
+        ' minted under a longer TTL: stored exp ' + new Date(_exp).toISOString() +
+        ', derived ' + new Date(_derivedExp).toISOString() +
+        ', effective ' + new Date(_effExp).toISOString() +
+        ' (grace ' + (PC_KEY_TTL_GRACE_MS / 3600000) + 'h from ' +
+        (PC_KEY_TTL_BACKFILL_SINCE_MS > 0 ? new Date(PC_KEY_TTL_BACKFILL_SINCE_MS).toISOString() : 'UNANCHORED') +
+        '). Mode: ' +
+        (PC_KEY_TTL_BACKFILL ? 'ENFORCED -- the effective value decides'
+                             : 'OBSERVE -- the stored value still decides, nothing is cut'));
+    }
     // [WP4B-KEY-CLASSES-V1] tc is the RAW row field, carried out unvalidated ON PURPOSE: it is
     // interpreted in exactly one place (pcNarrowClasses), which is total over every possible
     // value and cannot widen for any of them. Validating it here as well would create a second
@@ -10692,7 +10814,7 @@ app.post('/api/sessions/mint', waSafe(async (req: express.Request, res: express.
   if (srow.status !== 'active') { res.status(400).json({ error: 'strain is not active: ' + role }); return; }
   // FAIL-CLOSED ALLOW-LIST. pasteable must be EXPLICITLY true.
   // 'active' and 'pasteable' are different questions and conflating them is a real hazard:
-  // work-runner must stay ACTIVE or the bus dies under admission control, and
+  // fleet-onboarder is where unclaimed connectors land and is never a chat identity, and
   // fleet-breakglass exists precisely as a recovery path -- neither may ever be minted into
   // a Cowork chat. A strain provisioned later defaults to NOT pasteable until a human marks
   // it, which is the correct direction for a flag that hands out identity.
@@ -10830,9 +10952,9 @@ app.post('/api/strain/create', waGate(async (req, res) => {
         try { await db.collection('chat_history').add({ agent_id: id, role: r.role, text: String(r.text || ''), tags: ['strain-create', 'inherited'], timestamp: (r.timestamp || FieldValue.serverTimestamp()) }); copied++; } catch (e) {}
       }
     }
-    // NEVER PASTEABLE applies to CREATION, not just to the seed roster. work-runner executes the
-    // queue and fleet-onboarder is where unclaimed connectors land; minting a human paste for
-    // either hands a person the identity of machinery. Default is FALSE for everything else too.
+    // NEVER PASTEABLE applies to CREATION, not just to the seed roster. fleet-onboarder is
+    // where unclaimed connectors land; minting a human paste for it hands a person the
+    // identity of machinery. Default is FALSE for everything else too.
     const askedPasteable = (b.pasteable === true);
     const banned = STRAIN_NEVER_PASTEABLE.has(id);
     const pasteable = askedPasteable && !banned;
@@ -10892,7 +11014,7 @@ app.post('/api/sessions/roleflags', waSafe(async (req: express.Request, res: exp
 }));
 
 // Roles the Autoclave may offer as a paste. Deliberately NOT 'every active strain':
-// work-runner is active because the bus needs it and must never become a chat identity.
+// fleet-onboarder is where unclaimed connectors land and must never become a chat identity.
 // Fail-closed -- a strain provisioned later is absent here until a human marks it.
 app.get('/api/sessions/roles', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
@@ -10910,18 +11032,124 @@ app.get('/api/sessions/roles', waSafe(async (req: express.Request, res: express.
   res.json({ roles: out, enforcing: PC_ENFORCE });
 }));
 
+// ============ [REVOKE-HONEST-V1] A SECURITY CONTROL THAT COULD ONLY EVER SAY "ok" ============
+// WHAT WAS WRONG, and it was wrong in two independent ways that compound:
+//
+// (1) THE WHOLE LOOP SAT INSIDE ONE `catch (e) {}`. Read the old body: the Firestore query, the
+//     prefix scan and EVERY d.ref.set() were in a single try whose catch was empty, and the
+//     response was the literal `{ ok: true, revoked: n }`. So a permission error on the very
+//     first write, or a query that never returned a document at all, produced HTTP 200 ok:true
+//     revoked:0 -- byte-identical to a genuine no-match. This is a REVOCATION endpoint. The one
+//     thing an operator does with it is cut a leaked session and then believe the answer, and
+//     the answer was unfalsifiable: there was no input for which it reported failure.
+//     Worse, a mid-loop throw abandoned the remaining documents, so a partial revocation --
+//     some keys cut, some still live -- also reported ok:true, with a count that stopped at
+//     wherever the exception landed rather than at what was actually revoked.
+//
+// (2) THE limit(500) WAS INVISIBLE. session_keys is scanned with a hard cap and the cap was
+//     never reported, never even hinted at in the response. An install with more than 500 key
+//     documents revokes across a PREFIX OF THE COLLECTION and is told, in the same words as a
+//     complete pass, that it succeeded. Firestore's page order is not the operator's mental
+//     order, so which keys got missed is arbitrary.
+//
+// WHAT IS REPORTED NOW: scanned / scan_limit / truncated, matched / revoked / failed, and the
+// per-document errors (capped, with the elided count stated so the cap cannot hide anything
+// either). ok is `failed === 0`, and the status follows ok, so a caller that checks only the
+// HTTP status still learns the truth.
+// ZERO MATCHES IS DELIBERATELY ok:true. Revoking a prefix that matches nothing is a successful
+// idempotent no-op: zero failures, zero live keys left under that prefix. matched:0 already
+// distinguishes it for anyone who cares, and returning ok:false there would train the operator
+// to ignore the field.
+//
+// THE CAP IS RAISED NOWHERE AND PAGINATION IS DELIBERATELY NOT ADDED. Both are real changes to
+// how much Firestore this route reads, on a route reached from the unlock page; making the
+// existing bound VISIBLE is the fix for being lied to, and it is separable from changing what
+// the bound is. truncated/more_remaining are what a follow-up would key off.
+// THE JOURNAL ENTRY IS WRITTEN ON FAILURE TOO -- previously the only durable record of a
+// revocation attempt was the success path's, so the attempts worth investigating were the ones
+// that left no trace.
 app.post('/api/sessions/revoke', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
   const body: any = (req as any).body || {};
   const idp = String(body.id || '').trim();
   if (idp.length < 6) { res.status(400).json({ error: 'id prefix too short' }); return; }
-  let n = 0;
+  const REVOKE_SCAN_CAP = 500;          // unchanged from the old limit(500); now reported
+  const REVOKE_MAX_ERRORS = 20;         // response bound; the remainder is counted, not dropped
+  const jrn = async (action: string, message: string, detail: any) => {
+    try {
+      await db.collection('journal').add({
+        agent_id: 'passkey:' + WA_USER, action: action, message: message,
+        detail: JSON.stringify(detail), timestamp: FieldValue.serverTimestamp(), at: FieldValue.serverTimestamp(),
+      });
+    } catch (e) {}
+  };
+
+  // The QUERY gets its own try. It is the one failure that means "nothing was even attempted",
+  // and conflating it with a write failure is how the old code lost the distinction.
+  let snap: any;
   try {
-    const snap = await db.collection('session_keys').limit(500).get();
-    for (const d of snap.docs) { if (String(d.id).indexOf(idp) === 0) { await d.ref.set({ revoked: true, revoked_at: FieldValue.serverTimestamp() }, { merge: true }); n++; } }
-  } catch (e) {}
+    snap = await db.collection('session_keys').limit(REVOKE_SCAN_CAP).get();
+  } catch (e: any) {
+    const msg = String((e && e.message) || e || 'session_keys query failed');
+    await jrn('session_key_revoke_failed',
+      'REVOCATION NOT ATTEMPTED for prefix ' + idp + ': session_keys query failed: ' + msg,
+      { prefix: idp, error: msg });
+    res.status(500).json({
+      ok: false, prefix: idp, error: msg,
+      scanned: 0, scan_limit: REVOKE_SCAN_CAP, truncated: false, more_remaining: false,
+      matched: 0, revoked: 0, failed: 0, errors: [], errors_elided: 0,
+      note: 'The session_keys query failed, so NOTHING was revoked. Any key matching this prefix is still live.',
+    });
+    return;
+  }
+
+  const scanned = snap.docs.length;
+  const truncated = scanned >= REVOKE_SCAN_CAP;
+  let matched = 0, revoked = 0, failed = 0, errorsElided = 0;
+  const errors: Array<{ id: string; error: string }> = [];
+
+  // Per-document try: one failing write no longer abandons the documents after it. Cutting four
+  // of five leaked sessions is strictly better than cutting one and stopping -- as long as the
+  // caller is told it was four of five, which is the whole point of this block.
+  for (const d of snap.docs) {
+    if (String(d.id).indexOf(idp) !== 0) continue;
+    matched++;
+    try {
+      await d.ref.set({ revoked: true, revoked_at: FieldValue.serverTimestamp() }, { merge: true });
+      revoked++;
+    } catch (e: any) {
+      failed++;
+      const msg = String((e && e.message) || e || 'update failed');
+      // Only a short id prefix is echoed. A session key document id IS the credential material
+      // this route exists to destroy; it does not go into a response or a journal entry whole.
+      if (errors.length < REVOKE_MAX_ERRORS) errors.push({ id: String(d.id).slice(0, 12), error: msg });
+      else errorsElided++;
+    }
+  }
+
   pcSessCache.clear();
-  res.json({ ok: true, revoked: n });
+  const ok = failed === 0;
+  const capNote = truncated ? ', CAPPED at ' + REVOKE_SCAN_CAP : '';
+  await jrn(
+    ok ? 'session_key_revoke' : (revoked > 0 ? 'session_key_revoke_partial' : 'session_key_revoke_failed'),
+    (ok ? 'Revoked ' : (revoked > 0 ? 'PARTIAL REVOCATION -- ' : 'REVOCATION FAILED -- ')) +
+      revoked + ' of ' + matched + ' matching session key(s) for prefix ' + idp +
+      ' (' + failed + ' failed, scanned ' + scanned + capNote + ').',
+    { prefix: idp, ok: ok, matched: matched, revoked: revoked, failed: failed, scanned: scanned,
+      scan_limit: REVOKE_SCAN_CAP, truncated: truncated, errors: errors.slice(0, 5),
+      errors_elided: errorsElided + Math.max(0, errors.length - 5) });
+
+  res.status(ok ? 200 : 500).json({
+    ok: ok, prefix: idp,
+    scanned: scanned, scan_limit: REVOKE_SCAN_CAP, truncated: truncated, more_remaining: truncated,
+    matched: matched, attempted: matched, revoked: revoked, failed: failed,
+    errors: errors, errors_elided: errorsElided,
+    note: !ok
+      ? (revoked + ' of ' + matched + ' matching key(s) revoked; ' + failed + ' still live. Retry -- the writes are idempotent.')
+      : (truncated
+          ? 'Only the first ' + REVOKE_SCAN_CAP + ' session_keys documents were scanned. More matching keys may exist beyond the cap and would still be live.'
+          : undefined),
+  });
 }));
 
 // =============== end Paracoding MCP OAUTH ===============

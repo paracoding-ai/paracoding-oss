@@ -265,10 +265,9 @@ So if a job did not run, check, in this order:
    With guardrails off, the refusals you are most likely to meet are the ones that
    run *before* a job exists -- a duplicate of something already staged, or a secret
    destroy that has not been through the consumer preflight.
-3. Does the tool need something `install.sh` does not provision? `vm_*` needs a
-   workstation, and the installer builds none -- run `workstation.sh`, then set
-   `WS_VM`/`WS_ZONE` on both services. Browser tools additionally need a CDP endpoint the
-   control plane can reach, which the loopback-only bridge is not.
+3. Does the tool even exist on this surface? `vm_*` and `browser_*` do not. 12.0 has
+   no workstation. If a client is offering those names, it is talking to a different
+   revision than this branch.
 
 ## Nobody can get into the console
 

@@ -87,13 +87,20 @@ mechanism will bite whoever edits it:
   boot. A route landing on neither service is a silently broken install, and this table
   exists to make that impossible. It can only bite when `PC_SURFACE` is set, so it
   cannot brick a single-service deployment.
-- **`both` is honoured and unused.** The split follows the auth mechanism each handler
-  uses -- a cookie session only from a browser that reached the console through
-  IAP, a bearer or OAuth token only from a machine client -- and those two partition the
-  table with no overlap.
+- **`both` is honoured and used, by five routes.** The split otherwise follows the auth
+  mechanism each handler uses -- a cookie session only from a browser that reached the
+  console through IAP, a bearer or OAuth token only from a machine client. Five routes
+  genuinely need both hosts. `GET /favicon.ico` and `GET /icon.png` are fetched before any
+  credential can exist: a browser asks for the favicon before sign-in, and an MCP client
+  fetches `logo_uri` with none. `GET /oauth/authorize`, `POST /oauth/authorize/complete` and
+  `POST /oauth/authorize/key` are the authorization *page* and its completion -- the only
+  part of the OAuth flow a human's browser visits, so it is the only part that can sit
+  behind IAP, while `/oauth/token` and `/mcp` stay on the public MCP host where the
+  connector needs them. OAuth permits exactly that: the authorization and token endpoints
+  are separate entries and need not share a host.
 
 Measured at this release, counted directly out of `PC_SURFACE_MAP` rather than inherited
-from an earlier note: 82 registrations, 58 `console`, 24 `mcp`, 0 `both`.
+from an earlier note: 93 registrations, 65 `console`, 23 `mcp`, 5 `both`.
 
 `GET /git/archive` is the one entry whose placement looks wrong and is not. It is a browser
 URL by shape and an `mcp` route by mechanism: its caller presents a Google-signed service
@@ -107,7 +114,7 @@ exit means no image and therefore no deploy. Its verdicts, run against this rele
 
 | Change | Result |
 |---|---|
-| baseline | `total 82 / guarded 67 / public 15`, `ROUTE AUDIT PASS`, exit 0 |
+| baseline | `total 93 / guarded 76 / public 17`, `ROUTE AUDIT PASS`, exit 0 |
 | indent a registration into an `if` | `ROUTE AUDIT FAIL: ... route registration(s) NOT at column zero`, exit 1 |
 | add a new route with no guard | `ROUTE AUDIT FAIL: ... NEW route(s) with no auth guard`, exit 1 |
 | delete a route the baseline records | `ROUTE AUDIT FAIL: ... baseline route(s) NO LONGER REGISTERED`, exit 1 |
@@ -196,23 +203,23 @@ them drifting. It is **not** `VAULT_CLEARTEXT_PREFIXES`, which grants and denies
 and is an encryption exemption. Five of the nine names overlap, which is why they get
 conflated.
 
-Six identities are seeded: four strains you assign work to, one where unclaimed OAuth
-connectors land (`OAUTH_DEFAULT_ROLE`), and one worker that executes queued work. The last
-two are unpasteable -- you cannot mint a chat key for the thing that runs the queue.
+Identities are seeded: strains you assign work to, and one where unclaimed OAuth
+connectors land (`OAUTH_DEFAULT_ROLE`). The OAuth default is unpasteable -- you cannot mint
+a chat key for a service identity. There is no worker that executes queued work.
 
 ## The tool surface, in one place
 
 `PC_TOOL_CLASS` is the inventory as well as the permission map, so it is the honest place to
-read what an agent can actually do. Measured at this release: **51 tools mapped**, 22
-`read`, 19 `write`, 2 `stage`, 5 `infra`, 3 `browser`.
+read what an agent can actually do. `vm_*` and `browser_*` are not in the map on this
+branch -- they are gone, not withheld. The classes that remain are `read`, `write`, `stage`
+and `infra`.
 
 | Class | What is in it |
 |---|---|
-| `read` | the four read-only git tools, the knowledge graph readers, `read_file`, `list_files`, `read_journal`, `read_history`, `search_history`, `read_job_log`, `run_status`, `vm_status`, `list_pending_confirm`, `whoami`, `get_time` |
+| `read` | the four read-only git tools, the knowledge graph readers, `read_file`, `list_files`, `read_journal`, `read_history`, `search_history`, `read_job_log`, `run_status`, `list_pending_confirm`, `whoami`, `get_time` |
 | `write` | `git_propose`, `git_propose_patch`, `git_push`, the knowledge-graph mutators, `write_file`, `put_file`, `append_journal`, the work-item and messaging writers, `refresh` |
 | `stage` | `stage_privileged_job`, `run_command` |
-| `infra` | `gcp_api`, `run_roll`, `vm_start`, `vm_stop`, `vm_resize` |
-| `browser` | `browser_open`, `browser_navigate`, `browser_eval` |
+| `infra` | `gcp_api`, `run_roll` |
 
 Three placements are worth pinning because people guess wrong. `gcp_api` and `run_roll` are
 `infra`, **not** `stage`, even though both can end up staging a job. `git_push` is `write`
@@ -226,17 +233,9 @@ private key it needed, and a branch that has never executed is not a feature. Th
 matching `ssh` branch went in the same change, which is why the executor now has exactly one
 execution branch.
 
-The browser tools reach the workstation's Chrome through a DevTools Protocol bridge.
-`install.sh` provisions no workstation and therefore no bridge; `workstation.sh` stands one
-up when it builds a machine, on **loopback only** and behind a token, with no firewall rule
-opened for it -- so the control plane still cannot reach it, and the tools are **withheld
-rather than registered to fail on first call**, the same doctrine as the git tools. You
-reach the bridge yourself over the IAP tunnel. `WS_CDP_PORT` is the discriminator, and it is
-the honest one: the port used to carry a default of `8025` that nothing listens on, which is
-a guess dressed as configuration. An explicit `WS_CDP_PORT` is the only signal that a
-deployer actually stood a bridge up. `browser_eval` is an ungated mutation primitive against
-a browser holding the operator's live sessions, so it additionally needs `PC_BROWSER_EVAL=1`.
-So the 51 in the table is what the map covers, not what a given install serves.
+The browser tools and the `vm_*` tools are gone. 12.0 has no workstation and no DevTools
+bridge, so there is nothing for those names to address. They are unregistered, not withheld
+behind `WS_CDP_PORT` or `WS_VM`.
 
 ## The execution path, end to end
 

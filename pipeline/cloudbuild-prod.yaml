@@ -57,6 +57,17 @@ substitutions:
   _LANE: dev
   _CP_SVC: paracoding-control-plane
   _MC_SVC: paracoding-control-plane-mcp
+  # ^^ [PROD-MCSVC-INSTALL-SPECIFIC-V1] THIS DEFAULT IS INSTALL-SPECIFIC. PASS _MC_SVC
+  #    EXPLICITLY. It is correct for THIS fleet and measured wrong in a sibling install,
+  #    where run services.list returns `paracoding-mcp` serving and no
+  #    `paracoding-control-plane-mcp` at all -- the exact inverse.
+  #
+  #    THE HAZARD IS SYMMETRICAL, which is why the warning belongs on the default rather
+  #    than in whichever install got it wrong. `gcloud run deploy` CREATES a service that
+  #    does not exist, so a wrong _MC_SVC in EITHER direction silently stands up a third,
+  #    unwanted prod service carrying the full image -- and the verify step then describes
+  #    a service that has never served the fleet. Read services.list for the project you
+  #    are promoting into and pass _MC_SVC to match.
   # ^^ CONFIRMED, 2026-08-11, and rev 2's outstanding instruction is now DONE.
   #    Rev 2 guessed `paracoding-mcp` and said so. THERE IS NO SUCH SERVICE.
   #    MEASURED by the blessed read rev 2 asked for -- run.googleapis.com/v2
@@ -75,7 +86,15 @@ substitutions:
   #    way step 7 then describes a service that has never served this fleet.
   _REPO: us-east1-docker.pkg.dev/your-prod-project/fleet/control-plane
 
-logsBucket: gs://your-prod-project-datalake/devdeploy/logs
+# [PROD-LOGSBUCKET-SUBST-V1] THIS NAMED ONE SPECIFIC PROJECT AND THERE WAS NO WAY TO
+# OVERRIDE IT. Every other install-specific value in this file is a substitution an
+# operator passes at submit time; logsBucket was a literal, so this pipeline was runnable
+# in exactly one project and silently unrunnable in every other -- it fails on its own
+# logs bucket before it reaches step 1, and no --substitutions flag can rescue it because
+# there was no variable to substitute. It also shipped this fleet's project name to every
+# adopter who read the file. logsBucket DOES expand substitutions, so it now derives from
+# _PROD_PROJECT like everything else and the file is runnable as shipped.
+logsBucket: gs://${_PROD_PROJECT}-datalake/devdeploy/logs
 options:
   machineType: E2_HIGHCPU_8
   logging: GCS_ONLY
@@ -333,6 +352,46 @@ steps:
   # deploys with `run deploy --source` and does not record an image digest. When
   # the dev build starts pushing a named image, record its digest in the marker
   # and compare here. Until then this step compares NOTHING and says so.
+  # [DEVCI-MARKER-DIGEST-NOT-PORTABLE-V1] THIS STEP HAS NEVER COMPARED ANYTHING, AND THE
+  # OBVIOUS FIX WOULD MAKE IT WORSE. Recorded here because the downstream lab has just
+  # landed that obvious fix in ITS tree, and the next person to diff the two will reach for
+  # it.
+  #
+  # MEASURED. $$WANT is read from the dev marker's image_digest field. NOTHING IN THIS
+  # REPOSITORY HAS EVER WRITTEN THAT FIELD -- cloudbuild-dev.yaml's marker printf emits
+  # commit, archive, archive_sha256, build, revision, deployed, provenance, route_audit,
+  # collect, collect_exit, smoke, smoke_exit, evidence and smoke_report, and no other writer
+  # exists. So $$WANT has been empty on every promotion this pipeline has ever done, this
+  # step has always taken the warn-and-continue branch, and it has printed a reassuring line
+  # into the build log while verifying nothing.
+  #
+  # WHY RECORDING A DIGEST WOULD NOT FIX IT HERE. The two lanes do not build the same
+  # artifact, and cannot:
+  #
+  #   dev   `gcloud run deploy --source control-plane` -- Cloud Build builds it and pushes
+  #         to the DEFAULT cloud-run-source-deploy repository. Measured on the live service:
+  #         .../cloud-run-source-deploy/paracoding-control-plane@sha256:...
+  #   prod  `docker build -t ${_REPO}:${_COMMIT}` -- its OWN build, into fleet/, which is a
+  #         DIFFERENT repository.
+  #
+  # Two independent builds of the same source. The WARN below already names the reason they
+  # would differ even in one repository: npm install is UNPINNED in control-plane/Dockerfile.
+  # So feeding this check a dev digest would not make it pass -- it would make it FAIL,
+  # loudly and permanently, on every promotion, for a reason that is not drift. A check that
+  # cries wolf gets commented out, and the `exit 9` on the mismatch branch below is one line
+  # away from being uncommented by someone who believes the comparison is real.
+  #
+  # WHAT WOULD ACTUALLY FIX IT, so this is a decision and not a shrug: promote the artifact
+  # dev rehearsed instead of rebuilding it -- prod deploys the digest recorded in the marker
+  # rather than running its own docker build. That is a change to what this pipeline IS, not
+  # a field added to a JSON blob, and it belongs in its own commit with its own review.
+  # Until then this step is honest about measuring nothing, which is the only acceptable
+  # state for a check that cannot yet measure.
+  #
+  # NOT PORTED FROM UPSTREAM. Their fix works because their dev lane pins both surfaces to
+  # one resolved digest -- a change that rests on a two-service dev lane. This install's dev
+  # lane is ONE service with PC_SURFACE unset (devgate/smoke.py's SINGLE_SERVICE_REASON is on
+  # the whole F6 family for exactly that reason), so the change it depends on does not apply.
   - id: digest-match
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
@@ -347,7 +406,8 @@ steps:
         if [ -z "$$WANT" ]; then
           echo "WARN the dev marker records no image digest, so 'the promoted"
           echo "     artifact is the rehearsed artifact' is NOT checked here."
-          echo "     This is a real gap, not a formality."
+          echo "     This is a real gap, and on this fleet it is STRUCTURAL --"
+          echo "     see [DEVCI-MARKER-DIGEST-NOT-PORTABLE-V1] in this file."
         elif [ "$$WANT" != "$$GOT" ]; then
           echo "WARN digests differ. npm install is UNPINNED in control-plane/"
           echo "     Dockerfile, so this can be an honest float. Read the two"
@@ -417,15 +477,55 @@ steps:
         MC_NEW=$$(cat /workspace/mc.rev)
         test -n "$$CP_NEW"
         test -n "$$MC_NEW"
+        # [PROD-TRAFFIC-READ-V1] `.filter(...)` INSIDE A value() PROJECTION IS NOT A
+        # THING GCLOUD HAS. `--filter` is a TOP-LEVEL FLAG that selects whole
+        # resources; the projection language has transforms, and filter() is not among
+        # them. A projection naming a transform gcloud does not define is a parse
+        # error, so this expression could never have returned a revision name -- and
+        # this step is the one whose whole job is recording a rollback target before
+        # traffic moves.
+        #
+        # STATED AS WHAT IT IS: THE ERROR ITSELF WAS NOT REPRODUCED HERE. There is no
+        # gcloud in the tree this edit was made in, so no live invocation was run and
+        # none is claimed. What IS established is the replacement, below.
+        #
+        # HOW I KNOW THE REPLACEMENT WORKS, and it is not an argument from the docs:
+        # `--format=json` + python3 is ALREADY THE LOAD-BEARING MECHANISM IN THIS SAME
+        # FILE, twice, in the step that runs after this one. tag_url() reads
+        # `gcloud run services describe --format=json` and walks status/spec traffic in
+        # python to find the tag URL; the PC_SURFACE assertion reads
+        # `gcloud run revisions describe --format=json` and walks
+        # spec.containers[0].env the same way. Neither uses a transform. Both REFUSE
+        # the promotion when they come back empty, so a build has never reached the
+        # traffic cut without both of them having returned real values. The reads below
+        # are the same two gcloud commands with the same --format=json and the same
+        # two field paths, moved earlier in the pipeline.
+        #
+        # THE percent==100 TEST IS THE POINT, NOT AN INCIDENTAL DETAIL. A service
+        # mid-promotion carries SEVERAL traffic entries and the tagged ones have no
+        # percent at all, so anything that takes the first entry -- or reads a deploy
+        # command's own output -- names a revision that is not serving, which is
+        # precisely the wrong rollback target to write into the marker.
+        #
+        # revisionName OR revision: the v1 and v2 Cloud Run shapes spell this key
+        # differently and this step does not control which the installed gcloud emits,
+        # so both are read rather than one being assumed.
+        #
+        # THE SAME DEFECT WAS IN prevcommit(), and the task that found it named only
+        # three sites. This is the fourth:
+        # `spec.containers[0].env.filter("name:BUILD_COMMIT").value` is the identical
+        # invalid transform on a different field. It is fixed here rather than left,
+        # because the `|| true` on it means it fails SILENTLY -- the marker would
+        # simply carry an empty previous-commit forever and nothing would ever say why.
         prev() {
           gcloud run services describe "$$1" --region=${_REGION} \
-            --project=${_PROD_PROJECT} \
-            --format='value(status.traffic.filter("percent:100").revisionName)'
+            --project=${_PROD_PROJECT} --format=json 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); ts=(d.get("status") or {}).get("traffic") or []; print(next((t.get("revisionName") or t.get("revision") or "" for t in ts if t.get("percent")==100), ""))' 2>/dev/null || true
         }
         prevcommit() {
           gcloud run revisions describe "$$1" --region=${_REGION} \
-            --project=${_PROD_PROJECT} \
-            --format='value(spec.containers[0].env.filter("name:BUILD_COMMIT").value)' 2>/dev/null || true
+            --project=${_PROD_PROJECT} --format=json 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); env=(((d.get("spec") or {}).get("containers") or [{}])[0].get("env") or []); print(next((e.get("value","") for e in env if e.get("name")=="BUILD_COMMIT"), ""))' 2>/dev/null || true
         }
         CP_PREV=$$(prev ${_CP_SVC})
         MC_PREV=$$(prev ${_MC_SVC})
@@ -546,6 +646,57 @@ steps:
               echo "  ok   $$1 revision $$2 answered with its own discriminator"
               return 0
             fi
+            # [PROD-READBACK-IAP-V1] AN IAP REFUSAL IS NOT AN ABSENT APPLICATION, AND
+            # THIS LOOP HAD NO WAY TO SAY SO. Without this branch, an IAP-fronted
+            # surface burns all ten attempts -- every one of them a 302 to a sign-in
+            # host carrying x-goog-iap-generated-response: true -- and then exits with
+            # "COLD-START BOOT FAILURE. Read the revision logs." The container would be
+            # fine. IAP sits IN FRONT of it and answers first, so the application's own
+            # discriminator CANNOT appear on an unauthenticated probe, no matter how
+            # long the loop waits. Retrying cannot help, and the message sends the
+            # reader to logs to look for a boot problem that is not there. Same family
+            # as the collector's refusal-layer defect: a refusal is not an absence.
+            #
+            # NOT A CLAIM THAT THIS HAS HAPPENED HERE. The long comment above this step
+            # records the opposite for today's install -- neither prod surface carries
+            # iapEnabled, and a request straight to the *.run.app origin bypasses a
+            # load balancer anyway, which is why the OLD gate that REQUIRED this header
+            # was removed as unreachable. This branch is the other direction: it does
+            # not require the header, it INTERPRETS it if it ever shows up. The day a
+            # surface is put behind IAP, the promotion says so instead of blaming the
+            # container.
+            #
+            # DETECTED, NEVER CONFIGURED. IAP brands its own responses, so this asks
+            # the response what happened rather than being told in advance which
+            # surfaces are fronted -- which is what stops it going stale the day one
+            # changes.
+            #
+            # THE FALLBACK IS WEAKER THAN THE PROBE AND SAYS SO OUT LOUD. Cloud Run
+            # reports Ready=True only after the container has started and passed its
+            # startup probe -- a real, platform-attested boot signal, the same one
+            # `gcloud run deploy` itself waits on -- but it is NOT proof the
+            # application served a request. It can still REFUSE: Ready=False or absent
+            # stops the promotion exactly as before, and nothing here weakens that.
+            if grep -qi '^x-goog-iap-generated-response:' /workspace/h.txt; then
+              RS=$$(gcloud run revisions describe "$$2" --region=${_REGION} \
+                      --project=${_PROD_PROJECT} --format=json 2>/dev/null \
+                    | python3 -c 'import json,sys; d=json.load(sys.stdin); cs=(d.get("status") or {}).get("conditions") or []; print(next((str(c.get("status") or "") for c in cs if c.get("type")=="Ready"), ""))' 2>/dev/null) || true
+              if [ "$$RS" = "True" ]; then
+                echo "  ok   $$1 revision $$2 is IAP-FRONTED: IAP answered before the"
+                echo "       container, so the app discriminator cannot appear on an"
+                echo "       unauthenticated probe. Cloud Run reports Ready=True -- the"
+                echo "       container started and passed its startup probe."
+                echo "       NOT PROVEN BY THIS STEP: that the application served a"
+                echo "       request. That needs an authenticated probe through IAP."
+                return 0
+              fi
+              echo "REFUSE $$1 revision $$2 is IAP-fronted AND Cloud Run reports"
+              echo "  Ready=$${RS:-<absent>}. The container did not come up. This is a"
+              echo "  boot failure, and the IAP header is not what is hiding it."
+              echo "  --- last response ---"
+              cat /workspace/h.txt || true
+              exit 9
+            fi
             echo "  attempt $$i: not yet -- $$(head -n 1 /workspace/h.txt || echo '<no response>')"
             i=$$((i + 1))
             sleep 10
@@ -553,6 +704,8 @@ steps:
           echo "REFUSE $$1 revision $$2 never answered with $$4 after 10 attempts."
           echo "  A Google Frontend 5xx with neither x-powered-by nor www-authenticate"
           echo "  is a COLD-START BOOT FAILURE. Read the revision logs before retrying."
+          echo "  An x-goog-iap-generated-response header would have been handled above"
+          echo "  and is NOT what happened here: IAP never answered this probe."
           echo "  --- last response ---"
           cat /workspace/h.txt || true
           exit 9
@@ -560,6 +713,51 @@ steps:
 
         probe "${_CP_SVC}" "$$CP_REV" "/"     '^x-powered-by:[[:space:]]*express'
         probe "${_MC_SVC}" "$$MC_REV" "/mcp"  '^www-authenticate:[[:space:]]*bearer'
+
+        # [PROD-SURFACE-ASSERT-V1] THE PROBE ABOVE CANNOT CATCH A LOST PC_SURFACE, and that is
+        # the one thing standing between a config slip and the FULL console route table being
+        # served on the public MCP surface.
+        #
+        # deploy-mcp-notraffic passes --update-env-vars=BUILD_COMMIT and nothing else, so
+        # PC_SURFACE is INHERITED rather than set. Inheritance is normally right. But if the
+        # variable is ever lost -- a service recreated, an operator doing a full env replace, a
+        # future edit reaching for --set-env-vars -- the revision registers EVERY route, and the
+        # www-authenticate probe above STILL PASSES, because the app emits that challenge on
+        # /mcp whether or not PC_SURFACE is set. A healthy-looking probe over a surface now
+        # carrying the admin routes, and then 100% of traffic moves onto it.
+        #
+        # THIS HAZARD IS ALREADY DOCUMENTED IN THIS FILE AND WAS NEVER GUARDED: the _MC_SVC
+        # substitution comment above records, from a live install, that the console service
+        # "carries NO PC_SURFACE". So the shape of the accident is known and the value that
+        # prevents it was, until now, only ever inherited and never checked.
+        #
+        # NOT COPIED FROM THE DEV LANE'S VERSION OF THIS CLAIM. Upstream's commit says "the dev
+        # pipeline asserts this before its own MCP promotion; prod did not". In THIS tree
+        # cloudbuild-dev.yaml asserts no such thing -- grep finds PC_SURFACE there only in a
+        # substitution comment -- so prod is the first place it is checked at all, and dev
+        # remains an open gap rather than a precedent.
+        #
+        # READ FROM THE REVISION, NOT THE SERVICE TEMPLATE. The template is the LATEST spec;
+        # the revision is the thing traffic is about to point at. This runs BEFORE any traffic
+        # moves, so a refusal here leaves both surfaces exactly as they were.
+        gcloud run revisions describe "$$MC_REV" --region=${_REGION} \
+          --project=${_PROD_PROJECT} --format=json > /workspace/mcrev.json || {
+            echo "REFUSE could not read revision $$MC_REV to check PC_SURFACE."
+            echo "       Nothing was promoted; both surfaces still serve what they served."
+            exit 9
+        }
+        MC_SURFACE=$$(python3 -c 'import json;d=json.load(open("/workspace/mcrev.json"));c=(d.get("spec") or {}).get("containers") or [{}];print(next((e.get("value","") for e in (c[0].get("env") or []) if e.get("name")=="PC_SURFACE"),""))')
+        echo "  ${_MC_SVC} revision $$MC_REV carries PC_SURFACE=$${MC_SURFACE:-<UNSET>}"
+        if test "$$MC_SURFACE" != "mcp" ; then
+          echo "REFUSE PC_SURFACE on $$MC_REV is '$${MC_SURFACE:-<UNSET>}', not 'mcp'."
+          echo "       That revision would register the FULL route table on the PUBLIC MCP"
+          echo "       surface. The /mcp challenge probe cannot see this -- the app answers"
+          echo "       401 there either way. NOTHING WAS PROMOTED; both surfaces are"
+          echo "       untouched and still serve what they served before this build."
+          echo "       Fix: set PC_SURFACE=mcp on ${_MC_SVC} and re-run, or check that"
+          echo "       _MC_SVC names the MCP service and not the console."
+          exit 9
+        fi
 
         # Record what is serving NOW, so the rollback line names a real revision
         # instead of telling the operator to go and find one mid-incident.
@@ -570,12 +768,29 @@ steps:
         # a failing gcloud would abort the build between the proof and the traffic
         # shift -- blocking a promotion that has been verified, on the strength of
         # a message. The fallback is handled by ${CP_OLD:-<previous>} at the echo.
-        CP_OLD=$$(gcloud run services describe ${_CP_SVC} --region=${_REGION} \
-                   --project=${_PROD_PROJECT} \
-                   --format='value(status.traffic.filter("percent:100").revisionName)') || true
-        MC_OLD=$$(gcloud run services describe ${_MC_SVC} --region=${_REGION} \
-                   --project=${_PROD_PROJECT} \
-                   --format='value(status.traffic.filter("percent:100").revisionName)') || true
+        # [PROD-TRAFFIC-READ-V1] The same invalid `.filter("percent:100")` projection
+        # as record-rollback-marker's prev(), in its two cosmetic copies. Here the
+        # damage is quieter and therefore more durable: `|| true` swallows the parse
+        # error, CP_OLD/MC_OLD come back EMPTY, and the rollback instructions printed
+        # below fall through to the `${CP_OLD:-<previous>}` placeholder -- so the
+        # operator is handed, mid-incident, a command with a literal `<previous>` in it
+        # instead of a revision name. Nothing fails; the help is just never there.
+        #
+        # Same replacement and the same reason it is trusted: --format=json parsed by
+        # python3, which this step already depends on twice above (tag_url and the
+        # PC_SURFACE read), both of which REFUSE when they come back empty and so
+        # cannot have been silently failing on the builds that got this far.
+        #
+        # `|| true` IS KEPT, and the comment below still governs: this lookup is
+        # cosmetic and runs AFTER both surfaces are proved, so a failure here must not
+        # abort a verified promotion between the proof and the cut.
+        cur() {
+          gcloud run services describe "$$1" --region=${_REGION} \
+            --project=${_PROD_PROJECT} --format=json 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); ts=(d.get("status") or {}).get("traffic") or []; print(next((t.get("revisionName") or t.get("revision") or "" for t in ts if t.get("percent")==100), ""))' 2>/dev/null || true
+        }
+        CP_OLD=$$(cur ${_CP_SVC}) || true
+        MC_OLD=$$(cur ${_MC_SVC}) || true
 
         # PROMOTE WHAT WAS PROVED, BY NAME. `--to-latest` was a DIFFERENT CLAIM: it
         # promotes whatever is newest at the moment it runs, which a concurrent

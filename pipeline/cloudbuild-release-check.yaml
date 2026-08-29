@@ -55,9 +55,9 @@
 # because "it needs oss/ in the archive, and the prod-side export currently tars
 # only control-plane/". The archive is now a bundle of the WHOLE commit tree, so
 # oss/ is present by construction rather than by an export flag. Verified against
-# the real published bundle for e15c0fcb: the producer's own log asserts
-# `test -f oss/release/install.sh` and `test -f oss/release/workstation.sh`
-# over the re-downloaded artifact, and step 0 below asserts them again here.
+# the real published bundle for e15c0fcb: the producer's own log asserted
+# `test -f oss/release/install.sh` (that cut also shipped workstation.sh; 12.0
+# does not). Step 0 below asserts the files this release still ships.
 #
 # HOW IT IS FIRED. A SECOND Pub/Sub trigger on the SAME topic as the dev build.
 # Cloud Build gives every trigger its own subscription, so fan-out from one message
@@ -106,8 +106,32 @@ substitutions:
 # it is resolved before any step runs, so it cannot be derived, and pointing it at a lane
 # bucket makes the build unable to START whenever that lane is not installed -- failing
 # before it can say why. Unset means Cloud Build uses the project's own default logs bucket.
+# [CI-LOGSBUCKET-V1] AN UNSET logsBucket IS NOT A NEUTRAL DEFAULT ONCE A BUILD CARRIES ITS
+# OWN SERVICE ACCOUNT -- IT IS A REFUSAL BEFORE STEP 0. Cloud Build requires one of four
+# things on a user-specified service account: a logsBucket, defaultLogsBucketBehavior
+# REGIONAL_USER_OWNED_BUCKET, logging CLOUD_LOGGING_ONLY, or logging NONE. GCS_ONLY IS NOT
+# ONE OF THEM. And --service-account is not exotic here: deploy/BUILD-FROM-THE-STORE.md
+# records it as THE recipe that actually deploys this fleet ("gcloud builds submit
+# --service-account=<the executor SA itself>"), so this file was one submit away from
+# failing on a condition that has nothing to do with what it checks.
+#
+# THE FIX IS THE BEHAVIOUR FLAG, NOT A BUCKET NAME, and that is the whole point. Everything
+# the rationale above says about a bucket stays TRUE: logsBucket is resolved before any step
+# runs, a lane bucket carries a per-install token no substitution can spell, and naming one
+# would make the build unable to START whenever that lane is not installed.
+# defaultLogsBucketBehavior satisfies the rule without naming anything -- Cloud Build creates
+# and owns a regional bucket in this project. GCS_ONLY still holds: logs go to GCS, not
+# Cloud Logging, which is what the paragraph above asks for.
+#
+# DIVERGENCE FROM UPSTREAM, DELIBERATE. The downstream lab fixed the same defect by writing
+# a literal bucket in its own project into this file. That is the exact shape
+# [PROD-LOGSBUCKET-SUBST-V1] removed from cloudbuild-prod.yaml -- runnable in one project,
+# silently unrunnable everywhere else, and it ships a project name to every adopter.
+# cloudbuild-prod.yaml needs no change: it already satisfies the rule with a
+# substitution-derived logsBucket.
 options:
   logging: GCS_ONLY
+  defaultLogsBucketBehavior: REGIONAL_USER_OWNED_BUCKET
 timeout: 1800s
 
 steps:
@@ -151,7 +175,6 @@ steps:
         test -f /workspace/work/oss/gen.py
         test -f /workspace/work/oss/check-release-tree.py
         test -f /workspace/work/oss/release/install.sh
-        test -f /workspace/work/oss/release/workstation.sh
         test -f /workspace/work/oss/release/uninstall.sh
         test -f /workspace/work/oss/release/MANIFEST.txt
         # ---------------------------- negative control, SAME STEP, SAME COMPARISON
@@ -188,10 +211,7 @@ steps:
   # -------------------------------------- 1. the generator still cuts, and cuts clean
   # gen.py's leak gate refuses a cut containing operator-specific values --
   # exactly how [SEC-LEAK-COMMENT-V1] was caught, in a // comment, by the gate and
-  # not by the human review that wrote it. It also fails CLOSED on marker damage:
-  # a missing, duplicated or inverted @@PC_SHARED_BEGIN/END@@ fence, or an empty
-  # extracted region, raises SystemExit rather than silently emitting a
-  # workstation.sh whose functions are simply absent.
+  # not by the human review that wrote it. 12.0 does not emit workstation.sh.
   #
   # THE ARGUMENT CONTRACT IS THREE POSITIONALS AND THERE ARE NO FLAGS. Read off
   # gen.py:25-27, which is the WHOLE of its argument parsing -- there is no
@@ -259,7 +279,6 @@ steps:
         rm -rf /workspace/_cut
         python3 oss/gen.py . /workspace/_cut ${_COMMIT}
         test -s /workspace/_cut/install.sh
-        test -s /workspace/_cut/workstation.sh
         test -s /workspace/_cut/uninstall.sh
         test -s /workspace/_cut/MANIFEST.txt
         sums() { ( cd "$$1" && find . -type f ! -name MANIFEST.txt | sort | xargs sha256sum ) ; }
@@ -286,8 +305,7 @@ steps:
 
   # ----------------------------------- 2. the CHECKED-IN tree matches the generator
   # BLOCKING here. check-release-tree.py compares install.sh and uninstall.sh as
-  # plain literals and re-composes workstation.sh from the fenced regions in the
-  # same order the generator does, then compares byte for byte -- and verifies
+  # plain literals, then compares byte for byte -- and verifies
   # every MANIFEST line against the file it names.
   #
   # THE IMAGE IS cloud-sdk:slim BECAUSE THIS STEP NEEDS git, NOT ONLY python3.
@@ -396,6 +414,130 @@ steps:
           exit 48
         fi
         echo "NEGATIVE CONTROL OK check-release-tree.py refuses a one-byte edit"
+
+  # --------------------------- 2c. THE TREE CHECKS, AND EACH ONE'S NEGATIVE CONTROL
+  # THESE CHECKS EXISTED AND NOTHING RAN THEM. check-apis.py and
+  # check-no-embedded-assets.py both shipped in pipeline/ and were referenced in prose --
+  # install.sh's own comment says check-apis.py "FAILS CI if the two disagree" -- while no
+  # pipeline in the tree invoked either. A check nobody runs is a comment. This step is
+  # what makes those sentences true.
+  #
+  # WHY BOTH TREES. The three checks do not answer the same question at the same place:
+  #   check-python-names.py       SOURCE and CUT. A name bound nowhere in its own file.
+  #   check-no-embedded-assets.py SOURCE and CUT. A base64 asset pasted into a text file.
+  #   check-apis.py               CUT ONLY. It reads install.sh and fleet/apis.txt, which
+  #                               are EMITTED artefacts -- in the source tree the
+  #                               declaration lives at oss/fleet/apis.txt and there is no
+  #                               assembled install.sh to compare it against.
+  # Running the first two over the source as well as the cut is deliberate: a finding in
+  # the cut is a finding in the file that PRODUCED it, and naming the source path is what
+  # makes it fixable in one step instead of two.
+  #
+  # /workspace/_cut IS THE TREE STEP 2 ALREADY EMITTED, reused rather than re-cut, so these
+  # checks judge the same bytes the generator-cut-and-compare step judged.
+  #
+  # THE NEGATIVE CONTROLS ARE NOT OPTIONAL AND THEY RUN HERE, in the same job, on scratch
+  # copies. A green check that has never been shown to go red is not evidence -- that is the
+  # same bracket step 2b puts around check-release-tree.py, applied to these three.
+  - id: tree-checks
+    name: python:3.13-slim
+    dir: /workspace/work
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eu
+        command -v python3 >/dev/null 2>&1 || { echo "THIS STEP'S IMAGE CARRIES NO python3. Refusing."; exit 12; }
+        python3 --version
+        test -d /workspace/_cut || { echo "THE EMITTED TREE /workspace/_cut IS NOT THERE. The generator-cut-and-compare step is supposed to have produced it, so this is a pipeline ordering fault, not a verdict about the tree. Refusing."; exit 12; }
+
+        FAILED=""
+        run() {   # run <label> <tree> <script-relative-path>
+          echo ""
+          echo "--- $$1 over $$2"
+          set +e
+          ( cd "$$2" && python3 "$$3" )
+          RC=$$?
+          set -e
+          if test "$$RC" != "0" ; then
+            echo "  FAILED (exit $$RC)"
+            FAILED="$$FAILED $$1@$$2"
+          else
+            echo "  ok"
+          fi
+        }
+
+        run check-python-names       /workspace/work  pipeline/check-python-names.py
+        run check-python-names       /workspace/_cut  pipeline/check-python-names.py
+        run check-no-embedded-assets /workspace/work  pipeline/check-no-embedded-assets.py
+        run check-no-embedded-assets /workspace/_cut  pipeline/check-no-embedded-assets.py
+        run check-apis               /workspace/_cut  pipeline/check-apis.py
+
+        # ---------- NEGATIVE CONTROLS, on scratch copies, never on the subject trees ----------
+        # Each perturbation is the SHAPE OF THE DEFECT THE CHECK EXISTS FOR, not an arbitrary
+        # edit: a used name whose binding is gone, a base64 image pasted into a page, an API
+        # the installer enables and the declaration has never heard of.
+        NEG=/workspace/_neg
+        rm -rf "$$NEG"
+        mkdir -p "$$NEG"
+        cp -r /workspace/_cut "$$NEG/t"
+
+        echo ""
+        echo "--- NEGATIVE CONTROL check-python-names"
+        printf '\nZZ_BOUND_NOWHERE_IN_THIS_FILE()\n' >> "$$NEG/t/pipeline/check-apis.py"
+        set +e
+        ( cd "$$NEG/t" && python3 pipeline/check-python-names.py )
+        NRC=$$?
+        set -e
+        if test "$$NRC" = "0" ; then
+          echo "NEGATIVE CONTROL FAILED: check-python-names.py passed a tree containing a call to a name bound nowhere in its file. Its green verdict above proves nothing, so this build refuses."
+          exit 48
+        fi
+        echo "  ok  refused a name bound nowhere (exit $$NRC)"
+
+        rm -rf "$$NEG/t" && cp -r /workspace/_cut "$$NEG/t"
+        echo ""
+        echo "--- NEGATIVE CONTROL check-no-embedded-assets"
+        # Assembled from fragments for the same reason the checker assembles its pattern:
+        # so this pipeline file does not match the rule it is testing.
+        printf '<img src="%s%s%s%s">\n' 'data' ':image/png' ';base64,' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' >> "$$NEG/t/README.md"
+        set +e
+        ( cd "$$NEG/t" && python3 pipeline/check-no-embedded-assets.py )
+        NRC=$$?
+        set -e
+        if test "$$NRC" = "0" ; then
+          echo "NEGATIVE CONTROL FAILED: check-no-embedded-assets.py passed a tree with a base64 PNG pasted into README.md. Its green verdict above proves nothing, so this build refuses."
+          exit 48
+        fi
+        echo "  ok  refused an embedded asset (exit $$NRC)"
+
+        rm -rf "$$NEG/t" && cp -r /workspace/_cut "$$NEG/t"
+        echo ""
+        echo "--- NEGATIVE CONTROL check-apis"
+        # An API the installer enables that the declaration has never heard of -- rule 3, the
+        # one that would have caught the original drift. Appended at the end of install.sh so
+        # nothing earlier in the file changes meaning.
+        printf '\ngcloud services enable zz-not-declared.googleapis.com --project "$$PROJECT" || true\n' >> "$$NEG/t/install.sh"
+        set +e
+        ( cd "$$NEG/t" && python3 pipeline/check-apis.py )
+        NRC=$$?
+        set -e
+        if test "$$NRC" = "0" ; then
+          echo "NEGATIVE CONTROL FAILED: check-apis.py passed an install.sh that enables an API fleet/apis.txt does not declare. Its green verdict above proves nothing, so this build refuses."
+          exit 48
+        fi
+        echo "  ok  refused an undeclared API (exit $$NRC)"
+
+        rm -rf "$$NEG"
+
+        echo ""
+        if test -n "$$FAILED" ; then
+          echo "TREE CHECKS FAILED:$$FAILED"
+          echo "Each failure above names the file and the line. These are not staleness and"
+          echo "re-cutting oss/release/ will not clear them -- fix the source file, then cut."
+          exit 49
+        fi
+        echo "ALL TREE CHECKS PASSED, and all three were shown able to fail in this same job."
 
   # ------------------------------------------------- 3. publish, pass or fail
   - id: publish

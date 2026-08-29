@@ -109,9 +109,9 @@ Several strings inside the running code still tell you to mint "at the Flow Hood
 appears only if it is `active` *and* explicitly marked `pasteable`, and the mint route
 re-checks both and returns `403 role is not pasteable` otherwise. A strain provisioned
 later is **not** pasteable until a human marks it (`POST /api/sessions/roleflags`). The
-reason is that `active` and `pasteable` answer different questions: `work-runner` has to
-stay active or the bus dies under admission control, and `fleet-breakglass` exists as a
-recovery path -- neither should ever become a Cowork chat's identity. If the strain you
+reason is that `active` and `pasteable` answer different questions: a service identity
+(the unpasteable OAuth default, or `fleet-breakglass` as a recovery path) must stay off
+the mint list -- neither should ever become a chat's identity. If the strain you
 want is missing from the list, that flag is why, and it is the correct direction for a
 switch that hands out identity.
 
@@ -154,7 +154,7 @@ agent that skips it re-derives things the system already knows.
 
 `whoami` is also the floor: an identity that is not an active strain in the registry is
 admitted with a **whoami-only** server -- no lake, no journal, no staging, nothing that
-reaches the bus -- and that connection's `whoami` says so in as many words. If an agent
+writes or runs -- and that connection's `whoami` says so in as many words. If an agent
 reports that it has exactly one tool, it is not broken; it is unprovisioned.
 
 ## Using a client that is not this console
@@ -225,16 +225,8 @@ are MCP tools and setting the variables on the console does nothing. The install
 tool census **fails the install** if all seven are not registered afterwards, so a green
 run is a measurement that they are there. See **Changing the code**.
 
-Some tool families are deliberately absent on a fresh install rather than broken:
-
-- **The browser tools** need a live CDP endpoint the control plane can reach. `install.sh`
-  builds no workstation at all, and the bridge `workstation.sh` stands up is loopback-only
-  with no firewall rule opened for it. See **The workstation**.
-- **The `vm_*` tools** need a workstation instance, which `install.sh` does not create. Run
-  `workstation.sh` and set `WS_VM`/`WS_ZONE`. See **The workstation**.
-
-Absent is not the same as broken. You get no tool rather than a tool that fails on its
-first call.
+`vm_*` and `browser_*` are not on this surface. 12.0 has no workstation and no Chrome
+DevTools bridge. Setting `WS_VM` or `WS_CDP_PORT` does not bring them back.
 
 ## Revoking
 

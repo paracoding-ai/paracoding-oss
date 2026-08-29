@@ -265,8 +265,8 @@ found nothing".
 ## Not everything auto-runs, and this is the part to know at 2am
 
 `run_command` is the **only** tool wired to the auto-run path. `stage_privileged_job`, every
-`gcp_api` mutation, `run_roll`, and `vm_start` / `vm_stop` / `vm_resize` all still write a
-`pending` job and wait for a human. They return `STAGED ... job <id>`, or
+`gcp_api` mutation, and `run_roll` still write a `pending` job and wait for a human. They
+return `STAGED ... job <id>`, or
 `{ "mode": "staged", "job_id": "..." }`.
 
 So the most useful thing to read in a tool result is the first word. **`RAN` means it

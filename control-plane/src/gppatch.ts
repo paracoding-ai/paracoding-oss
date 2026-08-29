@@ -94,6 +94,11 @@ export interface Hunk {
   oldNoNl: boolean;
   /** `\ No newline at end of file` seen against the new side. */
   newNoNl: boolean;
+  /**
+   * Set when the @@ line-counts disagreed with the body and were recomputed from
+   * it: "declared A/B, body C/D". Diagnostic only; nothing branches on it.
+   */
+  headerCountsFixed?: string;
 }
 
 export interface FilePatch {
@@ -138,14 +143,49 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
       if (op.k === ' ' || op.k === '-') got.minus++;
       if (op.k === ' ' || op.k === '+') got.plus++;
     }
+    // [GPPATCH-COUNTS-FROM-BODY-V1] THE BODY IS THE PATCH; THE @@ COUNTS ARE DERIVED DATA.
+    // WHAT WAS WRONG. This REFUSED the whole call when the declared counts disagreed with the
+    // body, on the reasoning that a mismatch means "this patch was not produced by a diff tool".
+    // It usually was not -- and that is the NORMAL case here, not the exceptional one, because
+    // every caller is a language model composing a unified diff token by token, and those two
+    // integers are the one part of the format that has to be COUNTED rather than written. The
+    // refusal fired on arithmetic, never on content, and the caller had no way to fix it except
+    // to re-emit the entire patch and hope it counted right the second time.
+    //
+    // WHAT PROTECTION IS LOST -- STATED PLAINLY, BECAUSE SOMETHING IS. The @@ counts were a
+    // redundant self-check on the patch as TRANSMITTED: if a hunk body were truncated in transit
+    // (a dropped tail, a clipped stream), the declared counts would no longer match and this
+    // would have caught it. That specific tripwire is gone. Everything it could have caught it
+    // caught only by accident, and everything that MATTERS is still checked downstream and
+    // checked harder:
+    //   * applyUnifiedDiff matches every ' ' and '-' line against the base file BYTE FOR BYTE at
+    //     the position oldStart names -- zero fuzz, zero offset search. A truncated hunk whose
+    //     remaining lines still match is not a corruption, it is a smaller patch.
+    //   * gitProposePatch compare-and-swaps expected_blob_sha per file, so the base the patch
+    //     applied to is provably the base the caller read.
+    //   * the result still goes through the whole-file write path in tree.ts and stays invisible
+    //     until git_push moves the ref by CAS.
+    // A wrong count could never make a WRONG patch apply. It could only make a RIGHT one be
+    // thrown away, and that is what it was doing.
+    //
+    // DELIBERATELY NOT DONE. We do not silently swallow the mismatch: it is recorded on the hunk
+    // and logged, so if upstream ever starts emitting correct counts the log goes quiet and says
+    // so. We also do not relax applyUnifiedDiff by one byte -- the counts are recomputed, the
+    // matching is not. The one other reader of oldLines (the `-N,0` pure-insertion test in
+    // applyUnifiedDiff) gets MORE accurate from the body than from what the author typed.
     if (got.minus !== hunk.oldLines || got.plus !== hunk.newLines) {
-      throw badRequest(
-        `hunk ${hunk.index} of ${cur.path} declares ${hunk.oldLines} old / ` +
-          `${hunk.newLines} new lines but its body has ${got.minus} / ${got.plus}. ` +
-          `The @@ header and the hunk body disagree; this patch was not produced ` +
-          `by a diff tool or was edited by hand.`,
-        { path: cur.path, hunk: hunk.index, header: hunk.header },
-      );
+      hunk.headerCountsFixed = `declared ${hunk.oldLines}/${hunk.newLines}, body ${got.minus}/${got.plus}`;
+      try {
+        console.log(
+          `[gppatch] hunk ${hunk.index} of ${cur.path}: @@ counts recomputed from body ` +
+            `(${hunk.headerCountsFixed}). Header arithmetic is not a correctness signal; ` +
+            `byte-exact context matching and expected_blob_sha still are.`,
+        );
+      } catch (e) {
+        /* logging must never fail a patch */
+      }
+      hunk.oldLines = got.minus;
+      hunk.newLines = got.plus;
     }
     cur.hunks.push(hunk);
     hunk = null;
@@ -546,14 +586,65 @@ export async function gitProposePatch(
     }
   }
   const known = new Set(files.map((f) => f.path));
+  // [GPPATCH-CAS-KEY-V1] VERTEX NORMALISES JSON OBJECT KEYS, and an object keyed by file path is
+  // the one argument shape that cannot survive it: src/x.py arrives as src_x_py, and
+  // src/runner/work_item_runner.py arrives as src_runner_work_item_runner_py. Every slash and dot
+  // is replaced. The old check compared the mangled key against the patch's real paths, so it
+  // never matched, and EVERY expected_blob_sha sent through Vertex was refused -- on patches that
+  // were otherwise entirely correct. Worse, the refusal named only the key it had just rejected,
+  // giving the caller nothing to correct toward, so the next attempt guessed and failed the same
+  // way.
+  //
+  // RESOLUTION IS BY SLUG, AND ONLY WHEN UNAMBIGUOUS. The slug table is built from THIS patch's
+  // own file list, so a key naming a file the patch does not touch still resolves to nothing and
+  // is still refused, and a key that could mean two of the patch's files is refused rather than
+  // guessed. What is relaxed is the SPELLING of the key -- nothing else. The compare-and-swap it
+  // gates is untouched: the oid must still equal the real blob at the real path, and a mismatch
+  // is still a hard STALE with nothing committed.
+  //
+  // DELIBERATELY NOT DONE. No fuzzy/prefix/basename matching -- slug equality or refusal. No
+  // silent acceptance: each resolution is logged, both so two callers cannot quietly disagree
+  // about what a key meant and so the log shows whether the upstream mangling ever stops.
+  const casSlug = (s: string): string =>
+    String(s)
+      .replace(/[^A-Za-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  const bySlug: Record<string, string[]> = {};
+  for (const f of files) {
+    const s = casSlug(f.path);
+    (bySlug[s] = bySlug[s] ?? []).push(f.path);
+  }
   for (const k of Object.keys(cas)) {
-    if (!known.has(normalizeRepoPath(k, { allowRoot: false }))) {
-      throw badRequest(
-        `expected_blob_sha names ${k}, which this patch does not touch. ` +
-          `A compare-and-swap on a file the patch never reads proves nothing.`,
-        { path: k },
-      );
+    if (known.has(normalizeRepoPath(k, { allowRoot: false }))) continue;
+    const hits = bySlug[casSlug(k)] ?? [];
+    if (hits.length === 1) {
+      const real = hits[0] as string;
+      try {
+        console.log(
+          `[gppatch] expected_blob_sha key ${JSON.stringify(k)} resolved to ${real} ` +
+            `(punctuation lost in transit; the compare-and-swap itself is unchanged and ` +
+            `still enforced against that path).`,
+        );
+      } catch (e) {
+        /* logging must never fail a patch */
+      }
+      cas[real] = cas[k] as string | null;
+      delete cas[k];
+      continue;
     }
+    // THE ERROR NAMES WHAT WOULD HAVE BEEN ACCEPTED, not just what was rejected. The old message
+    // named only the bad key, which is why callers retried with another spelling of the same
+    // wrong thing.
+    throw badRequest(
+      `expected_blob_sha names ${k}, which this patch does not touch. ` +
+        `A compare-and-swap on a file the patch never reads proves nothing. ` +
+        `This patch touches: ${files.map((f) => f.path).join(', ')}. ` +
+        `Use one of those paths exactly, including its slashes and dots.` +
+        (hits.length > 1
+          ? ` (${k} is ambiguous: it could mean ${hits.join(' or ')}.)`
+          : ''),
+      { path: k, touches: files.map((f) => f.path) },
+    );
   }
 
   const staged: Array<{ path: string; content: string }> = [];

@@ -97,8 +97,8 @@ design.
 
 - **A second strain key.** Running planning and execution as different identities keeps the
   attribution honest and the blast radius small. It costs nothing.
-- **A workstation.** Not installed by `install.sh` — run `workstation.sh` separately if you
-  want a VM with a browser your agents can drive.
+- **Your own MCP client.** 12.0 is driven from Claude (the reference cockpit), Grok, or any
+  MCP client that can pass a session key as the `agent` argument. There is no VM to add.
 - **A CI trigger.** Everything needed ships; see the build path below.
 
 **Not required, and a common mistake:** you do not need to give an agent a Google credential,

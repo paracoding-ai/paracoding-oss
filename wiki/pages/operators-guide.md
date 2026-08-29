@@ -220,8 +220,8 @@ in the transcript with "the checker found nothing".
 ### Not everything auto-runs, and this is the part to know at 2am
 
 `run_command` is the only tool wired to the auto-run path. **`stage_privileged_job`, every
-`gcp_api` mutation, `run_roll`, and `vm_start` / `vm_stop` / `vm_resize` all still write a
-`pending` job and wait for a human.** They return `STAGED ... job <id>`, or
+`gcp_api` mutation, and `run_roll` still write a `pending` job and wait for a human.** They
+return `STAGED ... job <id>`, or
 `{ mode: "staged", job_id }`.
 
 So the single most useful thing to read in a tool result is the first word. **`RAN` means it
@@ -412,10 +412,11 @@ moved off the deleted gate console and nothing server-side changed with it; it i
 
 * **The value is shown once.** Only its hash is stored. A mint you did not copy is gone.
 * Only a strain that is **active** *and* explicitly **`pasteable`** can be minted. Those are
-  different questions and conflating them is a real hazard -- the runner that works the bus
-  must stay active, and a break-glass role exists precisely as a recovery path, and neither
-  may ever be pasted into a chat. A strain provisioned later is not pasteable until a human
-  marks it, which is the correct direction for a flag that hands out identity.
+  different questions and conflating them is a real hazard -- a service identity (the
+  unpasteable OAuth default, or a break-glass recovery role) must stay off the mint list,
+  because a chat that holds that key is that identity. A strain provisioned later is not
+  pasteable until a human marks it, which is the correct direction for a flag that hands out
+  identity.
 * A fresh install sets `PC_KEY_TTL_DAYS=7`.
 
 **Revoke** with the identifier prefix the console shows you.
@@ -438,68 +439,19 @@ line in the chat. **The refusal never degrades**, so if an agent proposes using 
 instead, the answer is no -- a role name resolves to nothing. A request carrying more than one
 distinct key across a batch is refused as `mixed`.
 
-## 7. Add a workstation
+## 7. Driving it from your own machine
 
-The workstation is one Ubuntu 24.04 VM with a real desktop and a real browser. It has no
-external IP; egress goes through Cloud NAT and you reach it over Chrome Remote Desktop
-(outbound only, no inbound firewall rule) or `gcloud compute ssh --tunnel-through-iap`. It
-stops itself after thirty minutes idle.
+12.0 is a GCP MCP connector a person drives from an MCP client on their own machine. There
+is no workstation VM, no bus, no autonomous loop, nothing running unattended. You do not
+add a box and you do not point `vm_*` tools at one -- those tools are not on this surface.
 
-**It is not part of the install.** `install.sh` builds no workstation and asks you nothing
-about one; the machine lives in `workstation.sh`, shipped beside the installer and run
-separately, whenever you decide you want it. That is why coming back for a workstation six
-months later does not mean re-running a ten-step installer over a live deployment.
+Connect an MCP client (Claude is the reference cockpit, not a dependency; Grok and any
+client that can pass a session key as the `agent` argument also work) and mint a paste from
+the harness header. Work items, the memory graph and the journal stay as a shared list and
+shared memory a human or an agent reads and writes -- not a queue anything claims.
 
-```
-bash workstation.sh                              # asks: none / linux / windows
-bash workstation.sh linux                        # non-interactive, scriptable
-bash workstation.sh windows
-bash workstation.sh --project P --region R linux
-```
-
-Running it twice is safe, and running it once per flavour is safe: the two flavours get
-different instance names, so they coexist, and re-running for a flavour that already exists
-**adopts** it and prints its details rather than replacing it.
-
-**Then point the tools at it, on BOTH services.** `workstation.sh` prints these two commands
-with your real values filled in when it finishes; it does not run them for you. `WS_VM` and
-`WS_ZONE` decide which single machine the `vm_*` tools address:
-
-```
-gcloud run services update <mcp-service> --region $REGION --project $PROJECT \
-  --update-env-vars WS_VM=<name>,WS_ZONE=<zone>
-gcloud run services update <console-service> --region $REGION --project $PROJECT \
-  --update-env-vars WS_VM=<name>,WS_ZONE=<zone>
-```
-
-The MCP one is the line that makes the tools move -- `vm_*` are MCP tools. The console
-carries the same pair so the two surfaces do not disagree about which machine this install
-owns. Running the provisioner for both flavours is supported and leaves both VMs in place,
-but only one of them can be the `WS_VM` the tools drive.
-
-With `WS_VM` or `WS_ZONE` empty, the `vm_*` tools are **not registered at all** and the
-console's `/api/vm/*` routes answer 503 naming the unset variable. Verified in
-`control-plane/src/index.ts`. Note that `oss/gen.py` still prints a warning saying those four
-tools will instead fail against a built-in default name in `us-central1-a`; that message
-predates the guard and the hardcoded fallbacks it describes are gone. Believe the 503.
-
-Two services run on the box and they are deliberately two, with two independent secrets:
-
-| port  | service      | secret           | header        | runs as | capability |
-|-------|--------------|------------------|---------------|---------|------------|
-| :8022 | `ops-exec`   | `/opt/ops-token` | `X-Ops-Token` | root    | `bash -lc` on the box |
-| :8025 | `cdp-bridge` | `/opt/cdp-token` | `X-Cdp-Token` | `pc-cdp`| drives the browser |
-
-One token would have made "control the browser" and "root shell on the box" the same
-capability. Both secrets live in Secret Manager and are pulled by the box's own service
-account at boot -- **never** in instance metadata, because metadata is returned in full by
-`compute.instances.get`, which `roles/compute.viewer` grants, and a project viewer must not
-be able to read a root shell.
-
-Day to day: `vm_status` is a direct read and is not gated. `vm_start`, `vm_stop` and
-`vm_resize` stage and wait for you. **`vm_resize` stops the instance first and does not start
-it again** -- if somebody is working on that desktop, this ends their session. And deleting
-the instance destroys its boot disk.
+If an earlier release left a workstation instance in the project, `uninstall.sh` still
+deletes it and says so first, because deleting an instance destroys its boot disk.
 
 ## 8. Recover when the control plane is down
 
@@ -696,8 +648,8 @@ work items, strain records, session keys. Either way it deletes five Secret Mana
 one of which is the WebAuthn credential store. **Both are irreversible.** Pass `--keep-data`
 if you intend to reinstall over the same state.
 
-It deletes the workstation instance if one exists, and says so before each one, because
-deleting an instance destroys its boot disk.
+It deletes a leftover workstation instance from an earlier release if one exists, and says
+so before each one, because deleting an instance destroys its boot disk.
 
 `PC_LANE` must be the same value the install was run with. It is how the script decides which
 names are yours.
@@ -752,7 +704,7 @@ Each is called out in place above. Collected so you can recognise one before you
 | `uninstall.sh` without `--keep-data` | the Firestore database: approvals, journal, work items, strains, session keys |
 | `uninstall.sh`, either way | five Secret Manager secrets, including the WebAuthn credential store |
 | Deleting either Cloud Storage bucket | agent memory and the handoffs; the git object store, which is your commit history |
-| Deleting a workstation instance | its boot disk |
+| Deleting a leftover workstation instance | its boot disk |
 | Overwriting the vault master | every object sealed under the old one |
 | Creating a KMS keyring or key | nothing -- but neither can ever be deleted, so a wrong name is permanent |
 | Disabling `allowedPolicyMemberDomains` to admit one account | the exception: the binding survives re-enabling, permanently |

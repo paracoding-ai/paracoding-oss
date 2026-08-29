@@ -44,18 +44,18 @@ rather than as pictures -- which is exactly why the rendered images were added b
 
 ```mermaid
 flowchart TB
-  SRC["control-plane/src/index.ts<br/>ONE route table, 90 entries in PC_SURFACE_MAP"]
+  SRC["control-plane/src/index.ts<br/>ONE route table, 93 entries in PC_SURFACE_MAP"]
   IMG["ONE container image<br/>Dockerfile builds it once"]
   SRC --> IMG
 
   IMG --> CON["Cloud Run service: CONSOLE<br/>PC_SURFACE=console<br/>IAP ON"]
   IMG --> MCP["Cloud Run service: MCP<br/>PC_SURFACE=mcp<br/>IAP OFF"]
 
-  CON --> C1["67 routes registered<br/>62 console plus the 5 marked both"]
+  CON --> C1["70 routes registered<br/>65 console plus the 5 marked both"]
   MCP --> M1["28 routes registered<br/>/mcp transports, OAuth and discovery,<br/>legacy bearer agent API, GET /git/archive"]
 
   C1 --> CSKIP["23 routes WITHHELD<br/>pushed onto pcSurfaceSkipped, never registered"]
-  M1 --> MSKIP["62 routes WITHHELD"]
+  M1 --> MSKIP["65 routes WITHHELD"]
 
   HUM["Operator in a browser<br/>Google account plus hardware key"] --> CON
   BOT["MCP client / connector<br/>Bearer or OAuth access token"] --> MCP

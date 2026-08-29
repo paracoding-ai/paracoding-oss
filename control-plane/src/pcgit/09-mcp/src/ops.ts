@@ -1295,6 +1295,104 @@ export async function gitPush(
     );
   }
 
+  // [PCGIT-PROTECTED-REFS-V1b] `??` WAS A SILENT KILL SWITCH, AND IT SHIPPED IN V1 OF THIS
+// CONTROL BEFORE THE DEFECT WAS FOUND. V1 read the protected set inline as
+// `String(process.env.PC_PROTECTED_REFS ?? 'prod')`. `??` substitutes only on null and
+// undefined -- NEVER on an empty string -- and process.env values are ALWAYS strings. So
+// PC_PROTECTED_REFS="" produced [''], which filters to [], which means NOTHING IS
+// PROTECTED, INCLUDING THE DEFAULT `prod`.
+//
+// THAT IS NOT AN EXOTIC INPUT. Terraform, Cloud Run YAML and most CI templating render an
+// unset variable as the empty string rather than omitting it. An operator writing "no EXTRA
+// protected refs" would have disarmed the default and been told nothing -- a security
+// control whose off switch is the most natural way to express "leave it alone".
+//
+// UNSET AND EXPLICITLY EMPTY ARE NOW DIFFERENT THINGS. Unset means the default. Explicitly
+// empty is still allowed, because opting out is a real choice an install may make -- but it
+// announces itself on every boot. Opting out on purpose stays possible; opting out by
+// accident, in silence, does not.
+//
+// RESOLVED ONCE AT MODULE LOAD, not per push, so the warning is a BOOT line an operator sees
+// in the revision's first log page rather than a line buried in whichever push happens next.
+const PCGIT_PROTECTED_REFS: string[] = (function () {
+  const raw = process.env.PC_PROTECTED_REFS;
+  if (raw === undefined) return ['prod'];
+  const list = String(raw).split(',').map((x: string) => x.trim()).filter((x: string) => !!x);
+  if (!list.length) {
+    console.error('[protected-ref] PC_PROTECTED_REFS IS SET AND EMPTY, SO NO REF IS PROTECTED -- '
+      + 'not even the default `prod`. Every caller that can reach gitPush -- both git_push tool '
+      + 'registrations and POST /git/sync -- can now move any ref. If that was not intended, '
+      + 'UNSET the variable rather than setting it to the empty string: unset restores the default.');
+  }
+  return list;
+})();
+
+// ---- [PCGIT-PROTECTED-REFS-V1] BRANCH PROTECTION. -----------------------
+  // The control cloudbuild-prod.yaml names as the precondition for a prod deploy
+  // trigger ever existing: "Prod promotion by moving a `prod` ref, with a trigger,
+  // becomes available only after branch protection lands inside git_push -- a
+  // refusal to move `prod` without an approval token. Until it exists, NOTHING may
+  // auto-deploy prod."
+  //
+  // IT LIVES HERE, NOT IN THE TOOL REGISTRATION, AND THE PLACEMENT IS THE POINT.
+  // MEASURED IN THIS TREE: gitPush has THREE callers, not one.
+  //   tools.ts:257                    the git_push tool
+  //   gittools.ts:881                 the git_push tool as registered on this surface
+  //   gittools.ts:1276                gitLaneSyncFromUpstream, reached from POST /git/sync
+  // The third takes its branch from `opts.branch || 'main'` -- caller-supplied -- and is
+  // authorised as a sync caller rather than by the tool-class gate. A check written into
+  // either tool registration would have been invisible to it, leaving the hole open with
+  // a control sitting next to it looking like a fix. Below gitPush the path narrows to
+  // one: pushRef has a single caller (this function) and compareAndSetRef a single caller
+  // (pushRef), and it is the only code in the tree that writes a ref value. git_propose
+  // and git_propose_patch write objects and never move a ref -- read, not taken on trust.
+  //
+  // THE UNLOCK IS CONFIGURATION, NOT CRYPTOGRAPHY, DELIBERATELY. There is no KMS
+  // signature VERIFIER anywhere in this tree -- pcApprovalSign signs and nothing
+  // verifies -- so an "approval token" would mean building signature verification
+  // from scratch on the code path that decides what reaches production. The unlock
+  // instead names the EXACT commit permitted, and setting it takes a Cloud Run
+  // configuration revision: an act an agent holding git_push cannot perform for
+  // itself, and one that is recorded in revision history.
+  //
+  // PC_PROTECTED_REFS_UNLOCK is "<branch>:<commit oid>". Naming the oid means it
+  // CANNOT be replayed: the operator authorises one promotion, not a window. Leaving
+  // it set does not authorise the next one, because the next one has a different oid.
+  //
+  // PC_AUTO_APPROVE IS NOT CONSULTED. It governs whether a staged privileged job runs
+  // without a tap and has nothing to say about ref moves -- and this fleet ships it at
+  // 1, so honouring it here would make the control a no-op exactly where it matters.
+  // Same for PC_REQUIRE_PASSKEY, which ships at 0.
+  //
+  // FAILS CLOSED. Unset, malformed, wrong branch or wrong oid all refuse and write
+  // nothing. The default protected set is `prod` although no `prod` ref exists in this
+  // store today: protecting a ref BEFORE it exists is the only ordering in which the
+  // protection is never briefly absent. `main` is NOT protected and nothing about
+  // today's workflow changes. Setting PC_PROTECTED_REFS to the empty string still
+  // disables protection entirely -- see [PCGIT-PROTECTED-REFS-V1b] above for why that
+  // opt-out now has to announce itself instead of happening quietly.
+  {
+    const _prot = PCGIT_PROTECTED_REFS;
+    const _short = refName.replace(/^refs\/heads\//, '');
+    if (_prot.indexOf(_short) >= 0) {
+      const _unlock = String(process.env.PC_PROTECTED_REFS_UNLOCK || '').trim();
+      const _want = _short + ':' + args.commit_oid;
+      if (_unlock !== _want) {
+        throw new ToolError(
+          'PROTECTED_REF',
+          `refusing to move '${_short}': it is a PROTECTED REF and this push is not ` +
+            `authorised. Nothing was written. A protected ref moves only when the ` +
+            `operator has set PC_PROTECTED_REFS_UNLOCK to exactly '${_want}' on the ` +
+            `service and deployed that configuration -- which names this one commit and ` +
+            `authorises no other. This refusal is [PCGIT-PROTECTED-REFS-V1]; it is the ` +
+            `precondition cloudbuild-prod.yaml requires before any prod deploy trigger ` +
+            `may exist, and it applies to EVERY caller, including POST /git/sync.`,
+          { branch: _short, commit_oid: args.commit_oid, protected_refs: _prot },
+        );
+      }
+    }
+  }
+
   // ---- Fence, strengthened. ------------------------------------------------
   // push.ts step 2 checks `hasLoose(tip) || some complete pack pair exists`,
   // and that second disjunct passes vacuously once the repo contains ANY

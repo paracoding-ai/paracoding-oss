@@ -16,23 +16,49 @@ watch:
 
 ## The default, and why it is that
 
-Console chat defaults to **`claude-opus-5` at `medium` effort, over Vertex AI, with
-no API key required.**
+Console chat defaults to **`gemini-3.7-flash` over Vertex AI, at location `global`,
+with no API key required.** Claude is a one-click escalation from the same page.
 
 Vertex means the request is authenticated by the control plane's own Google service
 account, billed to your project, and never leaves your cloud account boundary. There
 is no third-party key to store, rotate, or leak. That is the whole argument for the
 default.
 
-`medium` effort is a deliberate middle setting. `high` is the API default and is sent
-by omitting the effort field entirely; `medium` is sent explicitly and costs less per
-turn. If the endpoint rejects the effort field, the request is retried without it and
-the console reports the effort it **actually** used. The badge is not allowed to
-claim a setting the request did not carry.
+Gemini is the floor because it is the substrate a fresh install can actually reach:
+it needs no key of any kind, and the 3.x publisher models are served from the
+`global` endpoint, which the control plane pins for any model id beginning `gemini-3`
+regardless of the configured region. Claude on Vertex depends on a per-project
+allocation you may not have. Claude is not removed and not degraded -- it is the
+substrate you escalate to, by clicking Claude in the console header (or in
+**Layers > Settings**), which wins over the default for that request.
 
-The model catalog offered in the UI is built from the environment, opus first, with
-sonnet as a second button. On a fresh install with nothing configured you get both,
-and the first one -- the one every default path picks -- is opus.
+Set `CHAT_DEFAULT_PROVIDER=claude` to make Claude the default again. It is an
+environment variable, so it takes a config revision and no rebuild. Any value other
+than `claude` or `gemini` falls back to Gemini rather than being trusted -- an
+unrecognised substrate name is a typo, and a typo must not silently pick the
+expensive side. The console reads the same value: `GET /api/models` publishes it as
+`default_provider`, and the page applies it only when you have not picked a
+substrate yourself.
+
+Claude also reaches the direct Anthropic API instead of Vertex when
+`CHAT_CLAUDE_PROVIDER=anthropic` (`api`, `key` and `direct` are accepted spellings)
+and a Claude API key is stored. Vertex is the default and a key sitting in Secret
+Manager cannot change the transport on its own -- it is data, not configuration.
+
+**Effort is a Claude setting**, sent as `medium` by default. `high` is the API
+default and is sent by omitting the effort field entirely; `medium` is sent
+explicitly and costs less per turn. If the endpoint rejects the effort field, the
+request is retried without it and the console reports the effort it **actually**
+used. The badge is not allowed to claim a setting the request did not carry. The
+Gemini path does not send an effort field at all, which is why no effort appears on
+a Gemini reply's stamp.
+
+The model catalog offered in the UI is built from the environment, and **the order
+is the default** -- there is no separate "default model" field. Gemini lists
+`gemini-3.7-flash` first with `gemini-3.1-pro-preview` as a second button; Claude
+lists `claude-opus-5` first with `claude-sonnet-5` second. On a fresh install with
+nothing configured you get all four, and the two the default paths pick are the
+first of each list.
 
 ## What you need for the default to work
 
@@ -95,9 +121,9 @@ reason.
 
 ## Where Gemini fits
 
-Gemini is the second provider in the console's model toggle, and it is also the bus
-that runs queued background work items. It follows the same rule as Claude: **Vertex
-by default**, billed to your project, authenticated by the service account.
+Gemini is the second provider in the console's model toggle. It is not a bus and it does
+not run queued work -- 12.0 has no autonomous loop. It follows the same rule as Claude:
+**Vertex by default**, billed to your project, authenticated by the service account.
 
 The AI Studio endpoint is an explicit opt-in and needs both the switch and a real key:
 
@@ -127,7 +153,9 @@ is a boolean. No key value and no bearer token ever enters that object.
 view for both providers. Behind the gate session, like everything else on the console.
 
 Confirm a change landed by making one chat request per provider and then reading that
-endpoint. If it says `transport: vertex` and `model: claude-opus-5`, it is.
+endpoint. On a stock install the Gemini entry says `transport: vertex`,
+`region: global` and `model: gemini-3.7-flash`; the Claude entry says
+`transport: vertex` and `model: claude-opus-5`.
 
 ## Cost
 

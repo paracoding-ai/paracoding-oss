@@ -1,4 +1,4 @@
-# Paracoding — v10.5
+# Paracoding — v12.0
 
 Paracoding is an agent platform that installs into **your own** Google Cloud project in one
 command. Agents propose. You commit. Then it builds the next version of itself.
@@ -19,7 +19,7 @@ Apache-2.0. Your project, your bill, your key.
 
 **Serverless MCP behind Google IAP — and the reason there are two services.**
 IAP eats the `Authorization` header, so an MCP client can never live behind it. One image,
-one 90-route table, deployed twice: IAP on for humans, off for machines. Scale-to-zero on
+one 93-route table, deployed twice: IAP on for humans, off for machines. Scale-to-zero on
 both. A route that maps to neither surface throws at boot rather than shipping broken.
 
 **Two MCP protocol eras on one endpoint.**
@@ -237,8 +237,8 @@ sign in -- the account you install with is very often not the account your Claud
 in with, and that is cheaper to answer here than to discover as a refusal afterwards. It is
 also editable later in Settings, so an empty answer costs you nothing.
 
-Nothing else stops. The workstation question is gone because there is no longer a question
-(see below), and the passkey stop is gone because a default install ships
+Nothing else stops. There is no workstation question because 12.0 builds no VM, and the
+passkey stop is gone because a default install ships
 `PC_REQUIRE_PASSKEY=0`. The installer no longer refuses to start without a terminal, which
 means an unattended run -- Cloud Shell you walked away from, or a script -- reaches the end.
 
@@ -247,48 +247,23 @@ already provides `gcloud`, `python3`, `openssl`, `curl` and an interactive termi
 checks everything it needs and stops with the exact missing permission rather than the
 symptom.
 
-## The workstation VM
+## Driving it from your own machine
 
-**`install.sh` now builds it, at step 9/10, and leaves it STOPPED.** That is the change in
-this release and the two halves of it matter equally. Built, because the console's start,
-stop and Remote Desktop buttons and the `vm_*` tools all need a machine to point at, and an
-install that ships those controls wired to nothing is a worse first hour than one that costs
-a disk. Stopped, because a running VM bills by the hour and nobody asked for it to be
-running -- a stopped instance costs only its disk, which at the shipped 50 GB is cents a
-week. Press start in the console when you want it.
+12.0 is a GCP MCP connector a person drives from an MCP client on their own machine. There
+is no workstation VM, no bus, no autonomous loop, nothing running unattended. `install.sh`
+does not build a VM at step 9/10 and does not leave one stopped -- both halves of that older
+claim are false.
 
-    bash install.sh --no-vm      install everything else and create no VM at all
+Work items, the memory graph and the journal remain as a shared list and shared memory that
+a human or an agent reads and writes -- not a queue anything claims.
 
-`workstation.sh` still ships and still works standalone -- for building the VM later if you
-used `--no-vm`, or for rebuilding it on its own:
+The connector authenticates in tool arguments, so it is client-agnostic. Claude is the
+reference cockpit, not a dependency: the same install works from Claude, from Grok, and
+from any MCP client that can pass a session key as the `agent` argument on every call.
 
-    bash workstation.sh                          build it
-    bash workstation.sh --project P --region R   non-interactive, scriptable
-    bash workstation.sh none                     resolve flags and project, create nothing
-
-**There is one workstation and it runs Linux.** The Windows box was removed in this release,
-not deprecated: measured on a real corporate install, Cowork does not run on it, so the
-machine could not do the one job it existed for. Shipping a choice where one arm is known
-not to work is a trap with a billing consequence, and Windows carried the larger disk of the
-two. The prompt went with it -- a question with one possible answer is a stop, not a choice.
-
-It is safe to re-run: an existing VM is adopted rather than recreated. An existing Windows
-workstation from an earlier release is left alone by this script and is still found and
-removed by `uninstall.sh`, because dropping a name from the teardown sweep is how a machine
-keeps billing after an operator believes they have deleted everything.
-
-The box is given no public IP where a Cloud NAT can be provisioned, and OS Login is enforced
-so password and key SSH are refused. You reach it over IAP TCP forwarding.
-
-**The Claude desktop app is preinstalled, and the startup log says how.** Linux registers
-Anthropic's apt repository (`downloads.claude.ai/claude-desktop/apt/stable`), pins its
-signing key to a fingerprint, and installs `claude-desktop`, so later updates arrive with
-`apt-get upgrade`. These are DEFAULTS written onto the instance as metadata, so you can
-override or disable them without cutting a new release: `PC_CLAUDE_APT_REPO`,
-`PC_CLAUDE_APT_KEY`, `PC_CLAUDE_APT_FPR`, or the per-instance key `pc-claude-deb-url`. If the
-install does not succeed the script does not pretend it did: it logs that "Claude" on that
-box means the Claude Code CLI plus a dedicated Chrome app window for claude.ai, and leaves
-you with those.
+`uninstall.sh` still deletes a leftover workstation instance if one exists from an earlier
+release, because dropping a name from the teardown sweep is how a machine keeps billing
+after an operator believes they have deleted everything.
 
 ## Which model the chat talks to, and over what
 

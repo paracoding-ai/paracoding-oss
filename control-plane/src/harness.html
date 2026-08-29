@@ -187,7 +187,7 @@ window.pcWhimsyOn = function(){
   textarea{flex:1;resize:none;max-height:140px;background:rgba(var(--sunk-rgb),.28);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;padding:.7rem .8rem;font:inherit;font-size:.95rem}
   textarea::placeholder{color:var(--ink-dim)}
   textarea:focus{outline:none;border-color:var(--ink)}
-  .mic{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;padding:.7rem .8rem;font-size:1rem;cursor:pointer;flex:none}
+  .mic{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;padding:.7rem .8rem;font-size:1rem;cursor:pointer;flex:none;display:inline-flex;align-items:center;justify-content:center;line-height:1}
   .mic:hover{background:var(--glass-2)}
   .mic.rec{background:rgba(255,80,80,.4);border-color:#ff8f86;animation:pulse 1s infinite}
   @keyframes pulse{50%{opacity:.55}}
@@ -248,11 +248,6 @@ window.pcWhimsyOn = function(){
     <img src="/brand/logo.png" alt="logo" onerror="this.style.display='none'">
     <div><div class="sub">Paracoding.ai</div><div class="ttl">Paracoding.AI - Agentic Harness</div></div>
     <div class="rt">
-      <span class="vmlight off" id="vmLight" title="VM stopped"></span>
-      <button class="hbtn startb" id="vmBtn" onclick="toggleVM()">▶ Start VM</button>
-      <span class="vmerr" id="vmErr" style="display:none"></span>
-      <span class="divb"></span>
-      <button class="hbtn" id="rdpBtn2" onclick="window.open('https://remotedesktop.google.com/access','_blank','noopener')" title="Chrome Remote Desktop (new tab)">🖥️ Remote Desktop</button>
       <button class="hbtn" onclick="window.open('/dash','pcdash')">📊 Dashboard</button>
       <button class="hbtn" onclick="window.open('/wiki','pcwiki')" title="Internal system wiki">📖 Docs</button>
     </div>
@@ -296,34 +291,18 @@ window.pcWhimsyOn = function(){
       </div>
       <div class="composer"><div class="cin">
         <textarea id="ta" rows="1" placeholder="Message the selected agent…" oninput="grow(this)" onkeydown="keyd(event)"></textarea>
-        <input type="file" id="imgIn" accept="image/*" multiple style="display:none" onchange="onImg(this)"><button class="mic" id="upBtn" onclick="document.getElementById('imgIn').click()" title="Attach a screenshot">📎</button><button class="mic" id="micBtn" onclick="toggleMic()" title="Dictate — voice to text">🎤</button>
-        <button class="mic" id="playBtn" onclick="playLast()" title="Play the last reply aloud">&#9654;</button><button class="send" id="send" onclick="send()" disabled>Send</button>
+        <input type="file" id="imgIn" accept="image/*" multiple style="display:none" onchange="onImg(this)"><button class="mic" id="upBtn" onclick="document.getElementById('imgIn').click()" title="Attach a screenshot"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><button class="mic" id="micBtn" onclick="toggleMic()" title="Dictate — voice to text"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></button>
+        <button class="mic" id="playBtn" onclick="playLast()" title="Play the last reply aloud"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle"><polygon points="6 4 20 12 6 20 6 4"/></svg></button><button class="send" id="send" onclick="send()" disabled>Send</button>
       </div></div>
     </main>
     <div class="splitter" id="split" onmousedown="startResize(event)"></div>
     <aside class="rdp" id="rdpPanel">
       <div class="rdpwrap"><div class="rdpinner">
-        <div class="rdpbar">
-          <span class="t">Paracoding Workstation</span>
-          <button class="exp" onclick="toggleRdp()" title="Collapse">›</button>
-        </div>
-        <div class="rdptabs" id="rdpTabs">
-          <button class="on" data-v="terminal" onclick="setView('terminal')">⌨ Terminal</button>
-        </div>
         <div class="rdpbody" id="rdpBody">
-          <div class="rdpph" id="rdpPh"><div class="em">🖥️</div>
-            <div><b>Workstation</b><br>No desktop is streamed here. The box has no public IP, so a
-            remote desktop reaches it only through a tunnel that terminates on <b>your own
-            machine</b> &mdash; a browser tab cannot open one.</div>
-            <div style="font-family:ui-monospace,Menlo,monospace;font-size:.68rem;text-align:left;background:rgba(0,0,0,.28);border-radius:8px;padding:.45rem .55rem;max-width:100%;overflow-x:auto;white-space:pre">gcloud compute start-iap-tunnel &lt;VM&gt; 3389 \
-  --local-host-port=localhost:13389 --zone &lt;ZONE&gt; --project &lt;PROJECT&gt;</div>
-            <div>Then point an RDP client at localhost:13389 (Windows), or use Chrome Remote
-            Desktop (Linux). The installer prints both with your real values.</div>
-            <button class="btn" onclick="setView('terminal')">⌨ Open the terminal instead</button></div>
         </div>
       </div></div>
     </aside>
-    <div class="rail railR" id="railR" onclick="toggleRdp()" title="Expand workstation">‹</div>
+    <div class="rail railR" id="railR" title="Settings">‹</div>
   </div>
   <div class="modal" id="keyModal"><div class="sheet">
     <h3>🔑 API keys</h3>
@@ -368,106 +347,6 @@ window.pcWhimsyOn = function(){
   const esc=s=>String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
   function ago(ms){ if(!ms)return''; const m=Math.max(0,Math.round((Date.now()-ms)/60000)); if(m<1)return'now'; if(m<60)return m+'m'; const h=Math.round(m/60); if(h<24)return h+'h'; return Math.round(h/24)+'d'; }
   async function api(path,opts){ const r=await fetch(path,Object.assign({credentials:'include'},opts||{})); if(!r.ok){ let _b=null; try{_b=await r.json();}catch(e){} throw {status:r.status, body:_b}; } return r.json(); }
-  /* [GCP-VMLIGHT-HONEST-V1] vmKnown starts FALSE. The old pair (vmRunning=false, vmProvisioned=true)
-     were the literals every failed poll fell back to, so a console that had never once
-     reached /api/vm/status displayed a confident red 'VM stopped'. Never-measured is now a
-     distinct state from measured-and-stopped. */
-  /* [GCP-VMBTN-ACTS-V1] THE BUTTON NOW ACTS ON THE INSTANCE, AND SAYS SO WHEN IT CANNOT.
-     Operator report 2026-08-17: "clicking it changes from stop to start red to green but
-     nothing happens to vm". Measured before rewriting -- Cloud Logging on
-     paracoding-control-plane over the click window carried /api/vm/status polls and NOT ONE
-     /api/vm/start or /api/vm/stop. The click was never leaving the page. Three separate
-     defects, all of which had to go:
-       1. DEMO. loadFleet() sets DEMO=true on ANY failure of /api/fleet/agents, and toggleVM
-          then took a branch that mutated vmRunning locally and returned. A transient list
-          fetch therefore silently converted the VM control into a light switch wired to
-          nothing -- exactly the reported symptom, and invisible because the light still moved.
-          The VM control no longer consults DEMO at all: there is no offline VM to pretend at,
-          so a pretend VM is only ever a lie about production.
-       2. catch(e){}. /api/vm/start returns 200 with {ok:false,http:403} when Compute refuses
-          the control-plane identity, and throws on a 503 from the unconfigured-workstation
-          gate. Both were swallowed, and stop went further -- it set vmRunning=false and
-          repainted BEFORE the server had answered, so the UI asserted the outcome it wanted.
-          Nothing is assumed now: the light only ever follows what /api/vm/status measured, and
-          a refusal is put on screen with its reason.
-       3. No transition state. Compute reports STAGING/STOPPING for tens of seconds; the old
-          paint knew only running/stopped, so the button stayed live and invited the re-click
-          the operator asked to prevent. Moving is now its own state, the button is disabled
-          throughout, and the poll runs at 2.5s while moving instead of 8s. */
-  let vmRunning=false, vmProvisioned=true, vmKnown=false;
-  let vmState='', vmWant='', vmBusyUntil=0, vmFastTid=0, vmDeadUntil=0;
-  /* Every Compute status that is NOT a resting state. SUSPENDED and TERMINATED are resting
-     (stopped); REPAIRING is Compute moving the instance without being asked. */
-  const VM_MOVING={PROVISIONING:1,STAGING:1,STOPPING:1,SUSPENDING:1,REPAIRING:1};
-  function vmMoving(){ return !!VM_MOVING[vmState] || Date.now()<vmBusyUntil; }
-  function vmNote(msg){ const e=$('vmErr'); if(!e) return;
-    if(!msg){ e.style.display='none'; e.textContent=''; e.removeAttribute('title'); return; }
-    e.style.display=''; e.textContent=msg; e.title=msg; console.error('[vm] '+msg); }
-  /* A thrown api() error carries {status, body}; a 200 with ok:false carries the reason in the
-     body. Both are turned into one sentence that names the verb, the code and the server's own
-     detail -- 'VM start failed (403)' is actionable, a green light is not. */
-  function vmWhy(act,st,body){
-    let m='VM '+act+' failed'+(st?' ('+st+')':'');
-    const d=body&&(body.detail||body.error||(body.http?('Compute answered HTTP '+body.http):''));
-    return d?(m+': '+d):m; }
-  function paintVM(){ const l=$('vmLight'),b=$('vmBtn'),r=$('rdpBtn'),r2=$('rdpBtn2');
-    function rdp(on){ if(r) r.disabled=!on; if(r2) r2.disabled=!on; }
-    if(!vmKnown){ l.className='vmlight prov'; l.title='VM state unknown -- /api/vm/status did not answer'; b.textContent='▶ Start VM'; b.disabled=true; b.className='hbtn startb'; rdp(false); return; }
-    if(!vmProvisioned){ l.className='vmlight prov'; l.title='not provisioned'; b.textContent='▶ Start VM'; b.disabled=true; b.className='hbtn startb'; rdp(false); return; }
-    if(vmMoving()){
-      const stopping=(vmWant==='stop')||vmState==='STOPPING'||vmState==='SUSPENDING';
-      l.className='vmlight starting'; l.title=(stopping?'stopping':'booting')+(vmState?' ('+vmState+')':'');
-      b.innerHTML='<span class="btnspin"></span>'+(stopping?'Stopping…':'Booting…');
-      b.disabled=true; b.className='hbtn '+(stopping?'stopb':'startb'); rdp(false); return; }
-    /* [GCP-VMBTN-ACTS-V1] A REFUSAL ALSO EARNS A COOLDOWN, but a SHORT one and a HONEST one. Left to
-       itself the failure path re-enabled the button the instant the error came back, and a
-       measured seven clicks in under a second each fired their own Compute call -- retry
-       pressure aimed at an API that had just said no. The button is held for four seconds, and
-       it is held in the RESTING look (red light, 'Start VM') rather than the moving one,
-       because nothing is moving: the pill next to it carries the reason. */
-    const dead=Date.now()<vmDeadUntil;
-    if(dead) setTimeout(paintVM, Math.max(60, vmDeadUntil-Date.now()));
-    if(vmRunning){ l.className='vmlight on'; l.title='VM running'; b.textContent='⏹ Stop VM'; b.className='hbtn stopb'; b.disabled=dead; rdp(true); }
-    else{ l.className='vmlight off'; l.title='VM '+(vmState?vmState.toLowerCase():'stopped'); b.textContent='▶ Start VM'; b.className='hbtn startb'; b.disabled=dead; rdp(false); } }
-  async function toggleVM(){ const b=$('vmBtn');
-    /* The re-click guard the operator asked for, and it is a GUARD rather than a repaint: an
-       unknown state, a state in motion, or a cooldown still running all refuse the click
-       outright instead of queueing a second Compute call behind the first. */
-    if(!b || b.disabled || !vmKnown || !vmProvisioned || vmMoving()) return;
-    const act=vmRunning?'stop':'start';
-    vmNote(''); vmWant=act; vmBusyUntil=Date.now()+15000;
-    /* Optimistic about the TRANSITION only, never about the OUTCOME: the button shows motion
-       so the click registers, but vmRunning is left alone -- only a poll may move the light. */
-    paintVM();
-    let d=null;
-    try{ d=await api('/api/vm/'+act,{method:'POST'}); }
-    catch(e){ vmWant=''; vmBusyUntil=0; vmDeadUntil=Date.now()+4000; vmNote(vmWhy(act,e&&e.status,e&&e.body)); pollVM(); return; }
-    if(d && d.ok===false){ vmWant=''; vmBusyUntil=0; vmDeadUntil=Date.now()+4000; vmNote(vmWhy(act,d.http,d)); pollVM(); return; }
-    vmPollFast(0); }
-  /* Compute does not flip status the instant it accepts the call, so a single follow-up poll
-     would read the OLD state and look like nothing happened. Poll every 2.5s for up to a
-     minute, stop as soon as the instance is at rest, and if it never gets there say so rather
-     than leaving a spinner up forever. */
-  function vmPollFast(n){ if(vmFastTid){ clearTimeout(vmFastTid); vmFastTid=0; }
-    pollVM().then(function(){
-      const atRest=!VM_MOVING[vmState];
-      const done=atRest && ((vmWant==='start'&&vmRunning)||(vmWant==='stop'&&!vmRunning)||vmWant==='');
-      if(done){ vmWant=''; vmBusyUntil=0; paintVM(); return; }
-      if(n<24){ vmFastTid=setTimeout(function(){ vmPollFast(n+1); },2500); return; }
-      const act=vmWant||'change'; vmWant=''; vmBusyUntil=0;
-      vmNote('VM '+act+' was accepted but the instance is still '+(vmState||'unreadable')+' after a minute -- the light follows the real state.');
-      paintVM(); }); }
-  /* [GCP-VMLIGHT-HONEST-V1] A bare catch here turned a 503 that NAMES the missing variable into a red
-     'VM stopped' light -- the console reporting its own initial constant as a measurement.
-     A failed poll now says 'unknown', which is visually distinct from 'measured, stopped'. */
-  async function pollVM(){ try{ const d=await api('/api/vm/status');
-      vmProvisioned=d.provisioned!==false; vmKnown=true;
-      vmState=String((d&&d.state)||'UNKNOWN'); vmRunning=(vmState==='RUNNING');
-      if(vmWant && !VM_MOVING[vmState] && ((vmWant==='start'&&vmRunning)||(vmWant==='stop'&&!vmRunning))){ vmWant=''; vmBusyUntil=0; }
-      paintVM();
-    }catch(e){ vmKnown=false; vmState='';
-      if(!window.__vmWarned){ window.__vmWarned=1; console.error('[vm] /api/vm/status did not answer: '+((e&&e.status)?('HTTP '+e.status):(e&&e.message||e))+' -- the light shows UNKNOWN, not stopped.'); }
-      paintVM(); } }
   /* [HARNESSUI-MODEL-DERIVE-V1] EMPTY on purpose. Every model name the page shows comes from
      /api/models, which builds the catalog from the CHAT_API_* environment. A literal here is
      the defect this change exists to remove: it renders before the fetch and then keeps
@@ -543,10 +422,35 @@ window.pcWhimsyOn = function(){
      report describes the substrate you just left, so it is cleared: keeping it would have made
      the tooltip (and the pre-send stamp) claim a Gemini id under Claude until the first reply
      came back. Catalog-derived values stand in until the new substrate answers for itself. */
-  function setProvider(p){ if(p!==PROVIDER) PCRUNTIME={model:'',effort:''};
+  /* [CHAT-DEFAULT-PROVIDER-HONOUR-V1] WHO PICKED THE SUBSTRATE, AND THEREFORE WHO MAY CHANGE IT.
+     /api/models now carries `default_provider` (the install's CHAT_DEFAULT_PROVIDER). It is a
+     DEFAULT, so it may only ever overwrite a value nobody chose. PCPICKED is that distinction and
+     it is the whole mechanism: setProvider() marks a pick unless the caller says otherwise, and
+     the only caller that says otherwise is the boot IIFE.
+     Every existing call site is a real human gesture -- the two Layers > Settings substrate
+     buttons (inline onclick, further up this file) and the header pill via pcToggleProvider() --
+     so they all keep the one-argument form and all correctly count as picks. Nothing had to be
+     hunted down and re-spelled.
+     MEASURED BEFORE CHANGING ANYTHING: this page CANNOT flash Claude and swap. PROVIDER is
+     declared 'gemini' and the boot IIFE's first statement is setProvider('gemini'), both BEFORE
+     the /api/models fetch, so the first paint is Gemini and stays Gemini. The only motion
+     default_provider can now cause is Gemini -> Claude on an install that configured Claude, and
+     only after the round trip, and only if the operator has not clicked in the meantime -- which
+     is reachable, because loadFleet() is awaited before loadModels().
+     DELIBERATELY NOT DONE: no localStorage. This console has never remembered the substrate
+     across a reload, PCPICKED means "picked during THIS page load", and inventing cross-reload
+     memory here would change behaviour well beyond honouring a server default. */
+  var PCPICKED=false;
+  function setProvider(p,explicit){ if(explicit!==false) PCPICKED=true;
+    if(p!==PROVIDER) PCRUNTIME={model:'',effort:''};
     PROVIDER=p; document.querySelectorAll('#toggle button').forEach(b=>b.classList.toggle('on',b.dataset.p===p)); renderModelToggle(); updateVia(); }
   async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.effort) PCEFFORT=String(d.effort);
       if(!MODELS.claude.some(m=>m.id===MODEL.claude)) MODEL.claude=MODELS.claude[0]&&MODELS.claude[0].id; if(!MODELS.gemini.some(m=>m.id===MODEL.gemini)) MODEL.gemini=MODELS.gemini[0]&&MODELS.gemini[0].id;
+      /* Applied AFTER the catalog is in hand, so the chip row repaints once, on the right list.
+         An unknown or absent value is ignored rather than defaulted over: a server that says
+         nothing must not move a page that is already showing something. */
+      var _dp=d&&d.default_provider?String(d.default_provider).toLowerCase():'';
+      if(!PCPICKED && (_dp==='claude'||_dp==='gemini') && _dp!==PROVIDER) setProvider(_dp,false);
       renderModelToggle(); updateVia(); }catch(e){} }
   // ---- token / cost meter -------------------------------------------------------------------
   // Session tally accumulates client-side from the `usage` /api/chat now returns per turn.
@@ -629,10 +533,17 @@ window.pcWhimsyOn = function(){
   function grow(t){ t.style.height='auto'; t.style.height=Math.min(140,t.scrollHeight)+'px'; }
   function keyd(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } }
   let PENDIMG=[];
-  function onImg(inp){ const fs=inp.files; if(!fs||!fs.length) return; for(var i=0;i<fs.length;i++){ (function(f){ const rd=new FileReader(); rd.onload=function(e){ PENDIMG.push({media_type:f.type||'image/png', data:String(e.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; var b=$('upBtn'); if(b)b.textContent='📎'+PENDIMG.length; }; rd.readAsDataURL(f); })(fs[i]); } inp.value=''; }
-  $('ta').addEventListener('paste', e => { for (const it of (e.clipboardData?.items||[])) { if (it.type && it.type.indexOf('image')===0){ const f=it.getAsFile(); if(f){ const rd=new FileReader(); rd.onload=ev=>{ PENDIMG.push({media_type:f.type||'image/png', data:String(ev.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; const b=$('upBtn'); if(b)b.textContent='📎'+PENDIMG.length; }; rd.readAsDataURL(f); e.preventDefault(); } } } });
+  /* [HARNESS-UI-ICONS-V1] ONE PLACE THAT KNOWS WHAT THE ATTACH BUTTON LOOKS LIKE. The badge
+     used to be painted by assigning textContent at three call sites, which is why the icon had
+     to be a single character: an SVG cannot be set through textContent, and three copies of the
+     markup would drift. Count 0 paints the bare icon; anything higher appends the number. */
+  function pcPaintUp(cnt){ var b=$('upBtn'); if(!b) return;
+    var icon='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+    b.innerHTML = (cnt&&cnt>0) ? (icon+'<span style="margin-left:3px;font-size:12px;font-weight:700">'+cnt+'</span>') : icon; }
+  function onImg(inp){ const fs=inp.files; if(!fs||!fs.length) return; for(var i=0;i<fs.length;i++){ (function(f){ const rd=new FileReader(); rd.onload=function(e){ PENDIMG.push({media_type:f.type||'image/png', data:String(e.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; pcPaintUp(PENDIMG.length); }; rd.readAsDataURL(f); })(fs[i]); } inp.value=''; }
+  $('ta').addEventListener('paste', e => { for (const it of (e.clipboardData?.items||[])) { if (it.type && it.type.indexOf('image')===0){ const f=it.getAsFile(); if(f){ const rd=new FileReader(); rd.onload=ev=>{ PENDIMG.push({media_type:f.type||'image/png', data:String(ev.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; pcPaintUp(PENDIMG.length); }; rd.readAsDataURL(f); e.preventDefault(); } } } });
   async function send(){ const ta=$('ta'); const text=ta.value.trim(); if((!text&&!PENDIMG.length)||!SEL) return;
-    const imgs=PENDIMG; PENDIMG=[]; var _ub=$('upBtn'); if(_ub)_ub.textContent='📎';
+    const imgs=PENDIMG; PENDIMG=[]; pcPaintUp(0);
     (HIST[SEL.id]=HIST[SEL.id]||[]).push({role:'me',text,imgs}); ta.value=''; grow(ta); renderStream();
     /* [HARNESSUI-PROVSW-V1] The stamp is fixed at SEND time from the selection this turn is
        actually going out on, so flipping the toggle while the reply is in flight cannot change
@@ -792,44 +703,7 @@ window.pcWhimsyOn = function(){
   function provision(){ if(DEMO){ alert('Creating a strain is disabled in the demo view.'); return; } if(typeof window.slNewStrain==='function'){ window.slNewStrain(); return; } alert('Create a new strain is unavailable: the strain-lifecycle script did not load.'); }
   const DEMO_AGENTS=[{id:'fleet-advisor',name:'Fleet Advisor',role:'strategy · planning',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-gcp',name:'Fleet GCP',role:'cloud · deploys/IAM/billing',status:'working',last_ts:Date.now()-300000,backlog:0},{id:'fleet-security',name:'Fleet Security',role:'review · audits and refusals',status:'idle',last_ts:Date.now()-1800000,backlog:1}];
   async function loadFleet(){ try{ const d=await api('/api/fleet/agents'); AGENTS=d.agents||d||[]; }catch(e){ DEMO=true; AGENTS=DEMO_AGENTS; } renderAgents(); }
-  /* [SEC-RDP-DEAD-V1] THE DESKTOP STREAM IS GONE AND IT CANNOT COME BACK AS AN IFRAME.
-     index.ts records the /rdp reverse proxy and guacd as deleted ("Guacamole and the /rdp
-     proxy are GONE"), so the desktop iframe and the new-window call that used to live
-     here were both pointing at a route that returns 404. They were unreachable only
-     because a later CSS block hides this chrome -- one edit away from shipping a broken
-     feature -- so they are removed rather than re-hidden.
-     Nothing replaces them: the workstation has no public IP and RDP is reachable only over
-     an IAP tunnel that terminates on the OPERATOR'S OWN machine, which a page served from
-     Cloud Run cannot reach. The placeholder above now prints the tunnel command instead of
-     pretending to embed a session. The one view with a backend that exists is the terminal,
-     which talks to /api/shell, and it is kept. */
-  let VIEW='terminal';
-  const VIEWMETA={ terminal:{em:'⌨',t:'Terminal',d:'Run commands on the workstation through /api/shell.'} };
-  function setView(v){ VIEW=VIEWMETA[v]?v:'terminal';
-    document.querySelectorAll('#rdpTabs button').forEach(b=>b.classList.toggle('on',b.dataset.v===VIEW));
-    mountTerminal(); }
-  // ---- live web terminal (wired to /api/shell on the running box) ----
-  let TERMHIST=[], THI=0;
-  function termPrint(out,text,cls){ const d=document.createElement('div'); d.className='tl '+(cls||'out'); d.textContent=text; out.appendChild(d); out.scrollTop=out.scrollHeight; }
-  async function termHealth(out){ try{ const h=await fetch('/api/shell/health').then(r=>r.json()); if(h&&h.up){ const mins=Math.round((h.window_remaining_ms||0)/60000); termPrint(out,'● box online'+(h.window_active?(' · ops window '+Math.floor(mins/60)+'h '+(mins%60)+'m left'):' · window inactive'),'sys'); } else { termPrint(out,'● box not reachable — press ▶ Start VM up top, then retry.','err'); } }catch(e){} }
-  function mountTerminal(){ const body=$('rdpBody');
-    body.innerHTML='<div class="term"><div class="termout" id="termout"></div><div class="termin"><span class="termps">$</span><input id="termcmd" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="run a command on the box…"></div></div>';
-    const out=$('termout'), inp=$('termcmd');
-    termPrint(out,'Paracoding Workstation — live shell (runs as you via the ops window).','sys');
-    termHealth(out); inp.focus();
-    inp.onkeydown=(e)=>{ if(e.key==='Enter'){ const c=inp.value.trim(); if(c){ inp.value=''; runTerm(c,out); } }
-      else if(e.key==='ArrowUp'){ e.preventDefault(); if(THI>0){ THI--; inp.value=TERMHIST[THI]||''; } }
-      else if(e.key==='ArrowDown'){ e.preventDefault(); if(THI<TERMHIST.length){ THI++; inp.value=TERMHIST[THI]||''; } } }; }
-  async function runTerm(cmd,out){ TERMHIST.push(cmd); THI=TERMHIST.length; termPrint(out,'$ '+cmd,'cmd');
-    const wait=document.createElement('div'); wait.className='tl sys'; wait.textContent='…'; out.appendChild(wait); out.scrollTop=out.scrollHeight;
-    try{ const r=await fetch('/api/shell',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});
-      const j=await r.json().catch(()=>({})); wait.remove();
-      if(!r.ok||j.error){ termPrint(out,(j&&j.error)||('shell error '+r.status),'err'); }
-      else { if(j.stdout) termPrint(out,String(j.stdout).replace(/\n$/,''),'out'); if(j.stderr) termPrint(out,String(j.stderr).replace(/\n$/,''),'err'); termPrint(out,'[exit '+(j.exit||0)+(j.authed?' · as you':'')+']','sys'); }
-    }catch(e){ wait.remove(); termPrint(out,'network error','err'); } out.scrollTop=out.scrollHeight; }
   function toggleSide(){ const s=$('side'); const c=s.classList.toggle('collapsed'); $('railL').classList.toggle('show', c); }
-  function toggleRdp(){ const p=$('rdpPanel');
-    const c=p.classList.toggle('collapsed'); $('railR').classList.toggle('show', c); $('split').classList.toggle('hidden', c); if(!c) p.style.width='400px'; }
   let _rz=null;
   function startResize(e){ _rz={x:e.clientX, w:$('rdpPanel').offsetWidth}; document.body.style.userSelect='none'; window.addEventListener('mousemove',onResize); window.addEventListener('mouseup',stopResize); e.preventDefault(); }
   function onResize(e){ if(!_rz) return; let w=_rz.w+(_rz.x-e.clientX); w=Math.max(0,Math.min(window.innerWidth-360,w));
@@ -845,8 +719,12 @@ window.pcWhimsyOn = function(){
      it rotates through Vertex OAuth. A Flowhood that opens on Claude is therefore dead on first
      contact for every new adopter, which is exactly when someone decides whether this works.
      The Claude button and the key-rotation UI are untouched -- this changes which one is
-     preselected, nothing else. */
-  (async function(){ setProvider('gemini'); paintVM(); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{ var _adv=(AGENTS||[]).find(function(a){return a.id==='fleet-advisor';})||(AGENTS||[])[0]; if(_adv && !SEL) selectAgent(_adv.id); }catch(e){} pollVM(); setInterval(pollVM,8000); })();
+     preselected, nothing else.
+     [CHAT-DEFAULT-PROVIDER-HONOUR-V1] This literal is now the FLOOR, not the last word: it is
+     what paints before /api/models answers, and the install's own default_provider may replace
+     it once the catalog is in hand. The `false` second argument is what marks this call as not
+     a human pick, which is the only reason the server default is allowed to win. */
+  (async function(){ setProvider('gemini',false); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{ var _adv=(AGENTS||[]).find(function(a){return a.id==='fleet-advisor';})||(AGENTS||[])[0]; if(_adv && !SEL) selectAgent(_adv.id); }catch(e){} })();
 </script>
 <style id="pcfungi">
 :root{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30}
@@ -1144,7 +1022,6 @@ window.pcWhimsyOn = function(){
   .dpstat .cell .n{font-size:1.05rem;font-weight:800;color:var(--ink)}
   .dpstat .cell .l{font-size:.56rem;letter-spacing:.08em;text-transform:uppercase;color:rgba(var(--ink-rgb),.6);font-weight:700}
   /* ---- right dashboard DRAWER: inline, mirrors the left nav drawer ---- */
-  /* override the legacy hard-hide of the workstation panel/rail; the old splitter stays off */
   #rdpPanel{display:flex!important}
   #split{display:none!important}
   #railR{display:none}
@@ -1802,7 +1679,25 @@ window.pcWhimsyOn = function(){
 
   // ---- data ------------------------------------------------------------------------
   async function roles(){
-    var host = $('pcps-roles'); host.textContent = 'loading...';
+    /* [PCSESSIONPASTE-NULLHOST-V1] EVERY LINE OF THIS FUNCTION PAINTS INTO #pcps-roles, so with
+       no host there is nothing to do -- and doing it anyway threw. The first statement
+       dereferenced $('pcps-roles') bare while say(), three lines up, guards its own lookup: the
+       asymmetry was the bug.
+       WHY THE CALLER COULD NOT SAVE IT. pcpsKick() calls this through
+       `try{ window.pcpsRefreshRoles(); }catch(e){}`, and roles is async, so a throw inside it
+       becomes a REJECTED PROMISE, not an exception at the call site. The try/catch catches
+       nothing; the failure surfaces as an unhandled rejection with the panel silently empty.
+       MEASURED IN THIS TREE, HONESTLY: the "unhandled rejection on every page load" reported
+       downstream does NOT reproduce here. relocate() runs only from pclTab('settings'), i.e. the
+       first time the operator opens LAYERS, and by then the pcsessionpaste IIFE further down has
+       long since appended its modal shell -- which is where #pcps-roles is created, before
+       relocate() moves it into the panel. What IS real is that the guard is missing on a
+       function whose host is conditionally built and conditionally MOVED: the `if(ps)` in
+       relocate() and the `if(rt)` header check above both already accept that these nodes may be
+       absent, and this one lookup did not. Guarded to match its neighbours.
+       pcpsKick is left exactly as it is -- its retry loop and its accordion re-run are correct,
+       and its try/catch is still worth having for a synchronous throw. */
+    var host = $('pcps-roles'); if(!host) return; host.textContent = 'loading...';
     var r;
     try { r = await fetch('/api/sessions/roles', { credentials:'include' }); }
     catch (e) { host.textContent = ''; say('could not reach the server: ' + e, true); return; }
@@ -1815,7 +1710,12 @@ window.pcWhimsyOn = function(){
     }
     var d = await r.json().catch(function(){ return {}; });
     var list = (d && d.roles) || [];
-    $('pcps-note').textContent = d.enforcing
+    /* [PCSESSIONPASTE-NULLHOST-V1] Same class as the host guard above, and it matters MORE here:
+       this runs after an await, so a null here throws with the fetch already spent and the strain
+       list already loaded. The note is an annotation on the list, not the list -- if it is not in
+       the DOM, paint the list anyway. */
+    var noteEl = $('pcps-note');
+    if (noteEl) noteEl.textContent = d.enforcing
       ? 'Enforcing: a chat with no key gets no tools.'
       : 'NOT enforcing yet: unbound chats still work. Set PC_SESSION_ENFORCE=1 when you are ready.';
     host.textContent = '';
@@ -2088,7 +1988,6 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
     ['Paracoding Agentic Harness','Agentic Fungi'],
     ['Agentic Harness','Agentic Fungi'],
     ['Paracoding Fleet','Strain Collection'],
-    ['Paracoding Workstation','Fruiting Chamber'],
     ['Provision a new agent','Create a new strain'],
     ['No agents provisioned yet','No strains in the collection yet'],
     ['Message the selected agent','Message the selected strain'],
@@ -2124,7 +2023,6 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
        documented way this service ships. Rewriting either would be a lexicon rewriting an
        instruction. Verified against the roster strings in this file before dropping it. */
     ['Deployment','Inoculation'], ['deployment','inoculation'],
-    ['Workstation','Fruiting Chamber'], ['workstation','fruiting chamber'],
     ['Build','Grow'], ['build','grow'], ['Building','Growing'], ['building','growing'],
     ['built','grown'], ['builds','grows'],
     ['Shipped','Harvested'], ['shipped','harvested'],
@@ -2159,7 +2057,6 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
        header keeps its single line. */
     ['Paracoding.AI - Agentic Fungi','Paracoding.AI - Agentic Harness'],
     ['Strain Collection','Paracoding Fleet'],
-    ['Fruiting Chamber','Workstation'], ['fruiting chamber','cloud workstation'],
     ['Agentic Fungi','Paracoding Agentic Harness'],
     ['Flow Hood','Harness'], ['flow hood','harness'],
     ['Pure culture','Verified identity'], ['pure culture','verified identity'],

@@ -185,6 +185,12 @@ import subprocess
 import sys
 import time
 import urllib.error
+# [CE-NOREDIRECT] urllib.parse is imported for http()'s location_host: a Location
+# header may be relative, so the host it resolves to is computed with urljoin+urlsplit
+# rather than read off the raw header. Importing the submodule explicitly -- `import
+# urllib.error` does NOT bind urllib.parse, and the attribute access would raise at the
+# first redirect, which is the one path that had no coverage.
+import urllib.parse
 import urllib.request
 
 MD = "http://metadata.google.internal/computeMetadata/v1"
@@ -199,7 +205,44 @@ RECIPE_PIN_OID = "6c2b2c336cf463d64e234d7601ab7cc46e176fb5"
 # never READS" -- is only as honest as this list is complete. gate-exec/Dockerfile
 # COPYs all of these, so all of them are scanned. Removing an entry does not make a
 # finding go away; it manufactures one. See scan_env_py().
-GX_ENV_SOURCES = ("gate-exec/exec_server.py", "gate-exec/pcmint.py")
+#
+# [CE-GX-ENV-SOURCES] THIS TUPLE NAMED TWO OF THE FOUR FILES THE IMAGE ACTUALLY
+# CARRIES, AND scan_env_py()'s OWN DOCSTRING HAD ALREADY WRITTEN DOWN WHY THAT IS THE
+# defect THAT MANUFACTURES FINDINGS. Measured in this tree, not recalled:
+# gate-exec/Dockerfile COPYs FOUR python sources -- exec_server.py (line 52),
+# pcwebauthn.py (53), pcmint.py (54) and lockout_check.py (58). The tuple named two.
+#
+# WHAT THE MISSING FILE READS, counted with a grep over the real blob:
+# gate-exec/lockout_check.py reads PC_LOCKOUT_CP_SVC and PC_LOCKOUT_MC_SVC directly
+# at lines 65 and 66, and PC_LOCKOUT_SERVICES, PC_LOCKOUT_SECRETS and
+# PC_LOCKOUT_KEYRINGS through the _envlist() wrapper at lines 73, 79 and 91.
+# gate-exec/exec_server.py:1603 `import lockout_check as _lc` is the caller, on the
+# PC_GUARDRAILS=1 path. So five variables that ARE read were invisible to the scan,
+# and F3.2 was free to report every one of them as "set on a deployed revision but
+# read nowhere in the code".
+#
+# ACTING ON THAT FINDING BREAKS THE EXECUTOR, WHICH IS WHY THIS IS NOT COSMETIC.
+# lockout_check.py states in its own header that the service-name rule is the one
+# rule that NEEDS its list and "says so out loud rather than passing quietly";
+# deleting the variables the finding names is exactly the PC_CREDS_SECRET near-miss
+# the docstring below already recounts, one rung more expensive. A harness that
+# invents a finding teaches its readers to delete things.
+#
+# DERIVED FROM THE DOCKERFILE, NOT FROM MEMORY. Every `COPY <name>.py` line in
+# gate-exec/Dockerfile belongs here. pcwebauthn.py reads NO environment variable
+# today -- grep 'os.environ' over it returns zero hits, measured -- and is listed
+# anyway, because the honest scope of the claim is "the python in the image", not
+# "the files that looked interesting when someone last checked".
+#
+# DELIBERATELY NOT DONE: this is not auto-derived by parsing the Dockerfile at run
+# time. RECIPE_PIN_OID above hashes that same Dockerfile and the result is printed in
+# the report as MATCHED or DRIFTED, so a COPY line added without a matching entry here
+# shows up as drift a human reads. That is weaker than an assertion and is stated as
+# what it is: smoke.py:2962 PRINTS recipe_pin and no finding asserts it. A scanner
+# that read its own scope out of the file it is also policing would make even that
+# much invisible, so the list stays literal and reviewed.
+GX_ENV_SOURCES = ("gate-exec/exec_server.py", "gate-exec/pcwebauthn.py",
+                  "gate-exec/pcmint.py", "gate-exec/lockout_check.py")
 
 # Variables that ARE read by index.ts but whose absence is a documented, correct
 # state rather than a broken install. EVERY ENTRY IS A CONFESSION, copied into the
@@ -238,6 +281,77 @@ def md_get(path, params=""):
         return r.read().decode("utf-8").strip()
 
 
+def md_identity(audience):
+    """AN ID TOKEN FOR WHATEVER SERVICE ACCOUNT THIS PROCESS IS RUNNING AS, WITH THE
+    FALLBACK THIS PIPELINE ALREADY DOCUMENTS.
+
+    [CE-MD-IDENTITY] THE METADATA IDENTITY ENDPOINT IS NOT SERVED IN EVERY RUNTIME
+    THIS COLLECTOR RUNS IN, AND WHEN IT IS ABSENT EVERY SMOKE TOKEN FAILS TO MINT.
+    Reported from a real Cloud Build step: /instance/service-accounts/default/email
+    answers 200 with the build service account's address, while
+    /instance/service-accounts/default/identity?audience=<url> answers 404 with a body
+    complaining that a user-specified service account is needed -- which the email
+    endpoint on the line above has just disproved. The endpoint is simply not present
+    on that runtime. THAT 404 IS NOT A MEASUREMENT THIS FILE TOOK; it is the reported
+    symptom this function exists to survive, and it is recorded as such rather than
+    dressed up as something re-observed here.
+
+    WHAT IS VERIFIABLE IN THIS TREE, and is what the fallback is built from:
+      * pipeline/cloudbuild-dev.yaml:599 mints the smoke identity with exactly
+        `gcloud auth print-identity-token --impersonate-service-account=<sa>
+        --audiences=<aud> --include-email`. That is the pipeline's own documented
+        channel, not a new invention, and its comment above records that
+        --include-email is NOT optional: without it the token carries no email claim
+        and oaStrainFromOidc's sa_email lookup can never match.
+      * The BARE form is NOT a substitute, and the header of this file already says
+        so: "gcloud auth print-identity-token --audiences= silently produces nothing
+        usable in a build step."
+
+    METADATA IS TRIED FIRST AND KEPT AS THE FAST PATH. On Cloud Run, where this
+    collector also runs, the endpoint is present and answers, and impersonation there
+    would need a role the runtime does not otherwise require. The fallback is only
+    ever reached after the direct read has actually failed.
+
+    IT RAISES RATHER THAN RETURNING SOMEBODY ELSE'S TOKEN, and that is the whole
+    safety argument. ingress_id_token()'s contract is a token that passes Cloud Run
+    ingress and resolves to NO strain. A token minted from some other principal would
+    clear ingress and then RESOLVE, turning F2.2 -- whose assertion is PRECISELY 401 --
+    green for the wrong reason, which is a false pass on the one check that proves the
+    server challenges anonymous callers. No token is the honest answer, and the caller
+    records the refusal.
+
+    NO SHELL. The argument vector goes to subprocess directly rather than through
+    sh(), so a service-account email or an audience carrying shell metacharacters
+    cannot become a command. This is the one place in this file that deliberately does
+    not reuse sh().
+
+    DELIBERATELY NOT DONE: no caching, and no attempt to guess a service account when
+    the email endpoint is also unreachable. If metadata cannot say who we are, this
+    raises rather than picking a name."""
+    try:
+        return md_get("/instance/service-accounts/default/identity",
+                      "?audience=" + audience)
+    except Exception as md_err:
+        sa = md_get("/instance/service-accounts/default/email")
+        try:
+            p = subprocess.run(
+                ["gcloud", "auth", "print-identity-token",
+                 "--impersonate-service-account=" + sa,
+                 "--audiences=" + audience,
+                 "--include-email"],
+                capture_output=True, text=True, timeout=120)
+            rc, out, err = p.returncode, p.stdout, p.stderr
+        except Exception as e:
+            rc, out, err = 255, "", str(e)[:2000]
+        tok = (out or "").strip()
+        if rc != 0 or not tok:
+            raise RuntimeError(
+                "no ID token for audience %s -- the metadata identity endpoint "
+                "failed (%s) and impersonating %s exited %s: %s"
+                % (audience, md_err, sa, rc, (err or "").strip()[:400]))
+        return tok
+
+
 def id_token(audience):
     """Metadata-server ID token. THE AUDIENCE MUST BE THE BASE SERVICE URL --
     see the header. Not gcloud: --audiences= produced nothing usable in a step.
@@ -263,8 +377,12 @@ def id_token(audience):
     ov = os.environ.get("PC_SMOKE_ID_TOKEN", "").strip()
     if ov:
         return ov
-    return md_get("/instance/service-accounts/default/identity",
-                  "?audience=" + audience)
+    # [CE-MD-IDENTITY] md_identity(), not a bare md_get: the metadata identity
+    # endpoint 404s in at least one runtime this collector is launched from, and
+    # md_identity() falls back to the impersonation channel cloudbuild-dev.yaml:599
+    # already uses. The PC_SMOKE_ID_TOKEN override above still wins outright, so this
+    # path is only reached when the pipeline could not mint one for us.
+    return md_identity(audience)
 
 
 def ingress_id_token(audience):
@@ -302,9 +420,17 @@ def ingress_id_token(audience):
     The keyless probe therefore pins the identity that must NOT resolve. A token is
     still required: the dev service has no allUsers invoker (domain-restricted
     sharing forbids it), so a tokenless request is refused by the Cloud Run INGRESS
-    and never reaches the application that would have issued the challenge."""
-    return md_get("/instance/service-accounts/default/identity",
-                  "?audience=" + audience)
+    and never reaches the application that would have issued the challenge.
+
+    [CE-MD-IDENTITY] THE FALLBACK KEEPS THE PIN, IT DOES NOT WEAKEN IT. md_identity()
+    falls back to impersonating THE SAME principal metadata would have described --
+    it reads /instance/service-accounts/default/email and impersonates that -- so the
+    identity this function promises is unchanged whichever channel answers. It raises
+    rather than substituting any other principal, because a token from a DIFFERENT
+    service account would clear ingress, then RESOLVE against a strains row, and turn
+    F2.2's "must be exactly 401" green on a server that had merely admitted a
+    stranger."""
+    return md_identity(audience)
 
 
 _AT = {}
@@ -372,11 +498,80 @@ def access_token():
     return _AT["token"]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """REFUSE EVERY REDIRECT. Returning None from redirect_request() makes
+    HTTPRedirectHandler decline to build the follow-up request; the handler chain
+    then falls through to HTTPDefaultErrorHandler and the 3xx arrives in http()'s
+    EXISTING HTTPError branch carrying its own status, its own headers and its own
+    body. No new branch, no new shape -- the response that was already being thrown
+    away simply stops being thrown away."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def http(method, url, token=None, cookie=None, body=None, timeout=120,
          extra_headers=None):
     """Every probe is RECORDED, never raised. Returns smoke.py's probe shape:
     {_http, _url, headers, body}. _shape() classifies a refusal BY ITS HEADERS,
-    so the headers must survive into the bundle."""
+    so the headers must survive into the bundle.
+
+    *** [CE-NOREDIRECT] THIS FUNCTION MUST NOT FOLLOW REDIRECTS. FOLLOWING THEM DID
+    NOT LOSE EVIDENCE -- IT FORGED IT. ***
+
+    urllib.request.urlopen() uses the DEFAULT opener, and the default opener follows
+    3xx. IAP answers an unauthenticated browser-shaped GET with a 302 to
+    accounts.google.com carrying x-goog-iap-generated-response: true -- which is
+    precisely the proof F6.2.CONSOLE_IS_IAP_FRONTED asks for. urlopen discarded that
+    response, chased the Location, and this function recorded the SIGN-IN PAGE's 200
+    and the SIGN-IN PAGE's headers. Worse, it returned "_url": url -- the url we
+    ASKED for, never the one that answered -- so accounts.google.com's headers landed
+    in the bundle UNDER THE CLOUD RUN URL with nothing anywhere recording that a hop
+    had happened. That is not a gap in the evidence; it is a fabricated observation of
+    a host we never probed.
+
+    WHY THE FAILURE LOOKED UNRELATED TO REDIRECTS. smoke.py's _shape() then saw no
+    x-goog-iap-generated-response, no x-powered-by and a 200, and returned "unknown"
+    -- and an unrecognised shape is never a pass. So F6.2 failed with "answered in a
+    shape this file cannot classify" regardless of the IAP toggle, because
+    collect_surfaces() runs before collect_app() ever touches it. The judge has ALWAYS
+    modelled health here as the 302: its own healthy-surface fixture seeds this probe
+    as {"_http": 302, headers: {"x-goog-iap-generated-response": "true"}}. Only the
+    collector could not produce one.
+
+    NO PROBE IN THIS FILE NEEDS A FOLLOW, and that was checked rather than assumed.
+    Every caller was read: the googleapis.com REST reads (run, storage, firestore,
+    compute, cloudkms, secretmanager) answer 200 or a JSON error directly; the MCP
+    surface answers its own Express 401 with www-authenticate; and F2.6's "follow the
+    challenge" is done by EXPLICIT CODE that parses resource_metadata out of the
+    WWW-Authenticate header and issues a SECOND http() call -- it is not, and never
+    was, an HTTP redirect. NOT VERIFIED BY RE-RUNNING THE PIPELINE: this is a reading
+    of the call sites in this file, not a byte-comparison of old and new bundles.
+
+    REPRODUCED LOCALLY BEFORE THIS WAS CHANGED, and stated as exactly what it is: a
+    local http server, NOT the live console. Serving a 302 with
+    x-goog-iap-generated-response: true and a Location to a page that answers 200 with
+    a content-security-policy header, the OLD default-opener path recorded
+    `_http: 200`, NO iap header, the second page's csp header, and `_url` still naming
+    the FIRST url. The new path records `_http: 302`, the iap header, and
+    location_host. refusal_layer() over those two probes returns "cloud-run-ingress
+    (no application header came back)" and "iap (...refused BEFORE the container)"
+    respectively -- confidently wrong, then right.
+
+    A REDIRECT IS NOW RECORDED RATHER THAN CHASED. location and location_host are
+    added when a Location header comes back, so the next surprise of this shape is
+    visible in the bundle instead of invisible inside it.
+
+    EVERY EXISTING FIELD KEEPS ITS NAME AND ITS MEANING. _url is now the url that
+    ACTUALLY ANSWERED rather than the one requested -- with redirects refused the two
+    are always equal, which is exactly the point: the field can no longer lie.
+
+    DELIBERATELY NOT DONE: no opt-in follow parameter. A caller that wants the target
+    of a redirect can read location and call http() again, which puts the second
+    request in the bundle as its own probe."""
     data = None
     hdrs = {}
     if token:
@@ -389,18 +584,31 @@ def http(method, url, token=None, cookie=None, body=None, timeout=120,
     for k, v in (extra_headers or {}).items():
         hdrs[k] = v
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+
+    def rec(code, answered_url, headers, text):
+        h = {k.lower(): v for k, v in (headers or {}).items()}
+        out = {"_http": code, "_url": answered_url or url, "headers": h,
+               "body": text, "_url_requested": url, "_redirects_followed": 0}
+        if h.get("location"):
+            # RECORDED, NEVER CHASED. The host is split out because that is the fact
+            # that mattered and was missing: a Location pointing at a sign-in host is
+            # the signature of an identity proxy in front of the service.
+            out["location"] = h["location"]
+            out["location_host"] = urllib.parse.urlsplit(
+                urllib.parse.urljoin(url, h["location"])).netloc
+        return out
+
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return {"_http": r.status, "_url": url,
-                    "headers": {k.lower(): v for k, v in r.headers.items()},
-                    "body": r.read().decode("utf-8", "replace")[:40000]}
+        with _OPENER.open(req, timeout=timeout) as r:
+            return rec(r.status, getattr(r, "url", url) or url, r.headers,
+                       r.read().decode("utf-8", "replace")[:40000])
     except urllib.error.HTTPError as e:
-        return {"_http": e.code, "_url": url,
-                "headers": {k.lower(): v for k, v in (e.headers or {}).items()},
-                "body": e.read().decode("utf-8", "replace")[:40000]}
+        return rec(e.code, getattr(e, "url", url) or url, e.headers or {},
+                   e.read().decode("utf-8", "replace")[:40000])
     except Exception as e:                       # DNS, TLS, timeout
         return {"_http": None, "_url": url, "headers": {}, "body": "",
-                "_error": str(e)[:600]}
+                "_error": str(e)[:600], "_url_requested": url,
+                "_redirects_followed": 0}
 
 
 def jbody(probe):
@@ -934,9 +1142,48 @@ def scan_env_ts_many(sources):
     return sorted(reads), sorted(nodef - has_fallback)
 
 
+# [CE-ENV-HELPERS-PY] AN IN-IMAGE HELPER THAT WRAPS AN ENVIRONMENT READ MOVES THE
+# NAME OFF THE os.environ LINE AND ONTO THE CALL SITE, AND THIS SCANNER WENT BLIND
+# EXACTLY WHEN THE CODE GOT TIDIER. The two spellings below are the only ones the old
+# pattern knew, so a variable read through a one-line wrapper looked, to F3.2, exactly
+# like a variable nothing reads -- which is the direction that INVENTS findings.
+#
+# MEASURED IN THIS TREE, by reading the file rather than remembering it.
+# gate-exec/lockout_check.py:55 defines
+#
+#     def _envlist(name):
+#         return tuple(x for x in re.split(r"[,\s]+", os.environ.get(name, "").strip()) if x)
+#
+# where `name` is a PARAMETER, so no regex over that line can ever yield a variable
+# name. It is called THREE times, each with a quoted literal: _envlist(
+# "PC_LOCKOUT_SERVICES") at :73, _envlist("PC_LOCKOUT_SECRETS") at :79 and
+# _envlist("PC_LOCKOUT_KEYRINGS") at :91. Run over that file the old pattern resolves
+# TWO names (PC_LOCKOUT_CP_SVC, PC_LOCKOUT_MC_SVC at :65-66) and misses THREE.
+#
+# THIS IS THE OTHER HALF OF [CE-GX-ENV-SOURCES] AND MUST NOT SHIP WITHOUT IT. Adding
+# lockout_check.py to GX_ENV_SOURCES alone would clear the two direct reads and leave
+# the three wrapped ones still reported as set-but-read-nowhere: a HALF fix, which is
+# worse than none, because the surviving third of a finding reads as newly credible
+# now that two of its five names have gone away.
+#
+# ONLY A QUOTED LITERAL AT THE CALL SITE COUNTS, AND THAT BOUNDARY IS THE POINT.
+# Matching bare identifiers, or strings anywhere near a helper name, would add names
+# to gx_env_read that nothing reads -- and a name wrongly in the READ set HIDES a
+# genuinely dead variable, which is this check's other job. A name reached through an
+# indirection no literal can resolve does not belong in a looser regex; it belongs in
+# a confession dict like ENV_READ_DYNAMIC, with its reason written down.
+#
+# DELIBERATELY NOT DONE: no AST pass, no call-graph. This is a lexical scanner over
+# source that may have been cut on another day by another version of this file, and it
+# must keep working on a tree it cannot import. The cost is that a helper added later
+# is invisible until its name is added here, which is why the tuple is a reviewed
+# literal and not a heuristic.
+ENV_HELPERS_PY = ("_envlist",)
+
 RE_ENV_PY = re.compile(
-    r"os\.environ(?:\.get\(\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]"
-    r"|\[\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]\s*\])")
+    r"(?:os\.environ\.get\(|os\.environ\[|(?:%s)\()"
+    r"\s*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]"
+    % "|".join(re.escape(h) for h in ENV_HELPERS_PY))
 
 
 def scan_env_py(*sources):
@@ -973,7 +1220,7 @@ def scan_env_py(*sources):
     out = set()
     for src in sources:
         for m in RE_ENV_PY.finditer(src):
-            out.add(m.group(1) or m.group(2))
+            out.add(m.group(1))
     return sorted(out)
 
 
@@ -1095,13 +1342,54 @@ def mint_gate_session(project, secret_name="pc-session-secret", user="operator",
                       % (secret_name, project))
     if rc != 0 or not out:
         return None, "secret read failed (rc=%d)" % rc
+
+    # [DEVGATE-SECRET-NEWLINE-V1] THE TRAILING NEWLINE THAT BECAME PART OF THE HMAC KEY.
+    # `gcloud secrets versions access` prints the payload AND A TRAILING NEWLINE, and
+    # this was THE ONE SITE IN THIS FILE THAT FED sh()'s STDOUT INTO A CREDENTIAL
+    # WITHOUT STRIPPING IT. Counted, not assumed -- all eight sh() call sites were
+    # read: the two access-token readers do `tok = (out or "").strip()` and
+    # `out.strip()`, id_token()'s override does `os.environ.get(...).strip()`, and the
+    # remaining four consume LOG or VERSION text line by line, where a trailing newline
+    # cannot change a value. Only this line did `hmac.new(out.encode(), ...)` on raw
+    # stdout. So the key was `secret + "\n"`, the signature could never match
+    # the one waSessionOk() recomputes over WA_SESSION_SECRET, and every console route
+    # answered 401.
+    #
+    # IT WAS INVISIBLE BECAUSE THE FAILURE HAD THE WRONG SHAPE. This function SUCCEEDED:
+    # it returned a syntactically perfect cookie and the bundle recorded
+    # gate_session_minted: true, so the evidence said the gate session was fine while
+    # the console routes it authenticates all came back 401. A minted-but-unusable
+    # credential reads as an authorisation problem, which is what sends the reader to
+    # IAM and to IAP instead of to one missing .strip().
+    #
+    # WHY STRIPPING IS SAFE HERE AND THE FIX IS NOT "TRY BOTH". Cloud Run injects a
+    # mounted secret's bytes VERBATIM, so IF the stored payload genuinely ended in a
+    # newline the service's WA_SESSION_SECRET would contain it and the stripped key
+    # would be the wrong one. That is a real hazard and it is handled by RECORDING
+    # rather than by guessing: the collector reports whether stripping changed anything,
+    # so a run where it did AND the console still refuses has the fact it needs sitting
+    # in the bundle instead of being reasoned about afterwards.
+    #
+    # DELIBERATELY NOT DONE: this does not mint a second cookie with the raw form and
+    # probe which one the service accepts. That needs a verify callback this function
+    # does not have and a caller that supplies one; adding a probe inside a minter would
+    # also put a network round trip into a pure credential builder. The measurement
+    # below is what makes the omission safe to leave.
+    secret = out.strip()
     payload = json.dumps({"u": user, "pk": 1,
                           "exp": int(time.time() * 1000) + ttl_ms},
                          separators=(",", ":")).encode()
     pl = base64.urlsafe_b64encode(payload).rstrip(b"=")
     sig = base64.urlsafe_b64encode(
-        hmac.new(out.encode(), pl, hashlib.sha256).digest()).rstrip(b"=")
-    return "gate_session=" + (pl + b"." + sig).decode(), None
+        hmac.new(secret.encode(), pl, hashlib.sha256).digest()).rstrip(b"=")
+    note = None
+    if secret != out:
+        note = ("the secret read carried %d trailing/leading whitespace byte(s), which "
+                "were STRIPPED before HMAC. If the console still refuses the cookie, "
+                "the stored payload may genuinely contain them and the service's "
+                "WA_SESSION_SECRET would then include them too."
+                % (len(out) - len(secret)))
+    return "gate_session=" + (pl + b"." + sig).decode(), note
 
 
 def mcp_call(url, tool, args, key=None, timeout=90, token=None):
@@ -1299,15 +1587,78 @@ def refusal_layer(probe):
 
     Cloud Run's ingress refusal and the application's own refusal are both 4xx and
     they mean opposite things -- one is an IAM/identity problem outside the app, the
-    other is the app working correctly. They are told apart by whether ANY header the
-    app sets came back."""
+    other is the app working correctly. They are told apart by a header ONLY THE
+    APPLICATION CAN HAVE SET. A header both layers emit is not evidence, and reading
+    one as though it were is [DEVGATE-REFUSAL-LAYER-V1] below."""
     h = {k.lower(): v for k, v in (probe or {}).get("headers", {}).items()}
     if not h:
         return "no-response"
-    app = ("x-powered-by" in h or "www-authenticate" in h
-           or "content-security-policy-report-only" in h)
+
+    # [DEVGATE-REFUSAL-LAYER-V1] www-authenticate WAS IN THE APPLICATION TEST, AND IT
+    # IS NOT AN APPLICATION MARKER. Cloud Run's own ingress refusal sets
+    # `WWW-Authenticate: Bearer` too, so a request rejected AT THE INGRESS -- one that
+    # never reached the container -- was reported as "application (Express answered)":
+    # the exact inverse of the truth, printed with confidence, in the one field whose
+    # entire job is telling those two apart. The empty JSON body is the other half of
+    # the tell: an ingress or IAP refusal has an html body, jbody() returns None, and
+    # the caller prints `{}`. A `401 {}` from a route whose handler returns
+    # {"error":...} was always evidence that the handler never ran.
+    #
+    # THIS IS THE SAME FAMILY AS smoke.py's "a refusal is not an absence", AND THE TWO
+    # ARE DISTINGUISHED BY WHAT THE HEADER CARRIES, NOT BY WHETHER IT IS PRESENT.
+    # Verified by reading devgate/smoke.py:427 _shape(), which got this right and is
+    # the model here:
+    #
+    #   BARE  `www-authenticate: Bearer`              -- either layer can emit it.
+    #                                                    Proves NOTHING about who.
+    #   `www-authenticate: Bearer resource_metadata=` -- RFC 9728. Only the
+    #                                                    application knows its own
+    #                                                    protected-resource metadata
+    #                                                    url; the ingress has no such
+    #                                                    document to advertise.
+    #
+    # _shape() therefore tests `"resource_metadata=" in h["www-authenticate"]` and
+    # NEVER the bare presence of the key -- which is why the healthy MCP 401, the case
+    # that made www-authenticate look like a good marker in the first place, still
+    # classifies as the application under the stricter rule.
+    #
+    # ORDER IS MOST-SPECIFIC FIRST, AND A POSITIVE MARKER IS NOW REQUIRED BEFORE
+    # CLAIMING THE APP ANSWERED. Silence is no longer read as agreement.
+    if "x-goog-iap-generated-response" in h:
+        return ("iap (Identity-Aware Proxy refused the request BEFORE the container; "
+                "the body is IAP's html, not the application's JSON)")
+
+    # Positive evidence the container answered. Express sets x-powered-by unless it is
+    # explicitly disabled; this app also sets a CSP report-only header and CORS
+    # headers on its own responses. resource_metadata= is the RFC 9728 discriminator
+    # described above -- the app's own challenge, never the ingress's.
+    app = ("x-powered-by" in h
+           or "content-security-policy-report-only" in h
+           or "access-control-allow-methods" in h
+           or "access-control-allow-headers" in h
+           or "resource_metadata=" in str(h.get("www-authenticate", "")))
     if app:
         return "application (Express answered)"
+
+    if "google frontend" in str(h.get("server", "")).lower():
+        return ("cloud-run-ingress (Google Frontend answered and NO application "
+                "header came back; the request did not reach the container -- check "
+                "roles/run.invoker for the calling identity on this service)")
+
+    if "www-authenticate" in h:
+        # AMBIGUOUS ON PURPOSE RATHER THAN GUESSED. Both layers emit a bare Bearer
+        # challenge and nothing else here separates them; saying so is worth more
+        # than a coin flip dressed as a diagnosis.
+        #
+        # THE WORDING IS LOAD-BEARING AND MUST NOT CONTAIN "ingress":
+        # probe_oauth_pr() branches on `"ingress" in refusal_layer(p)` to decide
+        # whether to re-issue the request with the ingress token, and it LABELS that
+        # second leg "the keyless leg was refused by the ingress". An indeterminate
+        # result must not be allowed to write that sentence into the bundle as fact.
+        return ("indeterminate (a bare www-authenticate challenge with no application "
+                "header and no Google Frontend marker; a bare Bearer challenge alone "
+                "cannot say which layer refused)")
+
     return ("cloud-run-ingress (no application header came back; the request did "
             "not reach the container)")
 
@@ -2100,7 +2451,60 @@ def collect_app(a, ev, cpenv, base, target):
                         "it holds.",
             "disable_rc": rc,
             "scope": "DEV ONLY. Never prod. Never a shipped default."})
-        time.sleep(30)
+
+        # [DEVGATE-IAP-PROPAGATION-V1] WAIT ON THE OBSERVABLE CONDITION, DO NOT GUESS
+        # AT A DURATION. What stood here was a literal time.sleep(30).
+        #
+        # THE TWO CLOCKS ARE NOT THE SAME CLOCK. `gcloud beta run services update
+        # --no-iap` returns when the Cloud Run CONFIG has been written; the Google
+        # Frontend stops enforcing IAP some unbounded time later. A fixed sleep
+        # followed by probes that depend on the change having landed is a race BY
+        # CONSTRUCTION -- and when it loses, every console probe below is refused by a
+        # layer no field in the bundle names, surfacing far downstream as F1.4/F1.5
+        # with `HTTP 401 {}`. The empty body is IAP's own html, which jbody() cannot
+        # parse; see [DEVGATE-REFUSAL-LAYER-V1], which is the same accident read from
+        # the other end.
+        #
+        # THIRTY SECONDS WAS NEVER A MEASUREMENT. This file records no observation that
+        # propagation completes within 30s, and none is invented here: the defect is
+        # not that the number was too small, it is that ANY number is a guess about
+        # somebody else's control plane. The condition is directly observable, so it is
+        # observed.
+        #
+        # THE PROBE IS UNAUTHENTICATED ON PURPOSE. It needs no identity to answer the
+        # only question being asked. IAP brands its own refusals with
+        # x-goog-iap-generated-response, so the DISAPPEARANCE of that header is the
+        # signal. Cloud Run's own refusal -- a 401/403 with no IAP header -- means IAP
+        # is out of the path, which is exactly the state the probes below require.
+        # This depends on http() no longer chasing the 302 that carries that header:
+        # under the old following opener this loop would have read the sign-in page's
+        # headers and declared IAP gone on the first attempt. See [CE-NOREDIRECT].
+        #
+        # RECORDED EITHER WAY, INCLUDING THE TIMEOUT. When the console assertions fail,
+        # "IAP was still in front" is the single most useful line in the bundle, so it
+        # is never silent and never inferred from a missing key.
+        #
+        # DELIBERATELY NOT DONE: no refusal to continue on timeout. The collector's
+        # contract is to RECORD what it saw, not to abort; the probes below still run
+        # and are judged on what they actually met, with this field saying what that
+        # was.
+        _iap_t0 = time.time()
+        _iap_deadline = _iap_t0 + 240
+        _iap_off_after = None
+        while time.time() < _iap_deadline:
+            _ph = {k.lower(): v
+                   for k, v in (http("GET", base) or {}).get("headers", {}).items()}
+            if "x-goog-iap-generated-response" not in _ph:
+                _iap_off_after = round(time.time() - _iap_t0, 1)
+                break
+            time.sleep(5)
+        ev["iap_disable_propagation_s"] = _iap_off_after
+        if _iap_off_after is None:
+            ev["iap_disable_never_propagated"] = (
+                "IAP was STILL branding responses with x-goog-iap-generated-response "
+                "240s after --no-iap returned rc=%s. Every console probe below ran "
+                "with IAP in front of the service, so their refusals say nothing "
+                "about the application." % rc)
 
     try:
         tok = id_token(base)          # BASE URL AUDIENCE. Never the tag URL.
@@ -2123,10 +2527,15 @@ def collect_app(a, ev, cpenv, base, target):
             else "metadata default (the BUILD service account -- no strain binds it)")
         ev["ingress_token_channel"] = ("metadata default (the BUILD service "
                                        "account) -- pinned, never PC_SMOKE_ID_TOKEN")
-        ck, ckerr = mint_gate_session(P, a.session_secret)
+        ck, cknote = mint_gate_session(P, a.session_secret)
         ev["gate_session_minted"] = bool(ck)
-        if ckerr:
-            ev["gate_session_error"] = ckerr
+        # [DEVGATE-SECRET-NEWLINE-V1] THE SECOND SLOT IS NO LONGER ALWAYS AN ERROR, so
+        # it is no longer always FILED as one. mint_gate_session() now returns a NOTE
+        # alongside a cookie it did mint -- the whitespace it stripped out of the secret
+        # before HMACing. Writing that into gate_session_error would report a healthy
+        # mint as a failure, which is the same class of lie the strip itself fixed.
+        if cknote:
+            ev["gate_session_note" if ck else "gate_session_error"] = cknote
 
         # F2.2: the surface must ANSWER. tools/list needs no key; with
         # PC_SESSION_ENFORCE=1 a keyless list is `whoami` only, and that is the

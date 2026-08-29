@@ -34,7 +34,13 @@
  *     correctness hazard into a crash at the first call.
  *
  * The only path that moves a ref is `RefStore.compareAndSetRef`, reached
- * through 07-refs' `pushRef`, reached through the `git_push` tool. One door.
+ * through 07-refs' `pushRef`, reached through `gitPush`. ONE DOOR AT THIS
+ * LAYER -- but gitPush itself has THREE callers, and this comment used to say
+ * "through the `git_push` tool", which stopped being true when POST /git/sync
+ * gained gitLaneSyncFromUpstream. Corrected rather than deleted, because the
+ * narrowness below gitPush is real and load-bearing: it is why
+ * [PCGIT-PROTECTED-REFS-V1] could be placed in gitPush and cover every caller.
+ * See the callers enumerated there before adding a fourth.
  *
  * -- rmdir arity note ------------------------------------------------------
  * `FileSystem.js:130` adopts any `rmdir` whose `.length > 1` as the RECURSIVE

@@ -70,14 +70,6 @@
       "owner": "unassigned"
     },
     {
-      "slug": "the-workstation",
-      "title": "The workstation",
-      "section": "operate",
-      "status": "live",
-      "audience": "public",
-      "owner": "unassigned"
-    },
-    {
       "slug": "architecture",
       "title": "Architecture and code walkthrough",
       "section": "extend",

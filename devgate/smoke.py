@@ -93,9 +93,6 @@ UNEXERCISABLE = {
         "No signature is produced or verified end to end by this harness. What "
         "is asserted instead is that the key exists, that only the control plane "
         "can sign with it, and that the executor holds public-key read only.",
-    "F2.BROWSER_TOOLS":
-        "The browser/CDP tools need a workstation with a live CDP endpoint. The "
-        "shipped README declares them unprovisioned by design.",
     "F1.MCP_WRITE_FILE_HANDLER":
         "Calling the MCP write_file handler needs a session key, and the 9/10 "
         "boundary sits ABOVE the pc-bootstrap-secret mint, so no key exists in an "
@@ -109,17 +106,40 @@ UNEXERCISABLE = {
 # being added by someone who never reads this file.
 TOOL_CLASSES = [
     ("lake",     {"write_file", "put_file", "read_file", "list_files"}),
-    ("gitvault", {"git_read", "git_list", "git_log", "git_diff", "git_propose",
-                  "git_propose_patch", "git_push"}),
-    ("vm",       {"vm_status", "vm_start", "vm_stop", "vm_resize"}),
-    # browser_eval added 2026-08-10 [SEC-DEVGATE-COLLECT-V1]. F2.1 FIRED EXACTLY AS
-    # DESIGNED -- "1 tool(s) match no class: browser_eval" -- when the collector first
-    # parsed the live tree. It is registered at index.ts:1605, inside the same
-    # WS_CDP_PORT guard as the other three and behind PC_BROWSER_EVAL as well, and it
-    # reaches the workstation Chrome through the identical harCdp() path. It is backed
-    # by F2.BROWSER_TOOLS, which is already on the reviewed UNEXERCISABLE list. This is
-    # the CLASSIFICATION the check exists to force, not a way of silencing it.
-    ("browser",  {"browser_open", "browser_navigate", "browser_tabs", "browser_eval"}),
+    # [DEVGATE-TOOLCLASS-GITVAULT] git_archive AND git_grep ADDED. BOTH, NOT ONE.
+    # F2.1's contract is that EVERY registered tool lands in exactly one class and a
+    # tool matching none is a COVERAGE HOLE that fails the run. This set carried SEVEN
+    # names; the git surface registers NINE.
+    #
+    # MEASURED AGAINST control-plane/src/gittools.ts IN THIS TREE, not recalled:
+    #   :801  server.registerTool('git_archive', ...)
+    #   :900  server.registerTool('git_grep', ...)
+    # and :928 returns the surface's own authoritative roster --
+    #   ['git_read','git_list','git_log','git_diff','git_archive','git_grep',
+    #    'git_propose','git_propose_patch','git_push']
+    # -- nine names, of which this set named seven. git_grep's handler is at :536-538
+    # and git_archive's description is quoted by git_list's own text at :776, so
+    # neither is a dead registration.
+    #
+    # THE HOLE WAS ONE-SIDED, AND THAT IS WHY IT MATTERED. F2.1 computes
+    # registered_tools - known, so an EXTRA name here can only weaken the check while a
+    # MISSING one FAILS the run -- see the dev_api note below, which states exactly
+    # that asymmetry. So this was not a silent gap: it is the shape that turns a
+    # correct bundle red the first time a build carries a gittools.ts with these two
+    # registered, and the operator's cheapest response to a red F2.1 is to add the one
+    # name the message happens to print.
+    #
+    # FIXING ONLY ONE IS THE TRAP. The two are registered ninety-nine lines apart in
+    # the same file behind the same surface, so a run that adds git_archive alone comes
+    # back red on git_grep -- and now looks like a NEW, unrelated regression rather than
+    # the other half of the same omission. Both, or neither.
+    #
+    # DELIBERATELY NOT DONE: this list is still a reviewed literal and is NOT generated
+    # from gittools.ts:928. smoke.py is a PURE JUDGE that reads an evidence bundle and
+    # never the source tree, so deriving the expected roster from the same file the
+    # bundle's roster came from would make the check compare a thing to itself.
+    ("gitvault", {"git_read", "git_list", "git_log", "git_diff", "git_archive",
+                  "git_grep", "git_propose", "git_propose_patch", "git_push"}),
     ("memory",   {"create_entities", "add_observations", "create_relations",
                   "delete_entities", "delete_observations", "delete_relations",
                   "read_graph", "search_nodes", "open_nodes",
@@ -162,19 +182,10 @@ TOOL_CLASSES = [
 # So an install that declares no workstation is a DECLARED STATE and the control is
 # already fail-closed. Requiring the variables unconditionally asserted that every
 # install must own a Compute instance, which is not true of the product and is not
-# true of this project. What replaces it is NOT weaker: F2.3 now asserts the
-# WITHHOLDING itself, which is a falsifiable property of the running system, where
-# the old check only asserted that a string was non-empty.
+# true of this project. 12.0 dropped vm_* tools and /api/vm/*; WS_VM/WS_ZONE
+# remain for /api/shell* via harVmInstance. F3.1 pairs them: naming one is a
+# misconfiguration, naming neither is a declared state.
 ENV_ALWAYS_REQUIRED_CP = {"DATA_LAKE_BUCKET"}
-
-# The four tools inside the [SEC-VM-UNCONFIGURED-V1] guard, and the three HTTP
-# routes harVmUnset() refuses.
-# [SEC-SSHTOOL-REMOVED-V1] ssh_executor used to be called out here as deliberately
-# absent from this tuple -- registered outside the guard, addressing a target argument
-# rather than the instance. It is not registered anywhere now. The note is kept only so
-# the next reader does not go looking for the tool this comment used to warn them about.
-VM_GUARDED_TOOLS = ("vm_status", "vm_start", "vm_stop", "vm_resize")
-VM_GUARDED_ROUTES = ("GET /api/vm/status", "POST /api/vm/start", "POST /api/vm/stop")
 
 # RFC 9728 section 3 fixes the protected-resource metadata well-known path. The
 # resource's own path may be appended to it, which is why a prefix form is
@@ -318,32 +329,6 @@ def _rfc9728_problems(doc, own_origins):
                             or any(not isinstance(x, str) for x in bms)):
         probs.append("'bearer_methods_supported' is present but is not an array of strings")
     return probs
-
-
-def _live_tool_names(ev):
-    """The tool roster the DEPLOYED server actually returned, or None when no
-    tools/list in the bundle succeeded.
-
-    source.registered_tools IS NOT A ROSTER and must never be used here. It is a
-    regex over index.ts and reports every registerTool call site whether or not the
-    guard around it registered anything at runtime -- so a source scan shows
-    vm_start on an install that withholds it. Only a 200 from the live surface can
-    answer 'was it registered'."""
-    for key in ("mcp_tools_authed", "mcp_tools_list"):
-        p = ev.get(key)
-        if isinstance(p, dict) and p.get("_http") == 200 and isinstance(p.get("tools"), list):
-            return {str(t) for t in p["tools"]}
-    return None
-
-
-def _vm_route_probes(ev):
-    """{route -> probe} for the three /api/vm/* routes, restricted to the three this
-    file knows about. Anything else in the field is ignored rather than judged."""
-    raw = ev.get("vm_route_probes")
-    if not isinstance(raw, dict):
-        return {}
-    return {r: raw[r] for r in VM_GUARDED_ROUTES
-            if isinstance(raw.get(r), dict)}
 
 
 # ---- [SEC-SURFACE-SMOKE-V1] ------------------------------------------------
@@ -920,100 +905,6 @@ def judge(ev):
                  "Bearer challenge naming this server: %s" % rm)
     F.append(f)
 
-    # [SEC-VM-DECLARED-V1] THE OLD FAILURE MESSAGE ASSERTED A FALSE FACT ABOUT THE
-    # CODE, WHICH IS A DEFECT IN ITS OWN RIGHT. It said index.ts:2910-2911 default
-    # WS_VM to 'fleet-workstation' and WS_ZONE to 'us-central1-a' and that the tools
-    # "silently use the defaults". Re-measured at control-plane/src/index.ts blob
-    # 15f48771 (main 868d8749), the whole file read and the blob oid recomputed off
-    # the bytes: BOTH default to the EMPTY STRING at index.ts:3119-3120, the
-    # [SEC-VM-UNCONFIGURED-V1] guard at index.ts:1666-1718 WITHHOLDS vm_status /
-    # vm_start / vm_stop / vm_resize from registration when either is empty, and
-    # harVmUnset() (index.ts:3122) makes /api/vm/status, /api/vm/start and
-    # /api/vm/stop answer 503. The control is correct and already fail-closed. A
-    # strain acting on the old message would have deleted a working guard and
-    # restored the guessed instance name it was written to remove.
-    #
-    # SO THE STATE IS DECLARED, NOT BROKEN, and the check now asserts the thing that
-    # actually matters in BOTH directions. Unset must mean withheld; set must mean
-    # backed. Neither half is satisfiable by a string being non-empty, which is all
-    # the old check ever measured.
-    f = Finding("F2.3.VM_TOOLS_BACKED", "ASSERTED",
-                "A workstation is a DECLARED install option and this asserts the "
-                "declaration is honoured. With WS_VM/WS_ZONE SET: the named "
-                "instance resolves and the four VM tools are registered. With them "
-                "UNSET: the four tools are WITHHELD from registration and "
-                "/api/vm/status|start|stop answer 503. Declaring one variable and "
-                "not the other is a misconfiguration either way.")
-    inst = ev.get("vm_instance")
-    vm = str(cpenv.get("WS_VM", "") or "").strip()
-    zone = str(cpenv.get("WS_ZONE", "") or "").strip()
-    roster = _live_tool_names(ev)
-    probes = _vm_route_probes(ev)
-    if _starve(f, st, "cp"):
-        pass
-    elif bool(vm) != bool(zone):
-        f.bad("HALF-DECLARED: WS_VM=%r WS_ZONE=%r. The guard needs BOTH, so this "
-              "install declares a workstation and still withholds every VM tool -- "
-              "the operator gets neither the feature nor an error." % (vm, zone))
-    elif vm and zone:
-        absent = sorted(t for t in VM_GUARDED_TOOLS if roster is not None and t not in roster)
-        if inst is None or inst.get("_http") != 200:
-            f.bad("WS_VM=%s WS_ZONE=%s are declared but instance %s in %s does not "
-                  "resolve (HTTP %s), so all four VM tools address a machine that "
-                  "is not there" % (vm, zone, vm, zone, (inst or {}).get("_http")))
-        elif absent:
-            f.bad("instance %s exists and the tools are declared, but the live "
-                  "surface does not register %s -- the guard is withholding on a "
-                  "CONFIGURED install" % (vm, ",".join(absent)))
-        else:
-            f.ok("%s in %s exists, status %s%s"
-                 % (vm, zone, inst.get("status"),
-                    "" if roster is None
-                    else "; all four VM tools present in the live roster"))
-    else:
-        # DECLARED NO-WORKSTATION. The assertion is the WITHHOLDING, and it is
-        # judged only against what the RUNNING system returned. source
-        # .registered_tools lists all four here whatever the guard did -- it is a
-        # regex over index.ts -- so reading it would turn a working control into a
-        # permanent red.
-        leaked = sorted(t for t in VM_GUARDED_TOOLS if roster is not None and t in roster)
-        answered = sorted("%s -> %s" % (r, (probes[r] or {}).get("_http"))
-                          for r in probes if (probes[r] or {}).get("_http") != 503)
-        have_routes = len(probes) == len(VM_GUARDED_ROUTES)
-        if leaked:
-            f.bad("THE GUARD DID NOT HOLD: no workstation is declared "
-                  "(WS_VM and WS_ZONE both empty) and the live surface registers "
-                  "%s anyway. vm_start/vm_stop/vm_resize STAGE an approval, so "
-                  "this costs the operator a Face ID on an instance that does not "
-                  "exist." % ",".join(leaked))
-        elif answered:
-            f.bad("no workstation is declared and the VM routes answer anyway: %s. "
-                  "harVmUnset() should make each of them 503." % ", ".join(answered))
-        elif roster is None and not have_routes:
-            f.skip("NOT DEMONSTRATED, AND IT IS NOT UNEXERCISABLE. This install "
-                   "declares no workstation (WS_VM and WS_ZONE both empty), which "
-                   "is a supported state, and the correct assertion is that the "
-                   "four VM tools are WITHHELD and the three routes 503. Neither "
-                   "can be judged from this bundle: it carries no successful "
-                   "tools/list (the keyless one is a 401 by design, which is what "
-                   "F2.2 asserts) and no probe of the routes. Two fields close it, "
-                   "both keyless or already-authenticated calls the collector is "
-                   "making anyway: ev['mcp_tools_authed'] = {'_http':200, "
-                   "'tools':[names]} from an authenticated tools/list, and "
-                   "ev['vm_route_probes'] = {'GET /api/vm/status': {'_http':503}, "
-                   "'POST /api/vm/start': {...}, 'POST /api/vm/stop': {...}}. "
-                   "Either one alone promotes this to a real verdict. Do NOT put "
-                   "this id on UNEXERCISABLE -- it is exercisable, and listing it "
-                   "would buy a green for an assertion nobody ran.")
-        else:
-            f.ok("no workstation declared and the control holds: %s%s%s"
-                 % ("" if roster is None else
-                    "none of %s registered on the live surface" % ",".join(VM_GUARDED_TOOLS),
-                    "; " if (roster is not None and have_routes) else "",
-                    "" if not have_routes else
-                    "all %d /api/vm/* routes answer 503" % len(probes)))
-    F.append(f)
-
     # [SEC-DEVGATE-GITVAULT-V1] THIS FINDING ASSERTED THE WRONG THING AND ITS
     # REQUIREMENT TEXT DESCRIBED CODE THAT IS NOT THERE. Both are fixed here.
     #
@@ -1073,11 +964,26 @@ def judge(ev):
         f.bad("both variables are set and yet no git-vault bucket name was "
               "resolved, so the collector and the code disagree about what "
               "GIT_BUCKET names")
-    elif gv is None or gv.get("_http") != 200:
+    # [DEVGATE-VM-403-NOT-ABSENT-V1] SAME FAMILY AS F2.3: a refusal is not an absence.
+    # buckets.get answering 403 means the COLLECTOR lacks storage.buckets.get -- a fact
+    # about the collector, not about the git vault. 404 is the only code that says the
+    # bucket is gone. Everything else is UNMEASURED, and the skip is deliberately NOT
+    # added to UNEXERCISABLE, so it forces exit 11 and the gate still refuses.
+    elif gv is None:
+        f.skip("NOT MEASURED, AND IT IS NOT UNEXERCISABLE. gs://%s was never probed, so "
+               "nothing established whether the bucket the seven git tools are "
+               "registered against exists." % gvname)
+    elif gv.get("_http") == 404:
         f.bad("the seven git tools ARE registered, against gs://%s, and that "
-              "bucket does not exist (HTTP %s) -- so every one of them throws at "
-              "call time instead of reporting a misconfiguration"
-              % (gvname, (gv or {}).get("_http")))
+              "bucket DOES NOT EXIST (HTTP 404 -- the API answered, and its answer "
+              "was 'no such bucket') -- so every one of them throws at call time "
+              "instead of reporting a misconfiguration" % gvname)
+    elif gv.get("_http") != 200:
+        f.skip("NOT MEASURED, AND IT IS NOT UNEXERCISABLE. buckets.get on gs://%s "
+               "returned HTTP %s. THAT IS NOT 404 AND SO IT IS NOT EVIDENCE THE "
+               "BUCKET IS ABSENT -- 403 in particular means the collector's identity "
+               "lacks storage.buckets.get. Grant that one permission and this "
+               "assertion becomes exercisable again." % (gvname, gv.get("_http")))
     else:
         f.ok("GIT_REPO_ID and GIT_BUCKET are both set, so all seven git tools "
              "register, and gs://%s exists. Channel: %s"
@@ -1154,19 +1060,14 @@ def judge(ev):
                     ",".join(str(x) for x in (body.get("authorization_servers") or []))))
     F.append(f)
 
-    f = Finding("F2.BROWSER_TOOLS", "EXERCISED",
-                "The browser/CDP tools answer.")
-    f.skip(UNEXERCISABLE["F2.BROWSER_TOOLS"])
-    F.append(f)
-
     # ---------------- F3  env vars the code reads are actually set ------------
     # [SEC-VM-DECLARED-V1] WS_VM/WS_ZONE ARE NO LONGER REQUIRED UNCONDITIONALLY --
     # see the note on ENV_ALWAYS_REQUIRED_CP. They are PAIRED instead: an install
     # that names one and not the other is a misconfiguration in either direction,
     # and an install that names neither has declared no workstation and is complete.
-    # This is not a relaxation of the file's contract: the property that used to be
-    # (badly) approximated here is now asserted directly by F2.3, against the
-    # running system rather than against a string's length.
+    # 12.0 dropped vm_* tools, /api/vm/*, /api/shell* and harVmInstance. The pair
+    # still matters: naming neither is a declared state, and that is exactly what
+    # a 12.0 install does.
     f = Finding("F3.1.CP_REQUIRED_ENV_SET", "ASSERTED",
                 "Every variable index.ts reads WITHOUT a fallback, plus "
                 "DATA_LAKE_BUCKET whose default is wrong-and-silent, is present on "
@@ -1310,8 +1211,25 @@ def judge(ev):
                 "The approval signing key exists with the purpose and algorithm "
                 "both the signer and the verifier hardcode.")
     key = ev.get("kms_key")
-    if key is None or key.get("_http") != 200:
-        f.bad("approval-signing key not found (HTTP %s)" % (key or {}).get("_http"))
+    # [DEVGATE-VM-403-NOT-ABSENT-V1] SAME FAMILY AS F2.3 AND F2.4, AND THIS IS THE WORST
+    # THING THIS REPORT CAN SAY. "approval-signing key not found" over a key that is
+    # fine, because getCryptoKey answered 403 and the collector could not look. A gate
+    # report accusing the KMS key that signs every privileged job sends an operator
+    # somewhere very expensive. 404 is the only code that means the key is gone.
+    if key is None:
+        f.skip("NOT MEASURED, AND IT IS NOT UNEXERCISABLE. the bundle carries no "
+               "kms_key record, so nothing asked whether the approval-signing key "
+               "exists or what algorithm it carries.")
+    elif key.get("_http") == 404:
+        f.bad("the approval-signing key DOES NOT EXIST (HTTP 404 -- the API answered, "
+              "and its answer was 'no such key'), so nothing can sign a privileged job")
+    elif key.get("_http") != 200:
+        f.skip("NOT MEASURED, AND IT IS NOT UNEXERCISABLE. getCryptoKey returned HTTP "
+               "%s. THAT IS NOT 404 AND SO IT IS NOT EVIDENCE THE KEY IS ABSENT -- 403 "
+               "in particular means the collector's identity lacks "
+               "cloudkms.cryptoKeys.get. Saying 'key not found' here over a healthy "
+               "key is the most damaging thing this report does, so it does not."
+               % key.get("_http"))
     elif key.get("purpose") != "ASYMMETRIC_SIGN":
         f.bad("purpose is %s, not ASYMMETRIC_SIGN" % key.get("purpose"))
     else:
@@ -1883,21 +1801,6 @@ def seeds():
         ev["mcp_tools_list"] = {"_http": 503, "tools": []}
         return ev
 
-    def s_vm(ev):
-        # [SEC-VM-DECLARED-V1] The old seed just unset WS_VM, which proved only
-        # that a string was empty. The DEFECT F2.3 now exists to catch is the guard
-        # NOT HOLDING on a declared no-workstation install, so that is what is
-        # seeded: both variables empty AND the running surface registering the four
-        # tools anyway AND the three routes answering instead of 503. The evidence
-        # is SYNTHESISED, exactly the way s_bytes synthesises a round-trip, so the
-        # control bites on a bundle that carries neither field.
-        _cpenv_set(ev, "WS_VM", None)
-        _cpenv_set(ev, "WS_ZONE", None)
-        ev["mcp_tools_authed"] = {"_http": 200,
-                                  "tools": ["whoami"] + list(VM_GUARDED_TOOLS)}
-        ev["vm_route_probes"] = {r: {"_http": 200} for r in VM_GUARDED_ROUTES}
-        return ev
-
     def s_meta_route(ev):
         # The advertised metadata path registered but GUARDED: a discovery document
         # that requires the token it exists to help you obtain.
@@ -2128,7 +2031,6 @@ def seeds():
         "F1.MCP_WRITE_FILE_HANDLER":       ("write_file succeeds saying 'not configured'", s_mcp_noop),
         "F2.1.TOOLS_ALL_CLASSIFIED":       ("a 37th, unclassified tool appears", s_newtool),
         "F2.2.MCP_SURFACE_ANSWERS":        ("/mcp returns 503", s_mcp_down),
-        "F2.3.VM_TOOLS_BACKED":            ("no workstation declared and the four VM tools are registered anyway", s_vm),
         "F2.4.GITVAULT_BUCKET_BACKED":     ("git-vault bucket 404", s_gitvault),
         "F2.5.MCP_METADATA_ROUTE_PUBLIC":  ("the advertised metadata route is guarded", s_meta_route),
         "F2.6.MCP_METADATA_DOC_RFC9728":   ("the document is served but has no authorization_servers", s_meta_doc),
@@ -2269,56 +2171,6 @@ def controls():
             "_http": 200, "_url": B(ev) + OAUTH_PR_PATH,
             "body": {"resource": B(ev) + "/mcp",
                      "authorization_servers": ["http://insecure.example"]}}
-        return ev
-
-    def c_vm_half_declared(ev):
-        _cpenv_set(ev, "WS_VM", "some-box")
-        _cpenv_set(ev, "WS_ZONE", None)
-        return ev
-
-    def c_vm_declared_no_instance(ev):
-        _cpenv_set(ev, "WS_VM", "some-box")
-        _cpenv_set(ev, "WS_ZONE", "us-east1-b")
-        ev["vm_instance"] = {"_http": 404}
-        return ev
-
-    def c_vm_declared_but_withheld(ev):
-        _cpenv_set(ev, "WS_VM", "some-box")
-        _cpenv_set(ev, "WS_ZONE", "us-east1-b")
-        ev["vm_instance"] = {"_http": 200, "status": "RUNNING"}
-        ev["mcp_tools_authed"] = {"_http": 200, "tools": ["whoami", "vm_status"]}
-        return ev
-
-    def c_vm_tools_leak_only(ev):
-        # Withholding fails on the TOOL half alone, with no route evidence at all.
-        _cpenv_set(ev, "WS_VM", None)
-        _cpenv_set(ev, "WS_ZONE", None)
-        ev.pop("vm_route_probes", None)
-        ev["mcp_tools_authed"] = {"_http": 200, "tools": ["whoami", "vm_resize"]}
-        return ev
-
-    def c_vm_routes_answer_only(ev):
-        # ... and on the ROUTE half alone, with no roster at all.
-        _cpenv_set(ev, "WS_VM", None)
-        _cpenv_set(ev, "WS_ZONE", None)
-        ev.pop("mcp_tools_authed", None)
-        ev["vm_route_probes"] = {r: {"_http": 503} for r in VM_GUARDED_ROUTES}
-        ev["vm_route_probes"]["POST /api/vm/start"] = {"_http": 200}
-        return ev
-
-    def c_vm_source_roster_ignored(ev):
-        # THE ANTI-FALSE-RED CONTROL, AND THE ONLY ONE HERE THAT MUST *NOT* FAIL.
-        # source.registered_tools always lists all four -- it is a regex over
-        # index.ts and cannot see the runtime guard. If F2.3 ever reads it, this
-        # bundle (no workstation, correct 503s, no tool leaked) turns red and the
-        # next strain deletes a working control to clear it. Asserted as a POSITIVE.
-        _cpenv_set(ev, "WS_VM", None)
-        _cpenv_set(ev, "WS_ZONE", None)
-        ev.setdefault("source", {})["registered_tools"] = sorted(
-            set((ev.get("source") or {}).get("registered_tools") or [])
-            | set(VM_GUARDED_TOOLS))
-        ev.pop("mcp_tools_authed", None)
-        ev["vm_route_probes"] = {r: {"_http": 503} for r in VM_GUARDED_ROUTES}
         return ev
 
     def c_env_ws_half(ev):
@@ -2464,17 +2316,6 @@ def controls():
          "the document was fetched from a url nobody was sent to", c_meta_doc_wrong_url),
         ("F2.6[http-authorization_server]", "F2.6.MCP_METADATA_DOC_RFC9728",
          "authorization_servers carries a plaintext http url", c_meta_doc_http_as),
-        ("F2.3[half-declared]", "F2.3.VM_TOOLS_BACKED",
-         "WS_VM set, WS_ZONE unset", c_vm_half_declared),
-        ("F2.3[declared-no-instance]", "F2.3.VM_TOOLS_BACKED",
-         "both declared, the instance does not resolve", c_vm_declared_no_instance),
-        ("F2.3[declared-but-withheld]", "F2.3.VM_TOOLS_BACKED",
-         "both declared, instance up, tools missing from the live roster",
-         c_vm_declared_but_withheld),
-        ("F2.3[tools-leak-only]", "F2.3.VM_TOOLS_BACKED",
-         "no workstation, a VM tool registered, no route evidence", c_vm_tools_leak_only),
-        ("F2.3[routes-answer-only]", "F2.3.VM_TOOLS_BACKED",
-         "no workstation, one route answers 200, no roster", c_vm_routes_answer_only),
         ("F3.1[ws-half-declared]", "F3.1.CP_REQUIRED_ENV_SET",
          "WS_VM declared without WS_ZONE", c_env_ws_half),
         ("F1.3[unmeasured-null]", "F1.3.CP_CAN_READ_WRITE",
@@ -2506,9 +2347,6 @@ def controls():
         ("F2.4[registration-not-recorded]", "F2.4.GITVAULT_BUCKET_BACKED",
          "the bundle records the bucket but nothing about whether the seven tools "
          "registered", c_gitvault_not_recorded),
-        ("F2.3[source-roster-ignored]!", "F2.3.VM_TOOLS_BACKED",
-         "POSITIVE CONTROL: source.registered_tools lists all four and the runtime "
-         "control holds -- F2.3 must NOT fail", c_vm_source_roster_ignored),
     ]
 
 
@@ -2680,7 +2518,6 @@ def conditional_skips():
                 "F1.3.CP_CAN_READ_WRITE",
                 "F1.4.ROUNDTRIP_BYTES",
                 "F1.5.SEALED_AT_REST",
-                "F2.3.VM_TOOLS_BACKED",
                 "F2.4.GITVAULT_BUCKET_BACKED",
                 "F3.1.CP_REQUIRED_ENV_SET",
                 "F3.2.NO_ENV_SET_THAT_CODE_IGNORES",
@@ -2699,9 +2536,46 @@ def conditional_skips():
                  "F2.6.MCP_METADATA_DOC_RFC9728")),
     )
 
+    # [DEVGATE-VM-403-NOT-ABSENT-V1] THE TWO REFUSAL BRANCHES NEED THE SAME PROOF AS
+    # F1.3's, and for the same reason: on every healthy bundle these reads answer 200, so
+    # skipproof() never sees the branch and nothing would establish that the skip it
+    # produces cannot render as green. EVERY MUTATOR SEEDS 403, NEVER 404 -- a 404 must stay
+    # a FAIL, and seeding one would prove the opposite of the property wanted.
+    def m_gitvault_refused(ev):
+        ev.pop("_collect_refused", None)
+        ev.pop("service_reads", None)
+        rev = ev.setdefault("cp_revision", {})
+        if not rev.get("name"):
+            rev["name"] = "revisions/skip-proof-probe-00001-aaa"
+        tpl = rev.setdefault("template", {})
+        if not tpl.get("containers"):
+            tpl["containers"] = [{"env": []}]
+        # F2.4 has THREE gates ahead of the bucket read -- gitvault_tools_configured must
+        # exist, must say registered, and the bucket name must resolve. Seed all three or
+        # this mutator lands on an earlier f.bad() and proves nothing.
+        ev["gitvault_tools_configured"] = {"GIT_BUCKET": "skip-proof-probe-gitvault",
+                                           "GIT_REPO_ID": "skip-proof-probe-repo",
+                                           "registered": True,
+                                           "rule": "SKIP-PROOF PROBE"}
+        ev["gitvault_bucket_name"] = "skip-proof-probe-gitvault"
+        ev["gitvault_bucket_get"] = {"_http": 403, "name": None}
+        return ev
+
+    def m_kms_key_refused(ev):
+        ev.pop("_collect_refused", None)
+        ev.pop("service_reads", None)
+        ev["kms_key"] = {"_http": 403, "purpose": None, "versionTemplate": None}
+        return ev
+
     out = [
         ("F1.3.CP_CAN_READ_WRITE", "F1.3.CP_CAN_READ_WRITE[if-unmeasured]",
          "the bucket permission set was never measured", m_perms_unmeasured, 11),
+        ("F2.4.GITVAULT_BUCKET_BACKED", "F2.4.GITVAULT_BUCKET_BACKED[if-bucket-read-refused]",
+         "buckets.get was REFUSED (403), which is not evidence the bucket is "
+         "absent", m_gitvault_refused, 11),
+        ("F5.1.KMS_KEY_EXISTS", "F5.1.KMS_KEY_EXISTS[if-key-read-refused]",
+         "getCryptoKey was REFUSED (403), which is not evidence the key is "
+         "absent", m_kms_key_refused, 11),
     ]
     for _section, _fids in starved_by:
         for _fid in _fids:

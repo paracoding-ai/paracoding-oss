@@ -69,26 +69,69 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0a0a0f">
   <meta name="referrer" content="no-referrer">
+  <!-- [LOCKED-THEMED-V1] THE THEME IS APPLIED BEFORE FIRST PAINT, AND THAT ORDERING IS THE
+       WHOLE POINT OF PUTTING A SCRIPT IN THE HEAD. A login page that painted dark and then
+       flipped would obey the letter of "themed like the rest" and fail its intent, on the one
+       page an operator sees most often.
+       SAME ORIGIN, SAME KEY, SAME DEFAULT. harness.html stores the choice in localStorage
+       under pc_theme and applies it with exactly this setAttribute; locked.html is served
+       from the same origin, so it reads the same value. The six names are harness.html's own
+       PAL list, and the fallback is 'purple' -- harness.html's default, NOT 'light'. Taking
+       upstream's 'light' fallback would have painted a pale login page for every operator who
+       has never opened settings, on an install whose product default is purple.
+       WRAPPED IN try/catch: a storage exception (private mode, cleared site data) must leave
+       the page styled, not unstyled. -->
+  <script>(function(){var v=null;try{v=localStorage.getItem('pc_theme');}catch(e){}
+    var ok={purple:1,green:1,orange:1,blue:1,dark:1,light:1};
+    document.documentElement.setAttribute('data-theme',(v&&ok[v])?v:'purple');})();</script>
   <title>The Autoclave</title>
   <style>
-    :root { color-scheme: dark; }
+    /* [LOCKED-THEMED-V1] THIS PAGE HAD NO TOKENS AT ALL -- eleven hex literals and its own
+       private palette, which is why it stayed black through every theme change. The values
+       below are COPIED from harness.html's <style id="pctheme">, deliberately copied rather
+       than shared, so the two pages cannot drift into different shades of one theme name.
+       Only what THIS page paints is carried: harness.html's full token set is much larger and
+       importing the unused half would be a second place to maintain it. */
+    :root { --g1:#123a56;--g2:#0f4a47;--g3:#175339;
+            --ink:#ffffff;--ink-rgb:255,255,255;
+            --ink-dim:rgba(var(--ink-rgb),.62);--glass-line:rgba(var(--ink-rgb),.28);
+            --sunk-rgb:6,18,26;
+            --gold:#ffd77a;--acc1:#ffe9a8;--acc2:#e0982e;--acc-ink:#3a2a06;
+            color-scheme: dark; }
+    html[data-theme="purple"]{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30;--gold:#ffd77a}
+    html[data-theme="green"] {--g1:#123a56;--g2:#0f4a47;--g3:#175339;--gold:#ffd77a}
+    html[data-theme="orange"]{--g1:#7a3a12;--g2:#5a260e;--g3:#2a1206;--gold:#ffcf8a}
+    html[data-theme="blue"]  {--g1:#123a6a;--g2:#12306a;--g3:#0a1430;--gold:#9ec7ff}
+    html[data-theme="dark"]  {--g1:#26262c;--g2:#17171c;--g3:#0b0b0e;--gold:#cfd3da}
+    /* The five above override only the gradient stops and the accent, exactly as they do in
+       harness.html. Light is the one palette that is not dark, so it carries the ink and
+       surface tokens too -- the same reason [BRAND-LIGHT-V1] gives in harness.html. */
+    html[data-theme="light"] { --g1:#e8ebec;--g2:#eceff0;--g3:#e4e8e9;
+            --ink:#1a1c1c;--ink-rgb:26,28,28;
+            --ink-dim:rgba(26,28,28,.60);--glass-line:rgba(26,28,28,.13);
+            --sunk-rgb:255,255,255;
+            --gold:#b8860b;--acc1:#ffd77a;--acc2:#c8860e;--acc-ink:#3a2a06;
+            color-scheme: light; }
     * { box-sizing: border-box; }
     body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-           background:#0a0a0f; color:#e8e8ea;
+           background:linear-gradient(135deg,var(--g1) 0%,var(--g2) 52%,var(--g3) 100%) fixed;
+           color:var(--ink);
            font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-    .card { width:min(92vw,420px); padding:32px 28px; border:1px solid #1e2430; border-radius:14px;
-            background:#0e1116; text-align:center; }
-    .brand { letter-spacing:.28em; font-size:11px; color:#8a8f98; text-transform:uppercase; }
-    h1 { margin:6px 0 22px; font-size:22px; font-weight:600; color:#d8b45a; }
+    .card { width:min(92vw,420px); padding:32px 28px; border:1px solid var(--glass-line); border-radius:14px;
+            background:rgba(var(--sunk-rgb),.35); text-align:center; }
+    .brand { letter-spacing:.28em; font-size:11px; color:var(--ink-dim); text-transform:uppercase; }
+    h1 { margin:6px 0 22px; font-size:22px; font-weight:600; color:var(--gold); }
     button { width:100%; padding:13px 18px; font-size:15px; font-weight:600; cursor:pointer;
-             border:0; border-radius:9px; background:#d8b45a; color:#14100a; }
+             border:0; border-radius:9px; background:linear-gradient(135deg,var(--acc1),var(--acc2)); color:var(--acc-ink); }
     button:disabled { opacity:.5; cursor:default; }
     input { width:100%; padding:12px; margin-bottom:12px; border-radius:9px;
-            border:1px solid #2a3140; background:#0a0d12; color:#e8e8ea; font-size:15px; }
+            border:1px solid var(--glass-line); background:rgba(var(--sunk-rgb),.30); color:var(--ink); font-size:15px; }
     .msg { margin-top:16px; font-size:14px; min-height:20px; }
+    /* .err and .ok stay literal on purpose: red-for-failed and green-for-passed mean the same
+       thing on every palette and are not surfaces. harness.html tokenises neither. */
     .err { color:#ef6b6b; }
     .ok  { color:#5fd08a; }
-    .hint { margin-top:18px; font-size:12px; color:#6f757e; }
+    .hint { margin-top:18px; font-size:12px; color:var(--ink-dim); }
   </style>
 </head>
 <body>

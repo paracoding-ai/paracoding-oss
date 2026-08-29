@@ -22,21 +22,20 @@ page cannot drift from the release that carries it.
   — each one prints `##PCSTEP FAIL` or a named warning. Optional components *warn* and
   continue; required ones abort.
 - **`uninstall.sh` removes what it made**, including secrets it created and nothing it didn't.
-- **A workstation VM** is optional and is no longer part of the install. It lives in
-  `workstation.sh`, shipped beside the installer and run separately, whenever you want one.
-  It is idle-stopped and refuses to be created with a public RDP port — the refusal is the
-  feature.
+- **No workstation VM.** 12.0 is a GCP MCP connector a person drives from an MCP client on
+  their own machine. There is no VM, no desktop, no unattended loop. `install.sh` does not
+  build one.
 
 ## 2. Two services from one image
 
-One container image, one route table (**90 routes**), deployed twice with different env:
+One container image, one route table (**93 routes**), deployed twice with different env:
 
 | | Console | MCP |
 |---|---|---|
 | Who reaches it | a human in a browser | an agent / MCP client |
 | IAP | **on** | **off** |
-| Routes registered | 67 | 28 |
-| Routes withheld | 23 | 62 |
+| Routes registered | 70 | 28 |
+| Routes withheld | 23 | 65 |
 
 A route that lands on neither surface **throws at boot** rather than shipping a silently
 broken install. The split exists because IAP consumes the `Authorization` header an MCP
@@ -81,21 +80,34 @@ the auth they require.
 Full OAuth 2.1 (PKCE, dynamic client registration, discovery) **and** a legacy bearer path.
 
 - **Work** — `post_work_item`, `list_work_items`, `complete_work_item`, `cancel_work_item`,
-  `dispatch`, `run_roll`, `run_status`
+  `run_roll`, `run_status`
 - **Memory graph** — `create_entities`, `create_relations`, `add_observations`,
   `open_nodes`, `search_nodes`, `read_graph`, plus delete/retract
 - **History & audit** — `read_journal`, `append_journal`, `read_history`, `search_history`,
   `log_history`, `read_job_log`
 - **Lake** — `read_file`, `write_file`, `put_file` (binary), `list_files`
-- **Git** — `git_read`, `git_list`, `git_log`, `git_diff`, `git_propose`,
-  `git_propose_patch`, `git_push`
+- **Git** — `git_read`, `git_list`, `git_log`, `git_diff`, `git_grep`, `git_archive`,
+  `git_propose`, `git_propose_patch`, `git_push`
 - **Execution** — `run_command`, `stage_privileged_job`, `list_pending_confirm`
-- **Infra** — `gcp_api`, `vm_start`, `vm_stop`, `vm_resize`, `vm_status`
+- **Infra** — `gcp_api`
 - **Messaging** — `ask_agent`, `answer_message`, `list_my_messages`, `check_answer`
-- **Browser** — `browser_open`, `browser_navigate`, `browser_tabs`
 - **Identity** — `whoami`, which also delivers the fleet memory digest and bootstrap
 
-An unauthenticated client gets exactly one tool — `whoami` — which explains why.
+`dispatch` is **not** on this surface. It is a console-chat tool: it belongs to the Flow
+Hood's own toolset alongside `status_digest` and `check`, and no MCP client is offered it.
+
+**Those tools are gone, not withheld.** 12.0 does not register `vm_*` or `browser_*`. There is
+no workstation to address and no Chrome DevTools bridge to reach. Setting `WS_VM`, `WS_ZONE`
+or `WS_CDP_PORT` does not bring them back — they are unregistered, not gated. The list above
+is what a stock install enumerates.
+
+An **unauthenticated** client gets no tools at all: `POST /mcp` answers `401` with a
+`WWW-Authenticate: Bearer resource_metadata=…` challenge pointing at the protected-resource
+document, and no MCP server is ever built. The whoami-only server is a different case — an
+identity that *authenticated* but is not an active strain in the registry. It is admitted
+with `whoami` and nothing else, and that one tool returns an explanation of why the
+connection can do nothing, because a chat that does not know it is unprovisioned will report
+success on work it never did.
 
 ## 6. Two MCP protocol eras on one endpoint
 

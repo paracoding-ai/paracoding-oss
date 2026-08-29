@@ -154,9 +154,33 @@ substitutions:
 # always correct and cannot be misconfigured. GCS_ONLY still holds: logs go to GCS, not
 # Cloud Logging. Setting this to a lane bucket would also make the build unable to START
 # whenever the lane is not installed yet -- failing before it can say why.
+# [CI-LOGSBUCKET-V1] AN UNSET logsBucket IS NOT A NEUTRAL DEFAULT ONCE A BUILD CARRIES ITS
+# OWN SERVICE ACCOUNT -- IT IS A REFUSAL BEFORE STEP 0. Cloud Build requires one of four
+# things on a user-specified service account: a logsBucket, defaultLogsBucketBehavior
+# REGIONAL_USER_OWNED_BUCKET, logging CLOUD_LOGGING_ONLY, or logging NONE. GCS_ONLY IS NOT
+# ONE OF THEM. And --service-account is not exotic here: deploy/BUILD-FROM-THE-STORE.md
+# records it as THE recipe that actually deploys this fleet ("gcloud builds submit
+# --service-account=<the executor SA itself>"), so this file was one submit away from
+# failing on a condition that has nothing to do with what it checks.
+#
+# THE FIX IS THE BEHAVIOUR FLAG, NOT A BUCKET NAME, and that is the whole point. Everything
+# the rationale above says about a bucket stays TRUE: logsBucket is resolved before any step
+# runs, a lane bucket carries a per-install token no substitution can spell, and naming one
+# would make the build unable to START whenever that lane is not installed.
+# defaultLogsBucketBehavior satisfies the rule without naming anything -- Cloud Build creates
+# and owns a regional bucket in this project. GCS_ONLY still holds: logs go to GCS, not
+# Cloud Logging, which is what the paragraph above asks for.
+#
+# DIVERGENCE FROM UPSTREAM, DELIBERATE. The downstream lab fixed the same defect by writing
+# a literal bucket in its own project into this file. That is the exact shape
+# [PROD-LOGSBUCKET-SUBST-V1] removed from cloudbuild-prod.yaml -- runnable in one project,
+# silently unrunnable everywhere else, and it ships a project name to every adopter.
+# cloudbuild-prod.yaml needs no change: it already satisfies the rule with a
+# substitution-derived logsBucket.
 options:
   machineType: E2_HIGHCPU_8
   logging: GCS_ONLY
+  defaultLogsBucketBehavior: REGIONAL_USER_OWNED_BUCKET
 timeout: 3600s
 
 steps:

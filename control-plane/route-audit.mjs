@@ -216,6 +216,12 @@ const GUARDS = [
   // the audit cannot see would make its route read as newly unauthenticated and fail the
   // build for the wrong reason.
   'pcArchiveCaller',
+  // [PCGIT-LANE-SYNC-V1] POST /git/sync's guard, added for exactly the reason the
+  // pcArchiveCaller note above gives. It resolves a session key through pcSessionLookup and
+  // then requires BOTH the read and write tool classes, so it is a real guard -- and a real
+  // guard the scanner cannot see makes its route read as newly unauthenticated and fails the
+  // build for the wrong reason.
+  'pcSyncCaller',
   // [OSS-IAPAUTH-V54] Two names, added for exactly the reason the pcArchiveCaller note above
   // gives, and NOT to quiet a failure. POST /oauth/authorize/complete has always been guarded;
   // what the audit used to SEE was its inline oaGet('oauth_clients' call, and that call moved
@@ -238,6 +244,29 @@ const GUARDS = [
   // pcArchiveCaller is: a real guard the audit cannot see makes its route read as newly
   // unauthenticated and fails the build for the wrong reason.
   'pcUploadCaller',
+  // [SEC-CI-PRODUCE-V1] POST /ci/produce is guarded by pcCiPushCaller, which verifies a
+  // Google-signed OIDC push token from the Pub/Sub subscription: a three-segment shape
+  // check before anything is forwarded, then tokeninfo, then email === PC_CI_PUSH_SA,
+  // email_verified, and aud === this exact route URL. Recorded here for the same reason
+  // pcArchiveCaller and pcUploadCaller are: a real guard this scanner cannot see would
+  // make the route read as newly unauthenticated and fail the build for the wrong reason.
+  'pcCiPushCaller',
+  // [PCLAKE-BLOB-V1] POST /lake/blob and GET /lake/blob are guarded by pcLakeBlobCaller,
+  // which resolves the agent session key through the SAME pcSessionLookup every tool call
+  // goes through AND additionally narrows on tool CLASSES -- 'write' for the upload, 'read'
+  // for the download -- so a key that cannot call put_file cannot write the lake at the door
+  // instead. Recorded here for the reason pcArchiveCaller and pcUploadCaller are: a real
+  // guard this scanner cannot see makes its route read as newly unauthenticated and fails
+  // the build for the wrong reason.
+  //
+  // AND FOR A SECOND REASON THIS FILE PREDICTED. Before this line existed, GET /lake/blob
+  // already scanned as GUARDED -- not on its own merit, but because the slice read as its
+  // handler body runs to the next top-level registration and swept up the neighbouring
+  // `async function oaBearerRole` declaration, and 'oaBearerRole' is a guard token. That is
+  // [SEC-ROUTE-VISIBILITY-V1] and the waSha(supplied) note above, live, on a route added
+  // today: a genuinely unguarded route in that position would have scanned green. Naming the
+  // real guard makes the verdict true rather than lucky.
+  'pcLakeBlobCaller',
 ];
 
 const RE = /^app\.(get|post|put|delete|patch|all|use)\(\s*(['"`])([^'"`]+)\2/gm;

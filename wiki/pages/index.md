@@ -178,7 +178,6 @@ Approvals, journal, work items, chat history, strain records, session keys.
 | **Systems manual** | you want the exhaustive reference -- every service, route, variable and rung. |
 | **Changing the code** | you want to change something -- start with branding. |
 | **Model configuration** | chat is answering from the wrong model, or costing money. |
-| **The workstation** | you need a VM with a browser and a desktop. |
 | **Troubleshooting** | something is already wrong. Start with the symptom tables there. |
 
 **Authorisation** is still filed under the slug `the-gate`, because the slug is the key

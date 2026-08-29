@@ -36,20 +36,56 @@ PC_NO_ADOPT="${PC_NO_ADOPT:-0}"
 # name, immediately, with exit 2.
 PC_ARG_PROJECT=""
 PC_ARG_REGION=""
-# [WS-INSTALL-VM-V1] The workstation is BUILT by default now and --no-vm is the escape.
-# Operator ruling 2026-08-18: the console ships Start/Stop and Remote Desktop buttons, and a
-# button that cannot work until you go and run a second script is worse than no button. So the
-# default install produces a machine those controls actually drive. It is STOPPED when this
-# finishes, so the only standing cost is its 50 GB boot disk -- about $5/month at list, stated
-# at the step rather than discovered on a bill.
-PC_NO_VM="${PC_NO_VM:-0}"
-PC_USAGE="usage: ./install.sh [--project ID] [--region REGION] [--no-adopt] [--no-vm] [--plan]"
+# [SEC-INSTALL-PROFILE-V1] CHOOSE WHAT AN INSTALL CONTAINS. The ask is a lightweight install
+# that is just the MCP server, the git server, the console and their wiring -- plus a way to
+# leave the dev pipeline out. EVERYTHING DEFAULTS ON, so an existing command line gets exactly
+# what it got yesterday and no adopter is moved by this change.
+#
+#   --no-devpipe     skip 8c/10 CI build identity and 8d/10 artifact retention
+#   --no-history     skip 6c/10 the BigQuery forever-archive
+#   --minimal        both at once
+#   --profile NAME   minimal | full
+#
+# WHY THESE TWO BLOCKS AND NO OTHERS -- MEASURED IN THE EMITTED FILE, NOT CHOSEN BY EYE.
+# Every step boundary was taken from the say() calls, then each candidate block was checked
+# for what it leaks into the rest of the run:
+#
+#   6c/10   assigns  2 variables, NONE referenced after the block
+#   8c/10   assigns  3 variables, NONE referenced after the block
+#   8d/10   assigns 10 variables, NONE referenced after the block
+#
+# None of them defines a function used later, none appends to a failure accumulator, and
+# 10/10's self-test references nothing any of them creates -- checked directly, because a
+# self-test asserting a resource a skipped block was supposed to build would turn an
+# intentional omission into a failed install. That is why no other step is offered: the
+# others are not separable, and pretending otherwise produces a half-installed system that
+# still prints INSTALL COMPLETE.
+#
+# THERE IS NO --no-ge FLAG because there is no GE component in this tree to skip, and no
+# "client" profile alias because it would be identical to "full". An alias that names a
+# distinction the installer does not make is worse than not offering it.
+PC_NO_DEVPIPE="${PC_NO_DEVPIPE:-0}"
+PC_NO_HISTORY="${PC_NO_HISTORY:-0}"
+PC_PROFILE="${PC_PROFILE:-}"
+PC_USAGE="usage: ./install.sh [--project ID] [--region REGION] [--no-adopt] [--plan]
+                   [--minimal] [--profile minimal|full] [--no-devpipe] [--no-history]"
 while [ $# -gt 0 ]; do
   case "$1" in
     --rehearse|--stop-before-passkey) PC_REHEARSE=1; shift ;;
     --plan) PC_PLAN=1; shift ;;
     --no-adopt) PC_NO_ADOPT=1; shift ;;
-    --no-vm) PC_NO_VM=1; shift ;;
+    --no-devpipe) PC_NO_DEVPIPE=1; shift ;;
+    --no-history) PC_NO_HISTORY=1; shift ;;
+    # [SEC-INSTALL-PROFILE-V2] --minimal SETS THE TWO FLAGS, IT DOES NOT SET A PROFILE.
+    # It used to assign PC_PROFILE=minimal, and the profile is resolved ONCE after this
+    # loop -- so the LAST of --minimal / --profile won, and the two orderings disagreed:
+    # "--minimal --profile full" skipped nothing while "--profile full --minimal" skipped
+    # everything. Setting the flags here makes --minimal a pure alias for the two --no-*
+    # switches, which the resolver below can only ever turn further OFF. Order cannot
+    # matter now, in either direction, and that is testable from the argument parser alone.
+    --minimal) PC_NO_DEVPIPE=1; PC_NO_HISTORY=1; shift ;;
+    --profile) PC_PROFILE="${2:-}"; [ -n "$PC_PROFILE" ] || { echo "--profile needs a name"; exit 2; }; shift 2 ;;
+    --profile=*) PC_PROFILE="${1#--profile=}"; shift ;;
     --project) PC_ARG_PROJECT="${2:-}"; [ -n "$PC_ARG_PROJECT" ] || { echo "--project needs a project id"; exit 2; }; shift 2 ;;
     --project=*) PC_ARG_PROJECT="${1#--project=}"; shift ;;
     --region) PC_ARG_REGION="${2:-}"; [ -n "$PC_ARG_REGION" ] || { echo "--region needs a region"; exit 2; }; shift 2 ;;
@@ -61,6 +97,35 @@ while [ $# -gt 0 ]; do
        else echo "unexpected argument: $1"; echo "$PC_USAGE"; exit 2; fi; shift ;;
   esac
 done
+# [SEC-INSTALL-PROFILE-V1] RESOLVE THE PROFILE, THEN SAY WHAT WILL AND WILL NOT RUN.
+# A profile only ever turns things OFF. An explicit --no-* alongside a profile stays off; a
+# profile never turns back on something a flag switched off, so the two cannot fight.
+# --minimal is NOT a profile and never reaches this switch: it sets the two --no-* flags
+# in the loop above. That is what makes the claim on the line above true in both orderings.
+case "$PC_PROFILE" in
+  "")        : ;;
+  minimal)   PC_NO_DEVPIPE=1; PC_NO_HISTORY=1 ;;
+  full)      : ;;
+  *) echo "unknown profile: $PC_PROFILE (known: minimal, full)"; echo "$PC_USAGE"; exit 2 ;;
+esac
+# PRINTED BEFORE PREFLIGHT AND BEFORE THE FIRST API CALL, deliberately. An operator who typed
+# the wrong flag finds out at second zero rather than at 8c/10, and an operator who typed
+# nothing sees that nothing was skipped.
+if [ -z "$PC_PROFILE" ] && [ "$PC_NO_DEVPIPE" = 1 ] && [ "$PC_NO_HISTORY" = 1 ]; then
+  echo "install profile: minimal (--minimal, or the two --no-* flags)"
+else
+  echo "install profile: ${PC_PROFILE:-full (default)}"
+fi
+if [ "$PC_NO_HISTORY" = 1 ] || [ "$PC_NO_DEVPIPE" = 1 ]; then
+  echo "  SKIPPING:"
+  [ "$PC_NO_HISTORY" = 1 ] && echo "    6c/10  history forever-archive (BigQuery)"
+  [ "$PC_NO_DEVPIPE" = 1 ] && echo "    8c/10  the CI build identity"
+  [ "$PC_NO_DEVPIPE" = 1 ] && echo "    8d/10  artifact retention"
+  echo "  Everything else runs. Re-run without the flag to add a skipped piece later:"
+  echo "  each of these steps is create-if-absent and safe to run against a live install."
+else
+  echo "  nothing skipped -- every step runs."
+fi
 # [SEC-NO-HIDDEN-PROMPT-V55] gcloud MUST NEVER PROMPT INSIDE THIS INSTALLER, AND UNTIL NOW IT
 # COULD -- INVISIBLY. MEASURED 2026-08-15 on a fresh project: 0/10 sat with no output and no
 # prompt until the operator pressed ENTER, repeatedly, across several runs, before working out
@@ -523,6 +588,29 @@ printf '%s' "$PC_IAP_HELP" | grep -qE -- '(^|[^-[:alnum:]])--(\[no-\])?iap([^-[:
   echo "           console URL for turning IAP on by hand -- but until you do, your console"
   echo "           is reachable by anyone who learns its URL. Try: gcloud components update"
 }
+# [SEC-CBI-PROBE-V1] PROBE --clear-base-image THE SAME WAY, AND DROP THE FLAG IF IT IS ABSENT.
+# Step 6/10 passes `gcloud run deploy --clear-base-image`; it is a recent flag, and an SDK that
+# predates it does not warn -- it EXITS 2 on an unrecognised argument. That would happen at
+# 6/10, AFTER Firestore, the service accounts, five secrets, both reserved URLs, two KMS
+# keyrings and four buckets already exist, which is the most expensive possible place to learn
+# that a local tool is old. The flag is an OPTIMISATION, not a control: it clears any automatic
+# base-image association an earlier deploy attached so Cloud Run cannot rebase the image
+# underneath this one. An install without it is correct, merely unpinned -- so this is
+# WARN-and-drop and never a die. A preflight must not be stricter than the step it guards,
+# which is the rule the --iap probe above states and this one follows.
+# --help is answered by the locally installed SDK and never goes to the network; the prompt
+# suppression and </dev/null are needed here for the same reason they are needed above.
+PC_CBI_FLAG="--clear-base-image"
+PC_CBI_HELP=$(CLOUDSDK_CORE_DISABLE_PROMPTS=1 gcloud run deploy --help 2>/dev/null </dev/null) || PC_CBI_HELP=""
+printf '%s' "$PC_CBI_HELP" | grep -qE -- '(^|[^-[:alnum:]])--clear-base-image([^-[:alnum:]]|$)' || {
+  PC_CBI_FLAG=""
+  echo "  NOTE: this SDK's 'gcloud run deploy --help' does not advertise --clear-base-image,"
+  echo "        so 6/10 deploys WITHOUT it rather than dying on an unknown argument after"
+  echo "        everything else has been created. The install is correct either way; the image"
+  echo "        simply keeps whatever automatic base-image association it already had."
+  echo "        To pin it: gcloud components update, then re-run this installer."
+}
+PC_CBI_HELP=""
 ACCT=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)
 [ -n "$ACCT" ] || die "no active gcloud account. Run: gcloud auth login"
 # [SEC-REHEARSE-SA-V1] IDENTITY CLASS, NOT PERMISSIONS. A service account can never satisfy
@@ -576,6 +664,16 @@ esac
 # being able to CHANGE one. Ask Google which of these it will actually let you do, rather
 # than assuming Owner and discovering the truth at step 3 or step 6 as a bare 403.
 PC_NEED="resourcemanager.projects.setIamPolicy serviceusage.services.enable iam.serviceAccounts.create run.services.create secretmanager.secrets.create"
+# [SEC-PREFLIGHT-COVERAGE-V1] THE FIVE ABOVE COVERED 1/10, 3/10, 4/10 AND 6/10 AND NOTHING
+# ELSE. Not one of them is exercised by 5b/10 (KMS), 5c/10 (buckets), 5e/10 (KMS again),
+# 6c/10 (BigQuery) or 8/10 (IAP) -- which are exactly the steps a locked-down
+# project denies, and each of them is twenty minutes deep. These five close that gap. They are
+# a SEPARATE list because they carry a different verdict: a missing one is a WARNING naming the
+# step that will decline, not a refusal to install, since every one of those steps is either
+# skippable or already warn-and-continue, and a preflight must not be stricter than the step it
+# guards. testIamPermissions accepts up to 100 permissions in one call, so this costs no extra
+# round trip.
+PC_NEED_OPT="cloudkms.cryptoKeys.create storage.buckets.create bigquery.datasets.create iap.web.setIamPolicy"
 # [SEC-PREFLIGHT-EMPTY-V1] ASK GOOGLE OVER REST, AND TREAT SILENCE AS A FAILURE.
 # TWO defects lived here and the first one hid the second.
 #   1. THERE IS NO `gcloud projects test-iam-permissions` VERB. It does not exist in any
@@ -592,10 +690,28 @@ PC_NEED="resourcemanager.projects.setIamPolicy serviceusage.services.enable iam.
 # that produces one ends as a bare 403 twenty minutes deep -- which is the whole reason
 # this check exists.
 PC_IAM_TOK=$(gcloud auth print-access-token 2>/dev/null)
-PC_BODY=$(printf '%s' "$PC_NEED" | python3 -c 'import sys,json;print(json.dumps({"permissions":sys.stdin.read().split()}))' 2>/dev/null)
+pc_iam_probe() {
+  # $* = permission names. Prints the subset the caller holds, or nothing on any failure.
+  _pc_pb=$(printf '%s' "$*" | python3 -c 'import sys,json;print(json.dumps({"permissions":sys.stdin.read().split()}))' 2>/dev/null)
+  [ -n "$_pc_pb" ] || return 0
+  curl -sS -m 30 -X POST -H "Authorization: Bearer $PC_IAM_TOK" -H "Content-Type: application/json" -d "$_pc_pb" "https://cloudresourcemanager.googleapis.com/v1/projects/$PROJECT:testIamPermissions" 2>/dev/null | python3 -c 'import sys,json;print(" ".join(json.load(sys.stdin).get("permissions",[])))' 2>/dev/null
+}
 PC_HAVE=""
-if [ -n "$PC_IAM_TOK" ] && [ -n "$PC_BODY" ]; then
-  PC_HAVE=$(curl -sS -m 30 -X POST -H "Authorization: Bearer $PC_IAM_TOK" -H "Content-Type: application/json" -d "$PC_BODY" "https://cloudresourcemanager.googleapis.com/v1/projects/$PROJECT:testIamPermissions" 2>/dev/null | python3 -c 'import sys,json;print(" ".join(json.load(sys.stdin).get("permissions",[])))' 2>/dev/null)
+PC_HAVE_OPT=""
+if [ -n "$PC_IAM_TOK" ]; then
+  # ONE CALL FOR ALL NINE, THEN A FALLBACK THAT PROTECTS THE FATAL FIVE. If Google ever
+  # rejects one of the nine names outright the whole request 400s and comes back EMPTY -- and
+  # empty is FATAL below, by design. That would turn a widened probe into a bricked installer,
+  # which is precisely the class of defect this block's own history records. So an empty answer
+  # is retried with the original five alone: the fatal check keeps working, and the four
+  # additions can only ever lose their advisory verdict, never invent a failure.
+  PC_HAVE=$(pc_iam_probe "$PC_NEED $PC_NEED_OPT")
+  if [ -n "$PC_HAVE" ]; then
+    PC_HAVE_OPT="$PC_HAVE"
+  else
+    PC_HAVE=$(pc_iam_probe "$PC_NEED")
+    [ -z "$PC_HAVE" ] || echo "  authority: the nine-permission probe was refused; re-checked the five that are fatal."
+  fi
 fi
 if [ -n "$PC_HAVE" ]; then
   PC_MISS=""
@@ -607,6 +723,33 @@ Missing permission(s):$PC_MISS
 Grant yourself roles/owner on the project, or the individual roles carrying these, and
 re-run. Stopping now is cheaper than stopping half-deployed at step 6."
   echo "  authority: every required project permission is present"
+  # THE ADVISORY HALF. Named per step, because "you are missing bigquery.datasets.create" is
+  # useless to an operator who does not know which step wanted it.
+  PC_MISS_OPT=""
+  if [ -n "$PC_HAVE_OPT" ]; then
+    for _p in $PC_NEED_OPT; do
+      case " $(echo $PC_HAVE_OPT) " in *" $_p "*) : ;; *) PC_MISS_OPT="$PC_MISS_OPT $_p" ;; esac
+    done
+  fi
+  if [ -n "$PC_MISS_OPT" ]; then
+    echo "  authority: NOT held, and each of these makes ONE later step decline rather than"
+    echo "             fail the install -- listed now so it is not a surprise at minute twenty:"
+    for _p in $PC_MISS_OPT; do
+      case "$_p" in
+        cloudkms.cryptoKeys.create)  echo "    $_p          -> 5b/10 approval signing key, 5e/10 the PCV1 vault key" ;;
+        storage.buckets.create)      echo "    $_p             -> 5c/10 the data lake, git object store and exec-records buckets" ;;
+        bigquery.datasets.create)    echo "    $_p           -> 6c/10 the history forever-archive (or run with --no-history)" ;;
+        iap.web.setIamPolicy)        echo "    $_p               -> 8/10 putting the console behind IAP -- WITHOUT THIS THE" ;;
+      esac
+    done
+    case "$PC_MISS_OPT" in *iap.web.setIamPolicy*)
+      echo "             CONSOLE IS REACHABLE BY ANYONE WHO LEARNS ITS URL. 8/10 prints what to"
+      echo "             click; do it before you put anything in the lake." ;;
+    esac
+  elif [ -n "$PC_HAVE_OPT" ]; then
+    echo "  authority: the KMS, Storage, BigQuery, Compute and IAP permissions the later steps"
+    echo "             need are present too"
+  fi
 else
   die "cannot establish that $ACCT may install on $PROJECT.
 The permission probe returned nothing for: $PC_NEED
@@ -696,11 +839,49 @@ say "1/10 enabling APIs (this is the slow one)"
 # API was enabled and HTTP 200 immediately afterwards, with nothing else changed.
 # DO NOT DELETE THIS AS UNUSED. Grep the three function names above first; the IAM binding
 # that makes it work is granted to $CP_SA at step 3/10 and carries the same marker.
+# [SEC-API-ENABLE-COMPLETE-V1] SIX APIS THE SHIPPED PRODUCT CALLS WERE NOT ENABLED HERE, AND ON
+# a project where they are off the install SUCCEEDS and the product fails later, at first use, with
+# a SERVICE_DISABLED that names an API nobody asked for. Found 2026-08-23 by auditing every API
+# enabled in a working install against every <api>.googleapis.com reference in this repository:
+#
+#   storage             gate-exec/exec_server.py, pipeline/collect-evidence.py, index.ts, this file
+#                       -- the DATA LAKE AND THE GIT OBJECT STORE. It works today only because
+#                       Storage is on by default in most projects; a project with it off had no
+#                       lake and no repository, and nothing in the install said so.
+#   iamcredentials      control-plane/src/gittools.ts -- minting the ID token /git/archive accepts.
+#   cloudscheduler      src/runner/deploy-build-runner.sh, deploy-work-runner.sh -- the runners are
+#                       SCHEDULED. Without it the deploy step fails after the services exist.
+#   monitoring          control-plane/src/index.ts, and workstation.sh grants the VM SA
+#                       roles/monitoring.metricWriter, which is inert if the API is off.
+#   cloudbilling        cost reporting.
+#   generativelanguage  index.ts, the CHAT_GEMINI_PROVIDER=studio path.
+#
+# [SEC-API-ENABLE-COMPLETE-V2] A SEVENTH, FOUND THE SAME WAY AND MISSED BY THE FIRST PASS:
+#   cloudfunctions      pipeline/secret-destroy-preflight.py:156 posts to
+#                       https://cloudfunctions.googleapis.com/v2 to scan gen1 and gen2
+#                       secretEnvironmentVariables and secretVolumes. That preflight is what
+#                       stands between an operator and deleting a secret something still
+#                       reads, so on a fresh install the FIRST secret deletion 403s -- on the
+#                       check, not on the delete. A safety preflight that cannot run is worse
+#                       than a missing feature, because it fails at the moment it is needed.
+#
+# THE AUDIT'S OWN LIMIT, STATED SO NOBODY TREATS THIS LIST AS COMPLETE: it greps for the literal
+# host <api>.googleapis.com. An API called through a client library that never spells the host is
+# invisible to it -- Model Armor is enabled and in use in a sibling install and appears ZERO times
+# by this test. Absence of the string is not evidence of disuse.
+#
+# NOT ADDED, DELIBERATELY: discoveryengine.googleapis.com. Gemini Enterprise agents are aiplatform
+# reasoningEngines; the install that actually runs them does NOT have Discovery Engine enabled at
+# all. When that tree lands here its APIs are agentregistry, networkservices and modelarmor, and
+# they belong in an opt-in block like BigQuery's rather than on by default for every adopter.
 retry gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com firestore.googleapis.com secretmanager.googleapis.com \
-  iam.googleapis.com logging.googleapis.com \
+  iam.googleapis.com logging.googleapis.com storage.googleapis.com \
+  iamcredentials.googleapis.com cloudscheduler.googleapis.com monitoring.googleapis.com \
+  cloudbilling.googleapis.com generativelanguage.googleapis.com \
   compute.googleapis.com cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
   cloudkms.googleapis.com iap.googleapis.com aiplatform.googleapis.com \
+  cloudfunctions.googleapis.com \
   --project "$PROJECT" >/dev/null || die "could not enable APIs"
 echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 
@@ -742,8 +923,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="c451cfa31372f1d7f0b17b242f4619bfad8b5015"
-PC_VERSION="10.5"
+PC_RELEASE="034a591d9ab265b8098cb9a11af68dac803ca72b"
+PC_VERSION="12.0"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -1331,12 +1512,21 @@ if [ "$PC_PLAN" = 1 ]; then
   pc_plan_svc "$GX_SVC"
   pc_plan_sa "pc-${PC_LP}${PC_TOK}control-plane@" ""
   pc_plan_sa "pc-${PC_LP}${PC_TOK}gate-exec@" ""
-  pc_plan_sa "pc-${PC_LP}${PC_TOK}build@" " (the CI build identity)"
-true  # [SEC-WSVM-SPLIT-V90] no workstation SA is planned: workstation.sh makes it, not this script
+  # [SEC-PLAN-PROFILE-V1] THE PLAN READS THE PROFILE FLAGS. It did not, so "--minimal --plan"
+  # listed a build service account the run then never created -- a plan that promises work
+  # the run will not do is worse than no plan, because the whole point of --plan is that
+  # what it prints is what happens.
+  if [ "$PC_NO_DEVPIPE" = 1 ]; then
+    pc_plan_line SKIP "service account pc-${PC_LP}${PC_TOK}build@${PROJECT}.iam.gserviceaccount.com (--no-devpipe: 8c/10 does not run)"
+    pc_plan_line SKIP "artifact retention policies (--no-devpipe: 8d/10 does not run)"
+  else
+    pc_plan_sa "pc-${PC_LP}${PC_TOK}build@" " (the CI build identity)"
+  fi
+  [ "$PC_NO_HISTORY" != 1 ] || pc_plan_line SKIP "BigQuery history archive (--no-history: 6c/10 does not run)"
   pc_plan_sec "$PC_SEC_SESSION" ""
   pc_plan_sec "$PC_SEC_CONFIRM" ""
   pc_plan_sec "$PC_SEC_CREDS" ""
-  pc_plan_sec "$PC_SEC_BOOT" " (a NEW version is minted either way; removed again at 9/10)"
+  pc_plan_sec "$PC_SEC_BOOT" " (a NEW version is minted either way)"
   pc_plan_sec "$PC_MARK_SEC" " (records release $PC_RELEASE)"
   for _pc_b in "${PROJECT}-${PC_LP}${PC_TOK}datalake" "${PROJECT}-${PC_LP}${PC_TOK}source" "${PROJECT}-${PC_LP}${PC_TOK}exec-records"; do
     case "$PC_ADOPTABLE" in
@@ -1365,8 +1555,7 @@ true  # [SEC-WSVM-SPLIT-V90] no workstation SA is planned: workstation.sh makes 
   echo ""
   echo "  AND, NOT LISTED ABOVE BECAUSE THEY ARE NOT NAMED RESOURCES: IAM bindings are"
   echo "  (re-)asserted on everything listed; environment variables are re-set on the three"
-echo "  services; the workstation VM is built by workstation.sh, run separately, and this"
-  echo "  be no; the git seed at 8b/10 writes ONLY if branch main is empty."
+  echo "  services; the git seed at 8b/10 writes ONLY if branch main is empty."
   echo ""
   if [ "$PC_REHEARSE" = 1 ]; then
     echo "  --plan under --rehearse: stopping after the plan. Nothing was created."
@@ -1636,7 +1825,7 @@ echo "  home  no model call of any kind    work  keyless Vertex only    dual  bo
 echo "  It lives at Firestore config/models.fleet_mode. Changing it is a privileged"
 echo "  write and goes through the approval gate; nothing in the deployment can raise it."
 
-say "3/10 service accounts (three, least privilege)"
+say "3/10 service accounts (two, least privilege)"
 for pair in "pc-${PC_LP}${PC_TOK}control-plane:control plane" "pc-${PC_LP}${PC_TOK}gate-exec:gated executor"; do
   id="${pair%%:*}"; desc="${pair#*:}"
   gcloud iam service-accounts describe "${id}@${PROJECT}.iam.gserviceaccount.com" --project "$PROJECT" >/dev/null 2>&1 \
@@ -3240,9 +3429,60 @@ fi
 #                    /oauth/token, /oauth/register and /mcp stay on the MCP host.
 # WA_RP_ID/WA_RP_ORIGIN are the CONSOLE host on both: the gate is served by the console, and a
 # passkey is bound to that host. Everything else is identical by construction.
+# [SEC-ENVCARRY-V1] --set-env-vars IS A DECLARED SET, AND THREE VALUES ONLY EVER ARRIVE LATER.
+# The two deploys below use --set-env-vars, which REPLACES the whole environment of the
+# revision. Three variables are never in those strings because they are not known yet at 6/10:
+#   PC_ARCHIVE_DATASET   applied by 6c/10 with --update-env-vars, and 6c/10 is skipped by
+#                        --no-history / --minimal
+#   WS_VM, WS_ZONE, WS_CDP_PORT  not applied by this release; still in WANT because a
+#                        re-run over an older install may still have them
+# So a SECOND run with --no-history silently DELETED it: the history tools fell
+# back to the language default dataset pc_archive -- wrong on any lane-prefixed install, and it
+# is not the dataset 6c/10 ever created. Nothing failed; the install simply
+# un-wired itself, which is the worst shape a re-run can have.
+#
+# THE FIX IS TO READ FORWARD, NOT TO GUESS. The values are read off the LIVE READY REVISION of
+# each service immediately before its deploy and carried into the same declared set. That is
+# strictly better than teaching 6c/10 to re-apply after a skip -- it is skipped,
+# so it runs no code at all -- and better than recomputing the names here, because reading
+# them back also preserves a value an operator set BY HAND, which recomputation would destroy.
+# It is empty and harmless on a fresh project: 5/10's placeholder revision carries none of the
+# three. A value containing a comma or an = would corrupt the --set-env-vars dict syntax, so
+# such a value is dropped rather than carried; none of the three can legally contain either.
+pc_env_carry() {
+  _pc_ec_rev=$(gcloud run services describe "$1" --region "$REGION" --project "$PROJECT" \
+    --format='value(status.latestReadyRevisionName)' 2>/dev/null)
+  [ -n "$_pc_ec_rev" ] || return 0
+  gcloud run revisions describe "$_pc_ec_rev" --region "$REGION" --project "$PROJECT" \
+    --format=json 2>/dev/null | python3 -c 'import sys, json
+WANT = ("PC_ARCHIVE_DATASET", "WS_VM", "WS_ZONE", "WS_CDP_PORT")
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+containers = ((doc.get("spec") or {}).get("containers")) or []
+env = (containers[0].get("env") if containers else None) or []
+out = []
+for e in env:
+    if not isinstance(e, dict):
+        continue
+    name, value = e.get("name"), e.get("value")
+    if name in WANT and isinstance(value, str) and value and "," not in value and "=" not in value:
+        out.append(name + "=" + value)
+sys.stdout.write(("," + ",".join(out)) if out else "")
+' 2>/dev/null
+}
+PC_CARRY_CP=$(pc_env_carry "$CP_SVC")
+PC_CARRY_MC=$(pc_env_carry "$MC_SVC")
+if [ -n "$PC_CARRY_CP$PC_CARRY_MC" ]; then
+  echo "  carrying forward from the live revisions (6c/10 and 9/10 set these, and either may"
+  echo "  be skipped on this run, so --set-env-vars must not drop them):"
+  [ -z "$PC_CARRY_CP" ] || echo "    $CP_SVC:${PC_CARRY_CP#,}"
+  [ -z "$PC_CARRY_MC" ] || echo "    $MC_SVC:${PC_CARRY_MC#,}"
+fi
 retry gcloud run deploy "$CP_SVC" --source "$HERE/control-plane" --region "$REGION" --project "$PROJECT" \
-  --service-account "$CP_SA" --allow-unauthenticated --clear-base-image --quiet \
-  --set-env-vars "PC_SURFACE=console,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV" \
+  --service-account "$CP_SA" --allow-unauthenticated $PC_CBI_FLAG --quiet \
+  --set-env-vars "PC_SURFACE=console,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV$PC_CARRY_CP" \
   --set-secrets "WA_SESSION_SECRET=${PC_SEC_SESSION}:latest" \
   >/dev/null || die "console deploy failed"
 echo "  console deployed"
@@ -3262,7 +3502,7 @@ that image serves no /mcp at all."
 echo "  image $PC_IMAGE"
 retry gcloud run deploy "$MC_SVC" --image "$PC_IMAGE" --region "$REGION" --project "$PROJECT" \
   --service-account "$CP_SA" --allow-unauthenticated --quiet \
-  --set-env-vars "PC_SURFACE=mcp,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV" \
+  --set-env-vars "PC_SURFACE=mcp,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV$PC_CARRY_MC" \
   --set-secrets "WA_SESSION_SECRET=${PC_SEC_SESSION}:latest" \
   >/dev/null || die "MCP service deploy failed"
 echo "  mcp deployed from the same image"
@@ -3409,7 +3649,6 @@ else
   pc_wiki_put pages/connect-an-agent.md 1
   pc_wiki_put pages/the-strains.md 1
   pc_wiki_put pages/working-with-agents.md 1
-  pc_wiki_put pages/the-workstation.md 1
   pc_wiki_put pages/architecture.md 1
   pc_wiki_put pages/systems-manual.md 1
   pc_wiki_put pages/change-the-code.md 1
@@ -3508,6 +3747,12 @@ if [ "$PC_WIKI_RC" -ne 0 ]; then
   echo '      gcloud storage cp <release>/wiki/_index.json   gs://<bucket>/shared/wiki/'
 fi
 
+if [ "$PC_NO_HISTORY" = 1 ]; then
+  say "6c/10 history forever-archive -- SKIPPED (--no-history)"
+  echo "  The Firestore TTL still expires journal rows on schedule and there is now no"
+  echo "  archive copy. That is the trade this flag makes. deploy/TTL-BIGQUERY-INFRA.md"
+  echo "  builds it later by hand, or re-run the installer without --no-history."
+else
 say "6c/10 history forever-archive (BigQuery, inside the free tier)"
 # [SEC-BQ-PROVISION-V50] THE INSTALLER NOW BUILDS THE ARCHIVE THE TOOLS ALREADY EXPECTED.
 # Until v5.0 this was the widest code-shipped-provisioning-did-not gap in the product:
@@ -3631,6 +3876,8 @@ if [ "$PC_BQ_RC" -ne 0 ]; then
   echo "  Do NOT enable the Firestore TTL until the archive exists, or rows expire with no copy."
 fi
 
+fi
+
 say "6d/10 allowed Google accounts"
 # [OSS-ALLOWLIST-V54] WHO MAY CONNECT AN MCP CLIENT TO THIS INSTALL.
 #
@@ -3681,7 +3928,12 @@ _pc_em=""
 if [ -n "$PC_EXTRA_EMAILS" ]; then
   PC_ALLOW_TOK=$(gcloud auth print-access-token 2>/dev/null)
   if [ -z "$PC_ALLOW_TOK" ]; then
-    say "  WARNING: could not mint a token to seed the allowed-account list; add the addresses in Settings."
+    # [SEC-PCSTEP-SAY-V1] echo, NOT say. say() takes the first WORD of its argument as the
+    # step id -- PC_STEP="${1%% *}" -- so a leading space makes it the EMPTY STRING. It then
+    # closes 6d/10 with ##PCSTEP OK, opens a nameless step, and the next real say() closes
+    # THAT one instead of 6d/10: the Flowhood progress bar silently loses a step. These are
+    # three lines of detail INSIDE a step, which is exactly what echo is for.
+    echo "  WARNING: could not mint a token to seed the allowed-account list; add the addresses in Settings."
   else
     PC_ALLOW_URL="https://firestore.googleapis.com/v1/projects/$PROJECT/databases/$FSDB/documents/config/oauth_allow?updateMask.fieldPaths=emails"
     if PC_ALLOW_OUT=$(python3 - "$PC_ALLOW_URL" "$PC_ALLOW_TOK" $PC_EXTRA_EMAILS <<"PC_ALLOW_PY"
@@ -3703,9 +3955,9 @@ except Exception as e:
     print(str(e)[:300]); sys.exit(1)
 PC_ALLOW_PY
     ); then
-      say "  allowed accounts: $ACCT$PC_EXTRA_EMAILS"
+      echo "  allowed accounts: $ACCT$PC_EXTRA_EMAILS"
     else
-      say "  WARNING: could not seed the allowed-account list ($PC_ALLOW_OUT); add the addresses in Settings."
+      echo "  WARNING: could not seed the allowed-account list ($PC_ALLOW_OUT); add the addresses in Settings."
     fi
   fi
   PC_ALLOW_TOK=""
@@ -4408,15 +4660,13 @@ UNEXERCISABLE = {
                      "reports it. The bucket and the grant are asserted instead.",
     "FN.STAGE_TOOLS": "stage_privileged_job and run_command each need a human passkey with "
                       "user presence. No approval is produced or verified here.",
-    "FN.VM_TOOLS": "vm_status/vm_start/vm_stop/vm_resize need a workstation instance. 5d/10 "
-                   "says whether one was made; vm_start/stop/resize also spend an approval.",
     "FN.BROWSER_TOOLS": "browser_open/navigate/tabs need a live CDP endpoint on a running box. "
-                        "5d/10 now PROVISIONS one -- a token-gated DevTools bridge on the "
+                        "9/10 now PROVISIONS one -- a token-gated DevTools bridge on the "
                         "workstation's LOOPBACK address, in front of a Chrome whose debugging "
                         "port is also loopback -- but it is deliberately not on any network and "
                         "this installer opens no firewall rule for it, so the control plane "
                         "cannot reach it and index.ts therefore withholds these three tools. "
-                        "Reachable over the IAP tunnel from the operator's own machine; 5d/10 "
+                        "Reachable over the IAP tunnel from the operator's own machine; 9/10 "
                         "prints the command. Nothing here can drive it, so nothing here claims "
                         "to have.",
 }
@@ -5147,7 +5397,7 @@ elif st in (401, 403):
           "real tool surface; if it passed, the lake works and this line is about the installer.")
 else:
     rec("FAIL", "FN.LAKE_BUCKET", "ASSERTED", "gs://" + LAKE + " is not readable: " + str(st) + " " + b[:120])
-for i in ("FN.LAKE_WRITE", "FN.STAGE_TOOLS", "FN.VM_TOOLS", "FN.BROWSER_TOOLS"):
+for i in ("FN.LAKE_WRITE", "FN.STAGE_TOOLS", "FN.BROWSER_TOOLS"):
     rec("NOT-EXERCISED", i, "ASSERTED", UNEXERCISABLE[i])
 
 fails = 0
@@ -5202,6 +5452,12 @@ else
   echo "  $PC_FUNC_FAIL FUNCTIONAL CHECK(S) FAILED. The installer ran; the installed system"
   echo "  does not do its job. 10/10 will refuse to print INSTALL COMPLETE over this."
 fi
+if [ "$PC_NO_DEVPIPE" = 1 ]; then
+  say "8c/10 + 8d/10 dev pipeline -- SKIPPED (--no-devpipe)"
+  echo "  No CI build identity and no artifact retention policy. Images will accumulate"
+  echo "  in Artifact Registry until something prunes them, and a dev pipeline added"
+  echo "  later will build as whatever identity you give it. Both are re-runnable."
+else
 say "8c/10 the CI build identity (least privilege, not the project builder)"
 # [SEC-CI-EMIT-INSTALL-V1] THE IDENTITY A DEV PIPELINE SHOULD BUILD AS, AND THE ONE IT MUST
 # NOT. Cloud Build's default identity is the project's COMPUTE DEFAULT service account
@@ -5223,26 +5479,52 @@ say "8c/10 the CI build identity (least privilege, not the project builder)"
 # turns out to need a right this list does not confer, ADD THE ONE RIGHT TO THE ONE RESOURCE
 # -- a project-level role granted to make an error message go away is how the hole above got
 # there in the first place.
+# [SEC-OPTIONAL-NOT-FATAL-V11] AN OPTIONAL COMPONENT MUST NOT BE ABLE TO FAIL THE RUN, and
+# until now this step could -- eight times. It runs AFTER 8b/10 has proved the installed
+# system ANSWERS: by here Firestore, the service accounts, every secret, both Cloud Run URLs,
+# both KMS keyrings and all four buckets exist and were exercised end to end. A denied role
+# binding or an org policy that refuses a service-account create is then a missing convenience
+# for a pipeline THIS TREE DOES NOT EVEN EMIT A TRIGGER FOR -- and a `die` here exits before
+# 10/10 ever prints the console and MCP URLs, so a fully working install ends with an error
+# and no address. Every failure below is therefore NAMED where it happens, counted, and
+# summarised at the end of the step. This is the same shape as 9/10 and for the same reason.
+PC_CI_RC=0
 PC_BUILD_SA_ID="pc-${PC_LP}${PC_TOK}build"
 PC_BUILD_SA="${PC_BUILD_SA_ID}@${PROJECT}.iam.gserviceaccount.com"
+PC_CI_SA_OK=1
 if gcloud iam service-accounts describe "$PC_BUILD_SA" --project "$PROJECT" >/dev/null 2>&1; then
   echo "  adopting $PC_BUILD_SA"
-else
-  retry gcloud iam service-accounts create "$PC_BUILD_SA_ID" --project "$PROJECT" --display-name="paracoding ${PC_LP}CI build identity" >/dev/null || die "could not create the CI build identity $PC_BUILD_SA"
+elif retry gcloud iam service-accounts create "$PC_BUILD_SA_ID" --project "$PROJECT" --display-name="paracoding ${PC_LP}CI build identity" >/dev/null 2>&1; then
   echo "  created $PC_BUILD_SA"
+else
+  PC_CI_SA_OK=0; PC_CI_RC=$((PC_CI_RC + 1))
+  echo "  note: could not create the CI build identity $PC_BUILD_SA."
+  echo "        The three grants below are skipped -- they would have nothing to bind."
 fi
-for _pc_svc in "$CP_SVC" "$MC_SVC" "$GX_SVC"; do
-  retry gcloud run services add-iam-policy-binding "$_pc_svc" --region "$REGION" --project "$PROJECT" --member="serviceAccount:$PC_BUILD_SA" --role=roles/run.developer --condition=None >/dev/null || die "could not grant roles/run.developer on $_pc_svc to $PC_BUILD_SA"
-done
-echo "  $PC_BUILD_SA -> roles/run.developer on $CP_SVC, $MC_SVC and $GX_SVC ONLY"
-# Without this a deploy fails with a permission error naming the RUNTIME account, which reads
-# like a defect in the runtime account rather than a missing grant on the builder.
-for _pc_rsa in "$CP_SA" "$GX_SA"; do
-  retry gcloud iam service-accounts add-iam-policy-binding "$_pc_rsa" --project "$PROJECT" --member="serviceAccount:$PC_BUILD_SA" --role=roles/iam.serviceAccountUser --condition=None >/dev/null || die "could not grant roles/iam.serviceAccountUser on $_pc_rsa to $PC_BUILD_SA"
-done
-echo "  $PC_BUILD_SA -> roles/iam.serviceAccountUser on $CP_SA and $GX_SA ONLY"
-retry gcloud storage buckets add-iam-policy-binding "gs://$PC_STAGE_BUCKET" --project "$PROJECT" --member="serviceAccount:$PC_BUILD_SA" --role=roles/storage.objectViewer --condition=None >/dev/null || die "could not grant the CI build identity read on gs://$PC_STAGE_BUCKET"
-echo "  $PC_BUILD_SA -> roles/storage.objectViewer on gs://$PC_STAGE_BUCKET ONLY"
+if [ "$PC_CI_SA_OK" = 1 ]; then
+  _pc_ci_g=0
+  for _pc_svc in "$CP_SVC" "$MC_SVC" "$GX_SVC"; do
+    retry gcloud run services add-iam-policy-binding "$_pc_svc" --region "$REGION" --project "$PROJECT" --member="serviceAccount:$PC_BUILD_SA" --role=roles/run.developer --condition=None >/dev/null 2>&1 \
+      || { echo "  note: could not grant roles/run.developer on $_pc_svc to $PC_BUILD_SA"; _pc_ci_g=$((_pc_ci_g + 1)); }
+  done
+  PC_CI_RC=$((PC_CI_RC + _pc_ci_g))
+  [ "$_pc_ci_g" -ne 0 ] || echo "  $PC_BUILD_SA -> roles/run.developer on $CP_SVC, $MC_SVC and $GX_SVC ONLY"
+  # Without this a deploy fails with a permission error naming the RUNTIME account, which reads
+  # like a defect in the runtime account rather than a missing grant on the builder.
+  _pc_ci_g=0
+  for _pc_rsa in "$CP_SA" "$GX_SA"; do
+    retry gcloud iam service-accounts add-iam-policy-binding "$_pc_rsa" --project "$PROJECT" --member="serviceAccount:$PC_BUILD_SA" --role=roles/iam.serviceAccountUser --condition=None >/dev/null 2>&1 \
+      || { echo "  note: could not grant roles/iam.serviceAccountUser on $_pc_rsa to $PC_BUILD_SA"; _pc_ci_g=$((_pc_ci_g + 1)); }
+  done
+  PC_CI_RC=$((PC_CI_RC + _pc_ci_g))
+  [ "$_pc_ci_g" -ne 0 ] || echo "  $PC_BUILD_SA -> roles/iam.serviceAccountUser on $CP_SA and $GX_SA ONLY"
+  if retry gcloud storage buckets add-iam-policy-binding "gs://$PC_STAGE_BUCKET" --project "$PROJECT" --member="serviceAccount:$PC_BUILD_SA" --role=roles/storage.objectViewer --condition=None >/dev/null 2>&1; then
+    echo "  $PC_BUILD_SA -> roles/storage.objectViewer on gs://$PC_STAGE_BUCKET ONLY"
+  else
+    echo "  note: could not grant the CI build identity read on gs://$PC_STAGE_BUCKET"
+    PC_CI_RC=$((PC_CI_RC + 1))
+  fi
+fi
 # THE TRIGGER IS NOT CREATED HERE AND THIS SAYS SO RATHER THAN LEAVING YOU TO FIND OUT.
 # A Cloud Build trigger builds a SOURCE ARCHIVE. The notice this lane publishes carries no
 # archive, for the reason recorded at 5c/10, and this tree ships no producer that makes one.
@@ -5264,6 +5546,15 @@ echo "  In an inline build config a substitution is written one dollar and a she
 echo "  or command substitution is written TWO. Backwards costs a build with unbound variable."
 echo "  Leave roles/cloudbuild.builds.builder OFF the project. It is not needed and it is"
 echo "  what lets a build in one lane deploy the other one."
+
+if [ "$PC_CI_RC" -ne 0 ]; then
+  echo
+  echo "  CI BUILD IDENTITY NOT FULLY PROVISIONED -- $PC_CI_RC step(s) did not land, each named"
+  echo "  above. THE INSTALL IS NOT FAILED BY THIS. Nothing deployed by this run uses this"
+  echo "  identity, no trigger is created here, and every command in this step is"
+  echo "  create-if-absent: re-run this installer, or make the named binding(s) by hand,"
+  echo "  before you point a pipeline at $PC_BUILD_SA."
+fi
 
 say "8d/10 artifact retention -- declarative, continuous, and it cannot delete yet"
 # [SEC-RETENTION-V1] WHY THIS STEP EXISTS AND WHY IT INSTALLS SOMETHING THAT CANNOT DELETE.
@@ -5355,13 +5646,17 @@ say "8d/10 artifact retention -- declarative, continuous, and it cannot delete y
 # is the same separate, deliberate act it always was, gated on the same referenced-digest
 # preflight, and this installer performs it on neither.
 #
-# SETTING PC_AR_REPO2 EMPTY DROPS IT FROM THE LIST, for an adopter who has no such
-# repository. That is a clean opt-out and not a silent one: the loop below prints the name
-# and package list of every repository it touches, before it touches it. Note the default
-# below is written ${PC_AR_REPO2-fleet} and NOT ${PC_AR_REPO2:-fleet}, unlike every other
-# default in this step. With the colon an explicit PC_AR_REPO2= would be treated as UNSET
-# and silently fall back to the default -- i.e. the documented opt-out would not opt out,
-# which is the exact class of quietly-ignored setting this file refuses everywhere else.
+# PC_AR_REPO2 DEFAULTS EMPTY, AND THAT IS A CORRECTION. It used to default to `fleet`, which
+# is THIS DEVELOPER'S OWN Artifact Registry repository and exists in no adopter's project. On a
+# brand-new project the loop below therefore went looking for it and printed a five-line
+# failure block in the middle of a completely healthy install -- an error message about a
+# resource the operator has never heard of and does not want. Empty means "this tree pushes to
+# exactly one repository here", which is the truth of a fresh install. An adopter who really
+# does maintain a second pushed repository names it: PC_AR_REPO2=<repo> ./install.sh.
+# The default is still written ${PC_AR_REPO2-} rather than ${PC_AR_REPO2:-}, unlike every
+# other default in this step, and the distinction is kept deliberately: with the colon an
+# explicit PC_AR_REPO2= would be treated as UNSET, so the documented opt-out would stop
+# opting out the day somebody gives this a non-empty default again.
 #
 # AND THE POLICY SET IS MERGED, NOT OVERWRITTEN. set-cleanup-policies replaces the whole set
 # on the repository. In a shared repository a second lane installing after the first would
@@ -5373,13 +5668,23 @@ PC_AR_REPO=cloud-run-source-deploy
 # is the name Cloud Run itself picks for `run deploy --source`, so it is a fact about the
 # platform, while the pushed repository's name and package list are THIS tree's choices and
 # an adopter's will differ.
-PC_AR_REPO2="${PC_AR_REPO2-fleet}"
+PC_AR_REPO2="${PC_AR_REPO2-}"
 PC_AR_REPO2_PKGS="${PC_AR_REPO2_PKGS:-control-plane}"
 PC_KEEP_COUNT="${PC_KEEP_COUNT:-50}"
 PC_UNTAGGED_DAYS="${PC_UNTAGGED_DAYS:-90}"
 PC_STAGE_AGE_DAYS="${PC_STAGE_AGE_DAYS:-30}"
 PC_RET_DIR="$HERE/.retention"
-mkdir -p "$PC_RET_DIR" || die "could not create $PC_RET_DIR"
+# [SEC-OPTIONAL-NOT-FATAL-V11] SAME DOCTRINE AS 8c/10 AND 9/10: retention is a COST CONTROL
+# that runs after 8b/10 proved the system answers, so nothing in it may exit the run. A scratch
+# directory that cannot be made means no policy document can be composed here -- that is the
+# whole of the damage, it is stated, and the run goes on to print the URLs.
+PC_RET_SKIP=0
+mkdir -p "$PC_RET_DIR" 2>/dev/null || {
+  PC_RET_SKIP=1
+  echo "  note: could not create $PC_RET_DIR, so no cleanup policy can be composed here."
+  echo "        NOTHING was written to any repository or bucket. THE INSTALL IS NOT FAILED BY"
+  echo "        THIS -- images simply keep accumulating until this step runs on a later re-run."
+}
 PC_CB_BUCKET="${PROJECT}_cloudbuild"
 # THE GUARD THAT MATTERS MORE THAN THE POLICY. The data lake holds agent memory and the wiki;
 # the source bucket IS the git object store and holds your whole history. An age rule on either of
@@ -5387,9 +5692,21 @@ PC_CB_BUCKET="${PROJECT}_cloudbuild"
 # so a future edit that points the loop at the wrong variable stops the install instead.
 for _pc_lb in "$PC_CB_BUCKET" "$PC_STAGE_BUCKET"; do
   for _pc_nb in "$PC_LAKE_BUCKET" "$PC_SOURCE_BUCKET"; do
-    if [ "$_pc_lb" = "$_pc_nb" ]; then die "REFUSING: the lifecycle target gs://$_pc_lb is a DATA bucket, not a staging bucket. No age rule is going anywhere near the data lake or the git object store."; fi
+    if [ "$_pc_lb" = "$_pc_nb" ]; then
+      # THIS REFUSAL STILL REFUSES -- it just no longer takes the install down with it. It can
+      # only fire on a BUG IN THIS SCRIPT (a future edit pointing the loop at the wrong
+      # variable), never on anything the operator did, and the correct response to that is to
+      # write nothing, say so at maximum volume, and let the run finish printing the URLs of
+      # the system 8b/10 already proved works. Setting the skip flag stops every write below.
+      PC_RET_SKIP=1
+      echo "  REFUSING: the lifecycle target gs://$_pc_lb is a DATA bucket, not a staging"
+      echo "  bucket. No age rule is going anywhere near the data lake or the git object store,"
+      echo "  so THIS STEP INSTALLS NOTHING on this run. That is a defect in install.sh and not"
+      echo "  in your project -- report it. Nothing else about this install is affected."
+    fi
   done
 done
+if [ "$PC_RET_SKIP" = 0 ]; then
 echo "  never-touch: gs://$PC_LAKE_BUCKET and gs://$PC_SOURCE_BUCKET"
 # ONE LIST, one entry per repository, written "<repo>=<comma-separated package prefixes>".
 # Neither field can contain a space, so the unquoted split in the loop below is safe and no
@@ -5483,6 +5800,7 @@ echo "  - images in a repository the list above did not name. Both of the ones t
 echo "    pushes to are covered; a third that somebody adds later is not, until PC_AR_REPO2"
 echo "    or that list names it."
 echo "  - the data lake and the git object store, deliberately and permanently."
+fi
 
 # [SEC-UNATTENDED-V90] STEP 9/10 "REGISTER YOUR PASSKEY" IS GONE, AND SO IS THE REHEARSAL
 # BOUNDARY THAT EXISTED ONLY TO STOP ABOVE IT. This installer ships PC_REQUIRE_PASSKEY=0, and
@@ -5494,201 +5812,6 @@ echo "  - the data lake and the git object store, deliberately and permanently."
 # wants that posture. WA_SESSION_SECRET is still minted at 4/10 for exactly that reason.
 # --rehearse is still ACCEPTED so existing harnesses keep working, but it no longer stops early:
 # there is no longer a human step for it to stop above.
-say "9/10 the workstation VM (built here, left STOPPED)"
-# [WS-INSTALL-VM-V1] IT CALLS workstation.sh RATHER THAN RE-INLINING IT. v9.0 took 2,377 lines
-# of workstation code OUT of this installer for good reasons that all still hold; putting them
-# back would undo that. The script ships in the same tarball, it already knows how to adopt an
-# existing box, and passing --project/--region means it never reaches its own prompt. One
-# behaviour, one place, and workstation.sh stays independently runnable.
-#
-# WHY THE VM IS STOPPED AT THE END AND NOT LEFT RUNNING. A running e2-standard-4 bills for
-# every hour. The reason to build it during the install is that the console's Start/Stop and
-# Remote Desktop controls are useless without a machine to point at -- not that anybody needs
-# it running the moment the installer exits. So it is created, provisioned, and stopped: the
-# buttons work, and the meter is not running.
-#
-# AN OPTIONAL COMPONENT MUST NOT BE ABLE TO FAIL THE RUN. Everything below is warn-and-continue
-# for the same reason 5d/10 was: by this point Firestore, three service accounts, every secret,
-# both Cloud Run URLs, the KMS keys and all three buckets exist. A VM that could not be built
-# is a missing convenience, not a failed install, and it says so rather than dying.
-if [ "$PC_NO_VM" = 1 ]; then
-  echo "  --no-vm: skipped. Nothing created and nothing billed."
-  echo "  The console's Start VM and Remote Desktop buttons stay disabled until one exists."
-  echo "  Build it later with:  ./workstation.sh --project $PROJECT --region $REGION"
-else
-  PC_WSI_NAME="paracoding-${PC_LP}${PC_TOK}workstation-linux"
-  if [ ! -f "$HERE/workstation.sh" ]; then
-    echo "  SKIPPED: workstation.sh is not beside this installer, so there is nothing to run."
-    echo "  The install is fine; the VM controls will stay disabled until you build one."
-  else
-    echo "  building $PC_WSI_NAME via workstation.sh -- this takes a few minutes"
-    PC_WSI_RC=0
-    bash "$HERE/workstation.sh" --project "$PROJECT" --region "$REGION" || PC_WSI_RC=$?
-    PC_WSI_ZONE=$(gcloud compute instances list --project "$PROJECT" \
-      --filter="name=($PC_WSI_NAME)" --format='value(zone)' 2>/dev/null | sed -n '1p')
-    if [ "$PC_WSI_RC" != 0 ] || [ -z "$PC_WSI_ZONE" ]; then
-      echo "  THE WORKSTATION WAS NOT BUILT (workstation.sh exit $PC_WSI_RC). THE INSTALL IS NOT"
-      echo "  FAILED BY THIS and nothing else depends on it. Re-run when you want one:"
-      echo "      ./workstation.sh --project $PROJECT --region $REGION"
-    else
-      echo "  built: $PC_WSI_NAME in $PC_WSI_ZONE"
-      # THE CONSOLE CANNOT POWER A MACHINE IT HAS NO ROLE ON, and this is the grant that was
-      # missing until now: the control-plane identity carries no compute role at project level,
-      # so /api/vm/start answered a refusal and the console showed a Start button that could
-      # not work. The grant is INSTANCE-SCOPED and custom -- start/stop/get on ONE VM -- rather
-      # than roles/compute.instanceAdmin.v1 at project level, which would be power over every
-      # instance in the project to serve two buttons. Anyone auditing the project policy will
-      # therefore see no compute role on this identity and must read the INSTANCE policy; that
-      # is deliberate, and it is written here so the next reader does not call it an omission.
-      # A CUSTOM ROLE ID IS [a-zA-Z0-9_.] ONLY -- NO DASHES -- and both PC_LP and PC_TOK carry
-      # a trailing dash by construction. Composing the id from them raw produces a name gcloud
-      # refuses, so every non-alphanumeric is stripped here. Empty is fine: an untokenized,
-      # unlaned install just gets pcVmPower, which is what a single install has always been.
-      PC_VMROLE="pcVmPower$(printf '%s%s' "$PC_LP" "$PC_TOK" | tr -cd '"'"'[:alnum:]'"'"')"
-      if ! gcloud iam roles describe "$PC_VMROLE" --project "$PROJECT" >/dev/null 2>&1; then
-        retry gcloud iam roles create "$PC_VMROLE" --project "$PROJECT" \
-          --title="Paracoding workstation power" \
-          --description="Start, stop and read ONE workstation instance. Bound on the instance, not the project." \
-          --permissions=compute.instances.start,compute.instances.stop,compute.instances.get,compute.instances.list \
-          --stage=GA >/dev/null 2>&1 || echo "  note: could not create the custom role $PC_VMROLE"
-      fi
-      retry gcloud compute instances add-iam-policy-binding "$PC_WSI_NAME" \
-        --zone "$PC_WSI_ZONE" --project "$PROJECT" \
-        --member="serviceAccount:$CP_SA" --role="projects/$PROJECT/roles/$PC_VMROLE" \
-        >/dev/null 2>&1 \
-        && echo "  $CP_SA -> start/stop on $PC_WSI_NAME ONLY (instance-scoped, custom role)" \
-        || echo "  note: the VM power binding did not land; Start/Stop will refuse until it does"
-      # WS_VM AND WS_ZONE ARE THE PAIR THAT TURNS THE BUTTONS ON, and until this release the
-      # installer created a machine and then only PRINTED the commands that would set them --
-      # so /api/vm/status answered 503 on every poll and the console showed a hardcoded red
-      # light it had never measured. Set on BOTH surfaces: the console serves the buttons, and
-      # the MCP service is where the vm_* tools register.
-      for _pc_vsvc in "$CP_SVC" "$MC_SVC"; do
-        retry gcloud run services update "$_pc_vsvc" --region "$REGION" --project "$PROJECT" \
-          --update-env-vars "WS_VM=$PC_WSI_NAME,WS_ZONE=$PC_WSI_ZONE" >/dev/null 2>&1 \
-          || echo "  note: could not set WS_VM/WS_ZONE on $_pc_vsvc"
-      done
-      echo "  WS_VM/WS_ZONE set on $CP_SVC and $MC_SVC -- the vm_* tools and the console"
-      echo "  Start/Stop and Remote Desktop buttons are live."
-      # ================= [SEC-CDP-NIC0-GATED-V1] the browser tools, wired =================
-      # THE BRIDGE BINDS LOOPBACK UNTIL THIS BLOCK PROVES IT DOES NOT HAVE TO. cdp-bridge.py
-      # ships bound to 127.0.0.1 and says why: nic0 is only safe where a rule SUBTRACTS the
-      # default network's own default-allow-internal (priority 65534, tcp 0-65535, source
-      # 10.128.0.0/9, no target tags), and an ALLOW cannot subtract on GCP -- only a
-      # higher-priority DENY can. Without that, nic0 means every VM in the project may open
-      # the bridge. So the pair is created here, READ BACK, and only then is the instance
-      # told it may bind nic0.
-      #
-      #   DENY  tcp:8025  priority 900  target-tag <host>   source 0.0.0.0/0
-      #   ALLOW tcp:8025  priority 800  target-tag <host>   source-tag <client>
-      #
-      # Lower number wins, so the ALLOW is the hole and the DENY is everything else. The
-      # client tag rides on the MCP service's Direct VPC egress (--network-tags), which is
-      # what lets a firewall rule name Cloud Run traffic at all.
-      #
-      # DIRECT VPC EGRESS, NOT A SERVERLESS VPC ACCESS CONNECTOR. The connector bills for its
-      # own instances; Direct VPC egress does not, and the operator asked for the free path.
-      PC_CDP_OK=0
-      # SAME TRAP AS WS_SA, SAME FIX: PC_WS_NETTAG is composed inside WS_LIB, which lives in
-      # workstation.sh and not here. Reading it would be unbound under `set -u`. Composed from
-      # the same parts, through the same tr, so the two spellings cannot drift.
-      PC_CDP_TAG_H=$(printf '%s' "pc-${PC_LP}${PC_TOK}cdp-host" | tr -cd '[:alnum:]-')
-      PC_CDP_TAG_C=$(printf '%s' "pc-${PC_LP}${PC_TOK}cdp-client" | tr -cd '[:alnum:]-')
-      PC_CDP_SEC="pc-${PC_LP}${PC_TOK}cdp-token"
-      PC_CDP_FW_D="pc-${PC_LP}${PC_TOK}cdp-deny"
-      PC_CDP_FW_A="pc-${PC_LP}${PC_TOK}cdp-allow"
-      # THE TOKEN IS MINTED HERE AND LIVES IN ONE SECRET. Not metadata -- compute.instances.get
-      # returns metadata in full to any project viewer -- and not a value pasted by hand. Both
-      # ends read the same secret under its own IAM: the VM may READ it, the two Cloud Run
-      # services may READ it, and nothing else is granted anything on it.
-      if ! gcloud secrets describe "$PC_CDP_SEC" --project "$PROJECT" >/dev/null 2>&1; then
-        retry gcloud secrets create "$PC_CDP_SEC" --replication-policy=automatic \
-          --project "$PROJECT" >/dev/null 2>&1 || true
-        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' \
-          | gcloud secrets versions add "$PC_CDP_SEC" --data-file=- --project "$PROJECT" \
-            >/dev/null 2>&1 || true
-      fi
-      # THE WORKSTATION SA IS RECOMPOSED HERE, NOT INHERITED. WS_SA is declared inside WS_LIB,
-      # which this installer does NOT carry -- v9.0 moved that library into workstation.sh
-      # alone. Referencing it here would be an unbound variable under `set -u`, which aborts
-      # the run; the name is composed from the same three parts workstation.sh uses. There is
-      # no MC_SA: both Cloud Run surfaces are one image running as $CP_SA.
-      PC_CDP_WSSA="pc-${PC_LP}${PC_TOK}workstation@${PROJECT}.iam.gserviceaccount.com"
-      for _pc_cdpsa in "$PC_CDP_WSSA" "$CP_SA"; do
-        [ -n "$_pc_cdpsa" ] || continue
-        retry gcloud secrets add-iam-policy-binding "$PC_CDP_SEC" --project "$PROJECT" \
-          --member="serviceAccount:$_pc_cdpsa" --role=roles/secretmanager.secretAccessor \
-          --condition=None >/dev/null 2>&1 || true
-      done
-      if ! gcloud compute firewall-rules describe "$PC_CDP_FW_D" --project "$PROJECT" >/dev/null 2>&1; then
-        retry gcloud compute firewall-rules create "$PC_CDP_FW_D" --project "$PROJECT" \
-          --network default --direction INGRESS --priority 900 --action DENY \
-          --rules tcp:8025 --source-ranges 0.0.0.0/0 --target-tags "$PC_CDP_TAG_H" \
-          --description "Subtracts default-allow-internal for the CDP bridge. Everything is refused except the ALLOW at 800." \
-          >/dev/null 2>&1 || true
-      fi
-      if ! gcloud compute firewall-rules describe "$PC_CDP_FW_A" --project "$PROJECT" >/dev/null 2>&1; then
-        retry gcloud compute firewall-rules create "$PC_CDP_FW_A" --project "$PROJECT" \
-          --network default --direction INGRESS --priority 800 --action ALLOW \
-          --rules tcp:8025 --source-tags "$PC_CDP_TAG_C" --target-tags "$PC_CDP_TAG_H" \
-          --description "The only hole in the CDP DENY: the MCP service's Direct VPC egress, by network tag." \
-          >/dev/null 2>&1 || true
-      fi
-      # READ BOTH BACK. This is the measurement the bridge's bind decision rests on, so it is
-      # a read of what EXISTS rather than the exit code of what was attempted -- a create that
-      # raced another run, or was refused, must not be reported as a rule that is protecting
-      # anything.
-      if gcloud compute firewall-rules describe "$PC_CDP_FW_D" --project "$PROJECT" >/dev/null 2>&1 \
-         && gcloud compute firewall-rules describe "$PC_CDP_FW_A" --project "$PROJECT" >/dev/null 2>&1; then
-        PC_CDP_OK=1
-      fi
-      if [ "$PC_CDP_OK" = 1 ]; then
-        retry gcloud compute instances add-metadata "$PC_WSI_NAME" --zone "$PC_WSI_ZONE" \
-          --project "$PROJECT" \
-          --metadata "pc-cdp-bind=nic0,pc-cdp-secret=$PC_CDP_SEC" >/dev/null 2>&1 || PC_CDP_OK=0
-      fi
-      if [ "$PC_CDP_OK" = 1 ]; then
-        # THE MCP SERVICE ONLY. The browser tools register on the MCP surface; the console has
-        # no use for VPC egress and giving it a path into the subnet would be reach nothing
-        # asked for.
-        retry gcloud run services update "$MC_SVC" --region "$REGION" --project "$PROJECT" \
-          --network default --subnet default --vpc-egress private-ranges-only \
-          --network-tags "$PC_CDP_TAG_C" \
-          --update-env-vars "WS_CDP_PORT=8025" \
-          --update-secrets "CDP_TOKEN=$PC_CDP_SEC:latest" >/dev/null 2>&1 || PC_CDP_OK=0
-      fi
-      if [ "$PC_CDP_OK" = 1 ]; then
-        echo "  BROWSER TOOLS WIRED: browser_tabs, browser_open and browser_navigate register"
-        echo "  on $MC_SVC. The bridge binds nic0 behind DENY $PC_CDP_FW_D (900) with one hole,"
-        echo "  ALLOW $PC_CDP_FW_A (800), whose source is this service's egress tag. The token"
-        echo "  is in Secret Manager as $PC_CDP_SEC and is not in instance metadata."
-      else
-        echo "  BROWSER TOOLS NOT WIRED, and they are WITHHELD rather than registered broken."
-        echo "  One of the firewall pair, the metadata write or the service update did not"
-        echo "  land. WS_CDP_PORT is unset, so index.ts does not register the three tools --"
-        echo "  which is the designed state, not a failure of this install. The bridge stays"
-        echo "  on loopback and is reachable over the IAP tunnel exactly as before."
-      fi
-      # ================= end browser tools =================
-      # STOP IT. Read the state back rather than trusting the stop command: an instance that
-      # is still RUNNING because the call was refused is the one outcome that costs money
-      # quietly, so it is measured and said either way.
-      gcloud compute instances stop "$PC_WSI_NAME" --zone "$PC_WSI_ZONE" --project "$PROJECT" \
-        --quiet >/dev/null 2>&1 || true
-      PC_WSI_STATE=$(gcloud compute instances describe "$PC_WSI_NAME" --zone "$PC_WSI_ZONE" \
-        --project "$PROJECT" --format='value(status)' 2>/dev/null | sed -n '1p')
-      case "$PC_WSI_STATE" in
-        TERMINATED|STOPPED|SUSPENDED)
-          echo "  STOPPED ($PC_WSI_STATE). It bills only for its boot disk until you start it." ;;
-        STOPPING)
-          echo "  STOPPING. It will settle in a minute; nothing else waits on it." ;;
-        *)
-          echo "  !! STILL $PC_WSI_STATE -- the stop did not take, and a running e2-standard-4"
-          echo "  !! bills by the hour. Stop it with:"
-          echo "  !!   gcloud compute instances stop $PC_WSI_NAME --zone $PC_WSI_ZONE --project $PROJECT" ;;
-      esac
-    fi
-  fi
 fi
 
 say "10/10 self-test"
@@ -5903,10 +6026,15 @@ cat <<EOF
   MCP connector is account-level, so without a key every chat on your account resolves
   to the same identity.
 
-  So your next step is:  open ${CP_URL}/pastes , mint a key for a strain, and paste the
-  block it gives you into a new chat. The key is shown ONCE -- only its hash is stored.
-  Keys expire after 7 days (PC_KEY_TTL_DAYS); when one lapses the chat is told so and
-  you mint a fresh paste.
+  So your next step is:  open ${CP_URL}/harness , sign in with $ACCT, and click the
+  Session pastes control in the harness header. Mint a key for a strain and paste the block
+  it gives you into a new chat. The key is shown ONCE -- only its hash is stored. Keys
+  expire after 7 days (PC_KEY_TTL_DAYS); when one lapses the chat is told so and you mint a
+  fresh paste.
+  (There is no /pastes page any more, and this line used to send you to one. /jobs and
+  /pastes both served the same 142KB gate document this release deletes, so both routes were
+  removed rather than moved. The minter itself did not go anywhere: it lives on the harness,
+  on the same /api/sessions/roles and /api/sessions/mint it always used.)
 
   To use this from an agent client that is not this console, point it at the Agent Plugins
   package written beside the release just now:
@@ -5921,7 +6049,7 @@ cat <<EOF
   Docs button serves what you wrote. A re-run keeps your edits.
 
   The data lake bucket IS provisioned now (5c/10) and the control plane was verified to be
-  serving its name off the running revision. Three things are reported at the step that
+  serving its name off the running revision. Two things are reported at the step that
   would have made them rather than restated here:
 
     the PCV1 vault    5e/10 created keyring ${PC_VKR} and key ${PC_VKEY}, and MINTED
@@ -5929,15 +6057,6 @@ cat <<EOF
                       step said which way it went. Where master.kem was NOT minted the lake is
                       FAIL-CLOSED, not plaintext: every write outside the five cleartext
                       prefixes throws, and 5e/10 printed what is missing and how to finish it.
-    the browser tools 5d/10 now installs the CDP bridge on the workstation, on LOOPBACK
-                      only: 127.0.0.1:8025 in front of a Chrome debugging port on
-                      127.0.0.1:9222, token-gated, eight CDP methods, and an origin
-                      allowlist that starts EMPTY. Nothing is published on any network and
-                      no firewall rule was opened for either port -- you reach it over the
-                      IAP tunnel, and 5d/10 printed the command. The MCP browser tools stay
-                      WITHHELD, and that is not an oversight: they address the box by its
-                      internal IP, Cloud Run has no route to a 10.x address here, and
-                      registering them would give you three tools that fail on first call.
 
     the 7 git tools   git_read, git_list, git_log, git_diff, git_propose, git_propose_patch
                       and git_push ARE REGISTERED on this install. 5c/10 made the object
@@ -5957,7 +6076,6 @@ cat <<EOF
                       what you have committed since: the seed asks git_list first and
                       writes nothing if the branch already has a tree.
 
-  The VM tools depend on the answer you gave at 5d/10; that step said which way it went.
 EOF
 else
   echo "  $FAIL CHECK(S) FAILED. The install is NOT good. Nothing above lies to you about that."

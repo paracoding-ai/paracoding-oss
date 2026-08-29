@@ -41,7 +41,7 @@ control-plane/src/harness.html    the main console UI
 control-plane/src/locked.html     the 401 page, served in place at any human URL
 control-plane/Dockerfile          the build
 gate-exec/exec_server.py          the executor
-install.sh  workstation.sh        provisioning
+install.sh                        provisioning
 README.md  SECURITY.md  NOTICE    the documents
 ```
 
