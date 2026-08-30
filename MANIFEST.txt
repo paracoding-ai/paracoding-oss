@@ -1,19 +1,19 @@
-# release manifest v12.1
-# generated from source commit b116a92688f7200838b2926ec4f4f1c4b99f445d
+# release manifest v12.2
+# generated from source commit 58d5e53f3755014233c6c4312d1dffbbc8c714ff
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 7e565b7234bc4229     17098  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 1b9c4ef446e34334      4527  NOTICE
-1bdcec8195ea4cd7     21985  README.md
-72aecd5f6193c0ff     12021  SECURITY.md
-0a454dd0dad4711e    409125  install.sh
+aa9d264e936dfac2     21985  README.md
+96b7096367510172     12021  SECURITY.md
+c9357986a0931cd7    409125  install.sh
 9f29b658758b85e8     45566  uninstall.sh
-792460b160b9d6ad     14689  upgrade.sh
+25d43d0e04efdeec     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-199b336466c7b3f1       639  agent-plugin/plugin.json
+b63f2b366321918e       639  agent-plugin/plugin.json
 b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
@@ -67,8 +67,8 @@ c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 35f3d015dcb55c41     71006  control-plane/src/wiki-assets/05-deploy.png
 62536782273b880a     23472  devgate/RUNBOOK.md
 da0f1b1bc01c4aa8    160454  devgate/smoke.py
-708208cf7495bf6a      9669  fleet/BOOTSTRAP.md
-bf3675082aef99fc      5430  fleet/apis.txt
+42d0543fa6d16d01     11864  fleet/BOOTSTRAP.md
+d9353e63ab2a1e0e      6649  fleet/apis.txt
 5337e239d6214e18      4486  fleet/cowork-prompts.md
 1e5354a315f022bf      3477  fleet/strains/fleet-advisor.md
 c6196041bd1b1197      3761  fleet/strains/fleet-gcp.md
@@ -87,7 +87,7 @@ e894207ba55ef7ad      5660  pipeline/check-no-embedded-assets.py
 566534d17f3caccd     51499  pipeline/cloudbuild-dev.yaml
 8b0bae1904d2b72e     49882  pipeline/cloudbuild-prod.yaml
 42f76a3cde69c2b4     33397  pipeline/cloudbuild-release-check.yaml
-ef29686da8c74944    173390  pipeline/collect-evidence.py
+87f27e4464aa9546    173331  pipeline/collect-evidence.py
 0b3c129d1a72f624     31477  pipeline/promote-gate.sh
 88c59067a7c7a72f     12105  pipeline/publish-build-request.sh
 deaedc0365f054b4     32484  pipeline/secret-destroy-preflight.py

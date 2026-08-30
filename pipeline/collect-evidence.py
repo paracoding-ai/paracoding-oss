@@ -97,7 +97,6 @@ Every key below is read by a named assertion. References are to devgate/smoke.py
 WHAT IS DELIBERATELY NOT FAKED. Where smoke.py lists something as UNEXERCISABLE
 this file records it as ABSENT rather than inventing a value:
   F5.APPROVAL_ROUNDTRIP      no signature is produced. Nothing is written.
-  F2.BROWSER_TOOLS           no CDP endpoint is contacted.
   F1.MCP_WRITE_FILE_HANDLER  mcp_roundtrip is null unless a session key is
                              actually obtained; it is NEVER synthesised.
 A null is an honest absence and judge() renders it NOT-EXERCISED or FAIL. A

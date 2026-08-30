@@ -29,7 +29,19 @@ firestore.googleapis.com            # sessions, memory graph, work-item bus, jou
 secretmanager.googleapis.com        # api keys, github tokens, approval material
 iam.googleapis.com                  # service accounts and the custom audit role
 logging.googleapis.com              # job logs -- the gate UI is not evidence, this is
-compute.googleapis.com              # the workstation VM and its network
+compute.googleapis.com              # NOT a VM. 12.x ships no workstation and still needs this,
+                                    # for three live reasons, none of them obvious:
+                                    #   1. Google creates <PROJNUM>-compute@developer.gserviceaccount.com
+                                    #      only once this API is on, and CLOUD BUILD RUNS AS THAT ACCOUNT.
+                                    #      install.sh waits up to two minutes for it and DIES if it never
+                                    #      appears, because `run deploy --source` cannot build without it.
+                                    #   2. the post-quantum TLS controls read and PATCH compute/v1
+                                    #      sslPolicies and aggregated targetHttpsProxies.
+                                    #   3. harGcpBlessedDirect blesses GETs under compute/v1 in this
+                                    #      project, so removing the API breaks blessed reads.
+                                    # The old comment here read 'the workstation VM and its network',
+                                    # which is exactly the sentence that would get this line deleted
+                                    # alongside the workstation -- and take the installer with it.
 cloudresourcemanager.googleapis.com # project and IAM policy; also the org/project lookup
 serviceusage.googleapis.com         # chicken-and-egg: enabling anything at all needs this
 cloudkms.googleapis.com             # signs privileged jobs

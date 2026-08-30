@@ -1,4 +1,4 @@
-# Paracoding — v12.1
+# Paracoding — v12.2
 
 Paracoding is an agent platform that installs into **your own** Google Cloud project in one
 command. Agents propose. You commit. Then it builds the next version of itself.

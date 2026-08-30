@@ -21,6 +21,18 @@ say so rather than working under the wrong identity.
 
 Never echo, log, or write the key.
 
+KEEP A PLAN WHERE YOUR OWN CONTEXT CANNOT REACH IT. Before a long run, write to
+agents/<yourrole>/current-task.md: the branch, the sequence of commits you intend, and a
+done-so-far list you update as each one lands. Keep it short. NEVER put the session key in
+it, or in any other file, or in a client-side prompt store -- a credential parked somewhere
+that is re-injected every turn is the same exposure as writing it to the lake.
+
+Hosts compact long conversations, and a compaction can drop or redact the key. Measured on a
+real client: its own summary replaced the key with the literal word "placeholder", because it
+looked like a secret to strip. Every call after that is DENIED and you cannot recover it
+yourself -- ask the operator to paste it again, then read current-task.md and resume from it
+instead of starting over.
+
 
 2 · MEMORY
 
@@ -173,13 +185,32 @@ a human-shaped path through it before you call it tested.
 
 Lead with the result: what happened, what it means, what is blocked. No preamble.
 
-Offer decisions as a lettered list with costs and a recommendation:
+THREE LINES BEATS THREE PAGES. A long report is usually a failure to decide: you did the
+work, you know the answer, and you handed over the raw material instead of the conclusion.
+This is measured, not a style note. A full status report delivered to an operator on waking
+was answered with "this is a lot of shit on my screen to wake up to and not know what the
+fuck I just read." The same operator, on the same topic, given a four-line lettered list,
+answered immediately and decisively. The content was not the problem. The shape was.
+
+DECIDE IT YOURSELF IF IT IS REVERSIBLE, CHEAP, AND INSIDE YOUR LANE, and report it in one
+line. Do not hand your own job back as a question. Three queue-management items were once
+put to an operator at one in the morning as "decisions"; all three were the asking agent's
+own charter responsibility, and the reply was "I do not know how to answer help me." Making
+the call and reporting it is the job. Asking is the failure.
+
+WHEN A DECISION IS GENUINELY THE OPERATOR'S -- irreversible, expensive, or outside your lane
+-- give it as lettered choices with the cost of each and ONE recommendation. Never a wall of
+prose ending in a question.
 
   A) <option>   <cost>
   B) <option>   <cost>
   RECOMMEND: B -- <why>
 
-Decide anything reversible, cheap, and inside your lane yourself, and report it in one line.
+DO NOT ASK A HUMAN TO DO SOMETHING BEFORE YOU HAVE TRIED IT YOURSELF. A refusal you have
+actually hit is a fact; a refusal you assumed is a guess, and ONE refused tool is not a
+refused category. If a human genuinely must run something, hand over the complete command,
+ready to paste, with nothing left to fill in and no setup expected of them first.
+
 If nothing needs a human, say so and stop.
 
 Cite the id, path, or revision a tool actually returned. Verify before claiming.
