@@ -542,6 +542,26 @@ touched."
 # seconds instead, and names the fix rather than the symptom.
 command -v curl >/dev/null || die "curl not found. The 10/10 self-test is written in curl,
 so without it a good install would report itself as a broken one."
+# [SEC-SRCTREE-V120] THE INSTALLER IS NOT A ONE-FILE DOWNLOAD, AND 0/10 IS WHERE THAT IS SAID.
+# MEASURED 2026-08-29 on a from-zero rehearse in a fresh project: fetching ONLY install.sh from
+# the repository's raw URL -- which is what a raw link invites -- runs TWELVE steps green and
+# then dies at 6/10 with "could not find source [/workspace/control-plane]". By then the KMS
+# KEM key, three buckets, two service accounts, Firestore and a dozen IAM bindings all exist
+# and are billing, and the error names a path inside a build workspace rather than the cause.
+# HERE is dirname "$0", so the deploys at 6/10 and 8/10 read a tree that must already be beside
+# this file: nothing in this script fetches or unpacks one. Assert it in the first ten seconds,
+# with the other external assumptions, and refuse before anything exists.
+for _d in control-plane gate-exec; do
+  [ -f "$HERE/$_d/Dockerfile" ] || die "install.sh is not a standalone download: $HERE/$_d/Dockerfile is missing.
+This script DEPLOYS FROM SOURCE beside it -- 6/10 runs 'gcloud run deploy --source \$HERE/control-plane'
+and 8/10 does the same for gate-exec -- and it never fetches or unpacks a tree of its own.
+Downloading install.sh alone gets you twelve green steps and then a failure at 6/10, with a KMS
+key, three buckets, two service accounts and Firestore already created and billing.
+GET THE WHOLE RELEASE, then run it from inside the unpacked directory with the leading ./ :
+    curl -fsSLO https://github.com/paracoding-ai/paracoding-oss/archive/refs/heads/main.tar.gz
+    tar -xzf main.tar.gz && cd paracoding-oss-main && ./install.sh
+NOTHING HAS BEEN CREATED. This is step 0/10 and no resource, no API and no billing has been touched."
+done
 # [SEC-UNATTENDED-V90] THE INTERACTIVE-TERMINAL GUARD IS REMOVED. It read
 #   [ -t 0 ] || die "install.sh needs an interactive terminal. Step 9/10 stops to have you
 #   register a passkey and then waits on ENTER ..."
@@ -923,7 +943,7 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="034a591d9ab265b8098cb9a11af68dac803ca72b"
+PC_RELEASE="6bea7dc3588500c6db81ce06a113e9698fd6a586"
 PC_VERSION="12.0"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
@@ -4660,27 +4680,19 @@ UNEXERCISABLE = {
                      "reports it. The bucket and the grant are asserted instead.",
     "FN.STAGE_TOOLS": "stage_privileged_job and run_command each need a human passkey with "
                       "user presence. No approval is produced or verified here.",
-    "FN.BROWSER_TOOLS": "browser_open/navigate/tabs need a live CDP endpoint on a running box. "
-                        "9/10 now PROVISIONS one -- a token-gated DevTools bridge on the "
-                        "workstation's LOOPBACK address, in front of a Chrome whose debugging "
-                        "port is also loopback -- but it is deliberately not on any network and "
-                        "this installer opens no firewall rule for it, so the control plane "
-                        "cannot reach it and index.ts therefore withholds these three tools. "
-                        "Reachable over the IAP tunnel from the operator's own machine; 9/10 "
-                        "prints the command. Nothing here can drive it, so nothing here claims "
-                        "to have.",
 }
 
 KNOWN = ("whoami read_graph search_nodes open_nodes list_work_items read_journal "
          "list_pending_confirm read_file list_files read_history search_history get_time "
-         "read_job_log run_status vm_status list_my_messages check_answer browser_tabs "
+         "read_job_log run_status list_my_messages check_answer "
          "create_entities create_relations add_observations delete_entities "
          "delete_observations delete_relations append_journal post_work_item "
          "complete_work_item cancel_work_item log_history write_file put_file "
          "answer_message ask_agent refresh stage_privileged_job run_command "
-         "gcp_api run_roll vm_start vm_stop vm_resize browser_open "
-         "browser_navigate browser_eval").split()
-GIT_TOOLS = "git_read git_list git_log git_diff git_archive git_propose git_propose_patch git_push".split()
+         "gcp_api run_roll "
+         "gh_whoami gh_repos gh_read gh_list gh_log gh_diff gh_commit gh_branch "
+         "gh_fork gh_pr").split()
+GIT_TOOLS = "git_read git_list git_log git_grep git_diff git_archive git_propose git_propose_patch git_push".split()
 
 # collection-group, query-scope, ordered field list. ONE ROW PER pc_index() INVOCATION at
 # 2b/10, counted as invocations. The naive grep for the gcloud line reports 1, because the
@@ -4790,9 +4802,9 @@ def rpc(msg):
     return st, {"error": {"message": "no JSON-RPC frame in a " + str(st) + " response: " + b[:200]}}
 
 
-def call(name, args):
+def call(name, args, key=None):
     a = dict(args)
-    a["agent"] = KEY
+    a["agent"] = key or KEY
     msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": a}}
     st, f = rpc(msg)
     if "error" in f and "initializ" in json.dumps(f).lower():
@@ -4923,17 +4935,39 @@ if any(f[0] == "FAIL" and f[1] == "FN.MCP_REACHABLE" for f in FINDINGS):
         rec("NOT-EXERCISED", i, "EXERCISED", "the MCP surface is unreachable -- see FN.MCP_REACHABLE")
         UNEXERCISABLE[i] = "blocked by FN.MCP_REACHABLE, which is itself FAIL"
 else:
-    # A THROWAWAY IDENTITY, AND WHY IT IS SAFE. Two Firestore documents whose IDs are
-    # sha256 of a random secret, holding a 300-second exp. The secrets exist only in this
-    # process's memory, are never printed and never written to disk; both documents are
-    # deleted below. If this process is killed between the two, the records are inert the
-    # moment the exp passes -- oaBearerRole and pcSessionLookup BOTH fail closed on it.
+    # THROWAWAY IDENTITIES, AND WHY THEY ARE SAFE. Three Firestore documents whose IDs are
+    # sha256 of a random secret, holding a 900-second exp. The secrets exist only in this
+    # process's memory, are never printed and never written to disk; all three documents
+    # are deleted below. If this process is killed part way, the records are inert the
+    # moment the exp passes -- oaBearerRole and pcSessionLookup BOTH fail closed on them.
+    #
+    # [SEC-GITSEED-ROLE-V120] WHY THERE IS A SECOND SESSION KEY. TOK and KEY are bound to
+    # ROLE, which is fleet-onboarder -- deliberately, because FN.WHOAMI and FN.TOOL_CENSUS
+    # exist to measure what an UNBOUND OAuth connector actually sees, and that identity is
+    # fleet-onboarder holding tool_classes ['read'] since v10.5. FN.GIT_SEED then has to
+    # write 76 commits over the tool surface, and a read-only identity cannot: git_propose
+    # is class `write` and every part was refused, so every install since v10.5 came up
+    # with an unborn branch and no repository. Widening fleet-onboarder would reverse a
+    # real security fix, and a tc field on THIS key cannot help -- pcNarrowClasses only
+    # ever subtracts. So the seed gets its OWN credential, bound to a strain that holds
+    # write, and narrowed by tc to exactly read+write: no stage, no infra, nothing it does
+    # not need. fleet-advisor is named because it is a PUBLIC strain seeded by every
+    # install (_seed_want = ["fleet-onboarder"] + PC_PUBLIC_STRAINS); a role no install
+    # creates would resolve to nothing and fail exactly as loudly as the bug it replaces.
+    SEED_ROLE = "fleet-advisor"
+    SKEY = "pcs_" + secrets.token_hex(18)
     MINTED = (fsput("oauth_tokens", sha(TOK),
                     {"role": {"stringValue": ROLE}, "revoked": {"booleanValue": False},
                      "exp": {"integerValue": str(EXP)}})
               and fsput("session_keys", sha(KEY),
                         {"role": {"stringValue": ROLE}, "revoked": {"booleanValue": False},
                          "label": {"stringValue": "installer 8b/10 self-test"},
+                         "exp": {"integerValue": str(EXP)}})
+              and fsput("session_keys", sha(SKEY),
+                        {"role": {"stringValue": SEED_ROLE}, "revoked": {"booleanValue": False},
+                         "label": {"stringValue": "installer 8b/10 git seed"},
+                         "tc": {"arrayValue": {"values": [{"stringValue": "read"},
+                                                          {"stringValue": "write"}]}},
                          "exp": {"integerValue": str(EXP)}}))
 
 try:
@@ -5179,7 +5213,7 @@ try:
                                 _bb = open(_bpath, "rb").read()
                                 _breq = urllib.request.Request(
                                     MC + "/git/blob", data=_bb, method="POST")
-                                _breq.add_header("Authorization", "Bearer " + KEY)
+                                _breq.add_header("Authorization", "Bearer " + SKEY)
                                 _breq.add_header("Content-Type", "application/octet-stream")
                                 with urllib.request.urlopen(_breq, timeout=90) as _br:
                                     _bj = json.loads(_br.read().decode())
@@ -5207,13 +5241,13 @@ try:
                                      "would not build from a checkout: " + _berr)
                             break
                         st, f = call("git_propose", {"branch": "main", "files": _bents,
-                                                     "message": _smsg})
+                                                     "message": _smsg}, SKEY)
                     elif _s[0] == "propose":
                         st, f = call("git_propose", {"branch": "main", "files": _s[1],
-                                                     "message": _smsg})
+                                                     "message": _smsg}, SKEY)
                     else:
                         st, f = call("git_propose_patch", {"branch": "main", "patch": _s[2],
-                                                           "message": _smsg})
+                                                           "message": _smsg}, SKEY)
                     _sd = text_of(f)
                     try:
                         _sj = json.loads(_sd)
@@ -5225,7 +5259,7 @@ try:
                         break
                     st, f = call("git_push", {"branch": "main",
                                               "expected_oid": _sj.get("baseOid"),
-                                              "commit_oid": _sj.get("commitOid")})
+                                              "commit_oid": _sj.get("commitOid")}, SKEY)
                     _sd = text_of(f)
                     try:
                         _sk = json.loads(_sd)
@@ -5314,6 +5348,7 @@ finally:
     if MINTED:
         fsdel("oauth_tokens", sha(TOK))
         fsdel("session_keys", sha(KEY))
+        fsdel("session_keys", sha(SKEY))
 
 # [GCP-SELFTEST-TOKEN-EXPIRES-V71] REFRESH THE CREDENTIAL BEFORE THE LAST TWO CHECKS, because it
 # is now MINUTES OLD AND HAS BEEN OBSERVED TO DIE. PC_FUNC_AT is captured once in the shell before

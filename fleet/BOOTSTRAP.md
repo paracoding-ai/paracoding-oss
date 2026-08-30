@@ -120,13 +120,31 @@ one recursive listing, parsed once. Output longer than a screen goes to a file i
 print a summary.
 
 
-6 · BUILD AND DEPLOY
+6 · BUILD AND DEPLOY, AND THE ORDER IS NOT OPTIONAL
 
 Source in the repository, build reads the repository, deploy ships the build.
 
+THERE IS A DEV LANE AND YOU GO THROUGH IT. This install deploys a rehearsal copy of the
+control plane beside the live one; install.sh builds its identity at 8c/10 and 8d/10 unless
+you passed --no-devpipe. The order is: land the source, build ONE image, deploy that image
+to the DEV services and prove it there, and only then move the SAME IMAGE DIGEST to the live
+services. Promote a digest you have already run -- never a rebuild of the same commit. Two
+builds of one tree are two artifacts, and the one you tested is not the one you shipped.
+
 Deploy with --no-traffic and a tag, verify, then shift traffic. A revision at zero traffic
 has changed nothing for anyone. Read the revision carrying your tag out of the service's
-traffic status -- never out of the deploy command's own message.
+traffic status, filtering for percent greater than zero -- never out of the deploy command's
+own message, and never out of traffic[0]. That message reports the SERVICE's traffic state,
+so it says "is serving 100 percent of traffic" about a revision that received none of yours.
+
+TESTING THE INSTALLER IS PART OF SHIPPING IT, AND YOU CAN DO IT ALONE. install.sh REFUSES to
+run as a service account, so an agent cannot test it by accident. PC_REHEARSE=1, or the
+equivalent --rehearse flag, permits the service account and stops before 9/10; that is the
+only unattended path there is. NEITHER SPELLING APPEARS IN --help, which is why four
+releases shipped without anyone running it. Run it into a FRESH project, from the release tree as a
+stranger unpacks it, with the leading ./ -- not `bash install.sh`, which structurally cannot
+observe the executable bit. A release nobody has installed from zero is a release nobody has
+tested, and the failures live in the steps you skipped.
 
 Never restore an image or an artifact to change what is running. Configuration that exists
 only in a console does not exist.

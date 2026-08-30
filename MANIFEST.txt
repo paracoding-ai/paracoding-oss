@@ -1,5 +1,5 @@
 # release manifest v12.0
-# generated from source commit 034a591d9ab265b8098cb9a11af68dac803ca72b
+# generated from source commit 6bea7dc3588500c6db81ce06a113e9698fd6a586
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
@@ -8,9 +8,9 @@
 1b9c4ef446e34334      4527  NOTICE
 2b983b89117f5ab0     21985  README.md
 be74d291012bdd9e     12021  SECURITY.md
-803172f06c65cb5d    406066  install.sh
+691485a1b8be7f5f    408783  install.sh
 9f29b658758b85e8     45566  uninstall.sh
-b68c063cd450c679     14689  upgrade.sh
+66f1906e7053e373     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
 72236ff399c06e62       639  agent-plugin/plugin.json
@@ -67,7 +67,7 @@ c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 35f3d015dcb55c41     71006  control-plane/src/wiki-assets/05-deploy.png
 62536782273b880a     23472  devgate/RUNBOOK.md
 da0f1b1bc01c4aa8    160454  devgate/smoke.py
-0845c10daf7783fb      8180  fleet/BOOTSTRAP.md
+708208cf7495bf6a      9669  fleet/BOOTSTRAP.md
 bf3675082aef99fc      5430  fleet/apis.txt
 5337e239d6214e18      4486  fleet/cowork-prompts.md
 1e5354a315f022bf      3477  fleet/strains/fleet-advisor.md
