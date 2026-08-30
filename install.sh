@@ -943,8 +943,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="6bea7dc3588500c6db81ce06a113e9698fd6a586"
-PC_VERSION="12.0"
+PC_RELEASE="b116a92688f7200838b2926ec4f4f1c4b99f445d"
+PC_VERSION="12.1"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -5432,7 +5432,13 @@ elif st in (401, 403):
           "real tool surface; if it passed, the lake works and this line is about the installer.")
 else:
     rec("FAIL", "FN.LAKE_BUCKET", "ASSERTED", "gs://" + LAKE + " is not readable: " + str(st) + " " + b[:120])
-for i in ("FN.LAKE_WRITE", "FN.STAGE_TOOLS", "FN.BROWSER_TOOLS"):
+for i in ("FN.LAKE_WRITE", "FN.STAGE_TOOLS"):
+    if i not in UNEXERCISABLE:
+        rec("FAIL", i, "ASSERTED",
+            "named as unexercisable but UNEXERCISABLE carries no entry for it. The two lists "
+            "have drifted -- that is a generator bug, not something wrong with this install. "
+            "It is reported here rather than raised, so the checks after it still run.")
+        continue
     rec("NOT-EXERCISED", i, "ASSERTED", UNEXERCISABLE[i])
 
 fails = 0
