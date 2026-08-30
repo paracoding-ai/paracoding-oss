@@ -832,6 +832,13 @@ const PC_TOOL_CLASS: any = {
   gh_branch: 'write',
   gh_fork: 'write',
   gh_pr: 'write',
+  // [GH-RELEASE-V1] Both are 'write' and neither is 'infra'. They publish, which is a write to
+  // a repository this install already holds a credential for -- the same class gh_commit has,
+  // and the same blast radius. Leaving either UNCLASSIFIED is the TOOL-SURFACE-GITGREP defect
+  // verbatim: PC_TOOLS_ENFORCE=1 withholds an unclassified name from every role including the
+  // operator's, and the tool is then registered, invisible, and blamed on the wrong thing.
+  gh_tag: 'write',
+  gh_release: 'write',
   whoami: 'read',
   create_entities: 'write',
   create_relations: 'write',

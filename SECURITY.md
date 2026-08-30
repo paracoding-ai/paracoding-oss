@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v12.2**
+**Paracoding — v12.3**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim
@@ -135,10 +135,18 @@ There is no force push.
 
 ## Model access and billing
 
-`config/models.fleet_mode` is a three-position switch. `home` makes no model call of any kind.
-`dual` allows API-key transports. `work` is keyless Vertex only, billed to the project, and the
-keyed transport is **refused in code** so a stray key cannot start billing a card. An unset,
-unreadable or unrecognised value reads as `home`. The installer sets `work`.
+The connector makes no model call at all. Your MCP client is the model, and it authenticates
+to its own vendor with its own credential, which this system never sees.
+
+What `config/models.fleet_mode` governs is the console's own built-in chat, and nothing else.
+It is a three-position switch. `home` makes no model call of any kind. `dual` allows API-key
+transports. `work` is keyless Vertex only, billed to the project, and the keyed transport is
+**refused in code** so a stray key cannot start billing a card. An unset, unreadable or
+unrecognised value reads as `home`. The installer sets `work`.
+
+Earlier releases described this as gating "model buses". That word is retired and the thing
+it named is gone: 12.0 deleted every runner and the autonomous loop, so nothing dispatches
+work to a model on a timer. One switch, one consumer.
 
 Nothing in this release holds an API key, and none is needed to run it.
 

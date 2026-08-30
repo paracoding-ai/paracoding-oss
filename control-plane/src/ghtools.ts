@@ -38,10 +38,32 @@
 //    commit somebody else made. expected_head is checked as well, before anything is written,
 //    so a stale caller is refused before it has spent a single blob upload.
 //
-// WHAT THIS IS NOT. Issues, actions, releases, projects, gists and code search are out of
-// scope and should stay out. GitHub publishes its own MCP server covering all of that; if this
-// module grows to cover the whole API it becomes a worse copy of something GitHub maintains.
-// This is the git-shaped subset -- the part that matters for reading and changing code.
+// WHAT THIS IS NOT. Issues, actions, projects, gists and code search are out of scope and
+// should stay out. GitHub publishes its own MCP server covering all of that; if this module
+// grows to cover the whole API it becomes a worse copy of something GitHub maintains. This is
+// the git-shaped subset -- the part that matters for reading and changing code.
+//
+// [GH-RELEASE-V1] RELEASES WERE ON THAT LIST UNTIL 12.3 AND ARE NOW THE ONE EXCEPTION, WHICH
+// IS RECORDED HERE RATHER THAN LEFT AS A HEADER THAT CONTRADICTS THE CODE BELOW IT.
+//
+// gh_tag was never a crossing: refs/tags is the Git Data API, the exact sibling of gh_branch's
+// refs/heads, and its absence was a hole in the git-shaped subset rather than a boundary.
+//
+// gh_release IS a crossing and it is deliberate. The boundary exists to stop this becoming a
+// general GitHub client; publishing THIS product's own releases is the last step of a publish
+// pipeline that already lives here. WHAT IT COST TO NOT HAVE IT, measured 2026-08-30: the
+// published repository advertised v10.5 as its Latest release while main carried v12.2 --
+// three releases behind, across two version families, for eleven days. gh_commit could publish
+// the whole tree and could not name the version it had just published, so the one thing a
+// visitor reads first was the one thing this product could not keep true about itself. Every
+// tag before this was made by hand in a browser, which is also why the v10.5 tag is authored
+// with an operator's personal address while every gh_commit release is authored as the
+// project. A tool that cannot state its own version is not tidier for the omission.
+//
+// THE LINE THAT STAYS: this covers creating and reading THIS repository's releases, and
+// nothing else. No issues, no actions, no projects, no discussions, no assets beyond the
+// tarball GitHub generates for a tag. If a future change needs a second GitHub product API,
+// that is the point to reach for GitHub's own MCP server instead of extending this.
 
 type GhDeps = {
   secretGet: (name: string) => Promise<string | null>;
@@ -462,7 +484,111 @@ export function registerGithubTools(server: any, z: any, AG: any, agentId: strin
       return { ok: true, repo: R.full, number: pr.number, url: pr.html_url, state: pr.state, draft: !!pr.draft };
     }));
 
+  // ---------------------------------------------------------------- tags and releases
+
+  // [GH-TAG-NO-MOVE-V1] A tag REFUSES to move, and the reason is stronger than the one that
+  // makes gh_branch refuse. Moving a branch loses a commit; moving a tag changes what an
+  // already-published version NAMES, so a person who downloaded v1.2 yesterday and a person who
+  // downloads v1.2 tomorrow get different bytes under one name, with nothing anywhere recording
+  // that it happened. That is the exact failure RELEASING.md's "a cut that leaves your hands has
+  // spent its number" exists to prevent, and a tool that can move a tag hands anyone a way to
+  // undo that rule by accident. Cut a new number instead.
+  server.registerTool('gh_tag',
+    { description: 'Create a tag in a GitHub repository at an existing ref. REFUSES if the tag already exists rather than moving it: moving a tag changes what an already-published version NAMES, so two people downloading the same version get different bytes. Cut a new number instead. Pass message to create an ANNOTATED tag (tagged by the token\'s account, which is what keeps a personal address out of a published tag); omit it for a lightweight tag, which carries no tagger at all. from_ref defaults to the default branch and may be a branch, a tag or a full commit sha.',
+      inputSchema: { repo: z.string(), tag: z.string(), from_ref: z.string().optional(),
+        message: z.string().optional(), identity: z.string().optional(), ...AG } },
+    wrap(async (a: any) => {
+      const R = ghRepo(a.repo); await assertAllowed(R.full);
+      const slug = await resolveIdentity(R.full, a.identity);
+      const tag = String(a.tag || '').replace(/^refs\/tags\//, '').trim();
+      if (!tag) throw new Error('REFUSED: tag is required.');
+      // Checked BEFORE anything is written, and reported as its own refusal rather than left to
+      // GitHub's 422 "Reference already exists", which reads like a transient conflict.
+      let existing: any = null;
+      try { existing = await gh(slug, 'GET', '/repos/' + R.owner + '/' + R.repo + '/git/ref/tags/' + encodeURIComponent(tag)); }
+      catch (_e) { existing = null; }
+      if (existing && existing.object && existing.object.sha) {
+        throw new Error('REFUSED: tag ' + tag + ' already exists in ' + R.full + ' at '
+          + String(existing.object.sha).slice(0, 8) + '. This tool does not move a tag, because '
+          + 'moving one changes what an already-published version names. If the bytes changed, '
+          + 'the version number is spent -- cut a new one.');
+      }
+      let from = String(a.from_ref || '').trim();
+      if (!from) { const r = await gh(slug, 'GET', '/repos/' + R.owner + '/' + R.repo); from = r.default_branch; }
+      const src = await gh(slug, 'GET', '/repos/' + R.owner + '/' + R.repo + '/commits/' + encodeURIComponent(from));
+      const msg = a.message === undefined || a.message === null ? '' : String(a.message);
+      let pointsAt = src.sha;
+      let annotated = false;
+      if (msg) {
+        const obj = await gh(slug, 'POST', '/repos/' + R.owner + '/' + R.repo + '/git/tags',
+          { tag, message: msg, object: src.sha, type: 'commit' });
+        pointsAt = obj.sha; annotated = true;
+      }
+      const made = await gh(slug, 'POST', '/repos/' + R.owner + '/' + R.repo + '/git/refs',
+        { ref: 'refs/tags/' + tag, sha: pointsAt });
+      j('gh_tag', agentId + ' tagged ' + R.full + ' ' + tag + ' at ' + String(src.sha).slice(0, 8)
+        + (annotated ? ' (annotated)' : ' (lightweight)'));
+      return { ok: true, repo: R.full, tag, annotated, commit: src.sha,
+        ref: made && made.ref, object: pointsAt,
+        url: 'https://github.com/' + R.full + '/releases/tag/' + encodeURIComponent(tag) };
+    }));
+
+  // [GH-RELEASE-NO-IMPLICIT-TAG-V1] The tag must already exist. GitHub's release API accepts a
+  // tag_name that does not exist and CREATES it from target_commitish -- which defaults to the
+  // default branch, so a release cut while main has moved silently tags a commit nobody chose
+  // and the release then points at bytes nobody tested. Refusing costs one extra call; the
+  // alternative is a published version whose contents nobody can account for.
+  server.registerTool('gh_release',
+    { description: 'Publish a GitHub Release for a tag that ALREADY EXISTS. Refuses to create the tag for you -- GitHub would happily invent one at whatever the default branch points at right now, which silently publishes bytes nobody chose; use gh_tag first. Refuses if a release already exists for that tag unless update:true, which edits that release in place. This is what makes the repository advertise the version you actually shipped: the Releases card shows the newest RELEASE, so a bare tag does not displace an older release. latest defaults to true.',
+      inputSchema: { repo: z.string(), tag: z.string(), name: z.string().optional(),
+        body: z.string().optional(), draft: z.boolean().optional(), prerelease: z.boolean().optional(),
+        latest: z.boolean().optional(), update: z.boolean().optional(),
+        identity: z.string().optional(), ...AG } },
+    wrap(async (a: any) => {
+      const R = ghRepo(a.repo); await assertAllowed(R.full);
+      const slug = await resolveIdentity(R.full, a.identity);
+      const tag = String(a.tag || '').replace(/^refs\/tags\//, '').trim();
+      if (!tag) throw new Error('REFUSED: tag is required.');
+      let ref: any = null;
+      try { ref = await gh(slug, 'GET', '/repos/' + R.owner + '/' + R.repo + '/git/ref/tags/' + encodeURIComponent(tag)); }
+      catch (_e) { ref = null; }
+      if (!ref || !ref.object || !ref.object.sha) {
+        throw new Error('REFUSED: ' + R.full + ' has no tag ' + tag + '. This tool will NOT create '
+          + 'it: GitHub creates a missing tag at whatever the default branch points at now, which '
+          + 'publishes a commit nobody chose. Create the tag at the commit you mean with gh_tag, '
+          + 'then call this again.');
+      }
+      let prior: any = null;
+      try { prior = await gh(slug, 'GET', '/repos/' + R.owner + '/' + R.repo + '/releases/tags/' + encodeURIComponent(tag)); }
+      catch (_e) { prior = null; }
+      const payload: any = {
+        tag_name: tag,
+        name: String(a.name || tag),
+        body: String(a.body || ''),
+        draft: !!a.draft,
+        prerelease: !!a.prerelease,
+        make_latest: (a.latest === false || !!a.draft || !!a.prerelease) ? 'false' : 'true',
+      };
+      if (prior && prior.id) {
+        if (!a.update) {
+          throw new Error('REFUSED: ' + R.full + ' already has a release for ' + tag
+            + ' (id ' + prior.id + ', ' + prior.html_url + '). Pass update:true to edit it in place. '
+            + 'A release is what a visitor reads as the current version, so replacing one silently '
+            + 'is not a thing this does by default.');
+        }
+        const up = await gh(slug, 'PATCH', '/repos/' + R.owner + '/' + R.repo + '/releases/' + prior.id, payload);
+        j('gh_release', agentId + ' updated ' + R.full + ' release ' + tag + ' (id ' + prior.id + ')');
+        return { ok: true, repo: R.full, tag, updated: true, id: up.id, url: up.html_url,
+          commit: ref.object.sha, latest: payload.make_latest === 'true', draft: !!up.draft };
+      }
+      const rel = await gh(slug, 'POST', '/repos/' + R.owner + '/' + R.repo + '/releases', payload);
+      j('gh_release', agentId + ' published ' + R.full + ' release ' + tag + ' (id ' + rel.id + ')');
+      return { ok: true, repo: R.full, tag, updated: false, id: rel.id, url: rel.html_url,
+        commit: ref.object.sha, latest: payload.make_latest === 'true', draft: !!rel.draft };
+    }));
+
   for (const n of ['gh_whoami', 'gh_repos', 'gh_read', 'gh_list', 'gh_log', 'gh_diff',
-                   'gh_commit', 'gh_branch', 'gh_fork', 'gh_pr']) registered.push(n);
+                   'gh_commit', 'gh_branch', 'gh_fork', 'gh_pr',
+                   'gh_tag', 'gh_release']) registered.push(n);
   return registered;
 }

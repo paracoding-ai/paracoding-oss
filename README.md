@@ -1,7 +1,14 @@
-# Paracoding — v12.2
+# Paracoding — v12.3
 
-Paracoding is an agent platform that installs into **your own** Google Cloud project in one
-command. Agents propose. You commit. Then it builds the next version of itself.
+**An MCP connector that gives a chat hands on your own Google Cloud project.**
+
+Point any MCP client at it -- Claude, Grok, anything that speaks the protocol -- and ask for
+software. It builds the container, deploys it to Cloud Run in your project, and reports back
+the HTTP code it got when it checked. Your project, your bill, your key, and the credential
+never leaves the control plane.
+
+It installs in one command. Agents propose, you commit, and then it builds the next version
+of itself.
 
 ./install.sh
 
@@ -42,11 +49,15 @@ limit, move to another Claude Max plan, paste the bootstrap, and the agent resum
 full history intact. Portable agent state is the whole payoff of putting the crypto
 underneath it.
 
-**Dual model buses with a billing boundary.**
-Claude and Gemini, and a three-position switch: `home` spends nothing, `dual` runs on your
-keys, `work` is keyless and employer-billed on Vertex. The keyed transport is refused
-outright in `work` mode — enforced in code, not remembered by a human. Anything unset,
-unreadable or unrecognised fails safe to `home`.
+**A billing boundary on the built-in chat.**
+The connector itself makes no model calls -- your client is the model. The console ships its
+own chat as well, for when you want one without leaving the project, and `models.fleet_mode`
+decides what that chat may spend: `home` makes no model call of any kind, `dual` runs on your
+own keys, `work` is keyless and employer-billed on Vertex with the keyed transport refused
+outright in code rather than remembered by a human. Anything unset, unreadable or
+unrecognised fails safe to `home`. NOTE, because earlier releases used a different word for
+this: there is no bus. 12.0 deleted every runner and the autonomous loop with them, and this
+switch now governs one thing -- the console chat -- not a fleet of dispatchers.
 
 **Agent identity we built ourselves, then made interoperable.**
 Every strain is a first-class identity with its own scope, journal lane and memory, and
@@ -66,10 +77,13 @@ checks, and the git and deploy tools an agent uses to modify the thing it is run
 The generator fails the build outright when it catches you — including twice in the week
 this release was cut, correctly.
 
-**A chat that can actually build.**
-Claude and Gemini side by side, Gemini 3.7 Flash live out of the gate, wired straight into
-GCP — ask a strain for a service and it builds the container and deploys it to Cloud Run.
-Effectively a Claude-to-GCP connector with Identity-Aware Proxy in front of it.
+**Client-agnostic on purpose, and proven on more than one.**
+The session key travels as a tool argument, not as a client-specific header, so anything that
+can pass an argument on every call can drive this. Measured, not asserted: the same install
+has been driven end to end from Claude and from Grok, on the same GCP project, through the
+same MCP tools, against the same internal git store. Claude is the reference client, not a
+dependency. The console also ships its own chat -- Claude or Gemini, wired straight into GCP
+-- for when you want one inside the project.
 
 **An agent stages its privileged work, and every stage is recorded.**
 On a default install `install.sh` sets `PC_AUTO_APPROVE=1`: a job an agent stages is signed and
@@ -124,6 +138,56 @@ through on the right is three open defects in the release you are reading about,
 the next cut. Publishing the screenshot with them still in it is deliberate.
 
 A thing that builds the things.
+
+---
+
+## Two models, two plans, one project
+
+The connector does not care which model you use, and that turns out to be worth money.
+
+This is how this fleet is actually run, and it is the reason the client-agnostic property is
+a headline feature rather than a footnote. Two $100-a-month plans, each doing the thing it is
+best at, both pointed at the same Google Cloud project:
+
+- **Claude Max — the architect.** Design, the calls that are expensive to get wrong, release
+  cuts, and the security review. Opus 5 on high effort is what reads the diff and asks what
+  breaks. It is the chat that decides what should be true.
+- **Grok — the engineering loop.** Long mechanical passes over a large tree: inventories,
+  refactors, hunting every call site of a thing being removed. It is stellar at this and it
+  is patient in a way that is expensive to buy from a reasoning model.
+- **Claude in Chrome is the bridge.** Cowork drives a browser tab logged into `grok.com`, so
+  the architect hands work to the engineer and reads the result back without a human
+  copy-pasting between two windows.
+
+**Two sets of eyes on every line, and they are not the same eyes.** Grok writes and Claude
+reviews, or the reverse, and a disagreement between two vendors' models is the most useful
+signal either one produces -- it is the one thing a single model cannot give you no matter
+how much you spend on it. More than one defect in this release was found because the second
+model refused to agree with the first.
+
+**And the token economics are the point.** Reasoning tokens are the expensive ones. Spending
+them on architecture and security review while a second plan absorbs the long grinding passes
+is what makes a two-plan month cost less than doing all of it on one, and finish more.
+
+**What makes it work is that both chats authorise into the same place.** Neither model holds
+a Google credential. Each one presents a session key to the same OAuth-connected MCP
+connector, the control plane resolves it to a role server-side, and from there they share
+everything that matters: the same GCP project, the same MCP tool surface, the same internal
+git store with its objects sealed under X-Wing, the same data lake, the same journal. Work
+one model does is visible to the other because it was never in a chat window to begin with --
+it is in the project.
+
+The Flow Hood is the control panel for that. It is where strains are created and managed, and
+where the per-strain session paste is generated for each chat harness -- so getting a second
+model onto the same fleet is a paste, not an integration.
+
+[![The full hybrid setup on one desktop: Claude Cowork on the left running the architect session, the Paracoding Flow Hood open in Cowork built-in browser in the middle showing the strain collection and the advisor strain status, and Grok on the right reporting release state back after being handed the engineering work](docs/screenshots/05-hybrid-claude-grok.png)](docs/screenshots/05-hybrid-claude-grok.png)
+
+Left to right: Claude Max in Cowork running the architect session; the Flow Hood open in
+Cowork's built-in browser, where the strains are created and the session pastes come from;
+and Grok in Chrome, driven by Claude in Chrome, reporting the release state it just measured.
+Three panes, two vendors, one GCP project, one git store. Unretouched, on the day 12.x was
+cut.
 
 ---
 
@@ -237,7 +301,7 @@ sign in -- the account you install with is very often not the account your Claud
 in with, and that is cheaper to answer here than to discover as a refusal afterwards. It is
 also editable later in Settings, so an empty answer costs you nothing.
 
-Nothing else stops. There is no workstation question because 12.0 builds no VM, and the
+Nothing else stops. There is no workstation question because 12.x builds no VM, and the
 passkey stop is gone because a default install ships
 `PC_REQUIRE_PASSKEY=0`. The installer no longer refuses to start without a terminal, which
 means an unattended run -- Cloud Shell you walked away from, or a script -- reaches the end.
@@ -249,7 +313,7 @@ symptom.
 
 ## Driving it from your own machine
 
-12.0 is a GCP MCP connector a person drives from an MCP client on their own machine. There
+12.x is a GCP MCP connector a person drives from an MCP client on their own machine. There
 is no workstation VM, no bus, no autonomous loop, nothing running unattended. `install.sh`
 does not build a VM at step 9/10 and does not leave one stopped -- both halves of that older
 claim are false.

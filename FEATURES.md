@@ -22,7 +22,7 @@ page cannot drift from the release that carries it.
   — each one prints `##PCSTEP FAIL` or a named warning. Optional components *warn* and
   continue; required ones abort.
 - **`uninstall.sh` removes what it made**, including secrets it created and nothing it didn't.
-- **No workstation VM.** 12.0 is a GCP MCP connector a person drives from an MCP client on
+- **No workstation VM.** 12.x is a GCP MCP connector a person drives from an MCP client on
   their own machine. There is no VM, no desktop, no unattended loop. `install.sh` does not
   build one.
 
@@ -96,7 +96,7 @@ Full OAuth 2.1 (PKCE, dynamic client registration, discovery) **and** a legacy b
 `dispatch` is **not** on this surface. It is a console-chat tool: it belongs to the Flow
 Hood's own toolset alongside `status_digest` and `check`, and no MCP client is offered it.
 
-**Those tools are gone, not withheld.** 12.0 does not register `vm_*` or `browser_*`. There is
+**Those tools are gone, not withheld.** 12.x does not register `vm_*` or `browser_*`. There is
 no workstation to address and no Chrome DevTools bridge to reach. Setting `WS_VM`, `WS_ZONE`
 or `WS_CDP_PORT` does not bring them back — they are unregistered, not gated. The list above
 is what a stock install enumerates.
@@ -245,8 +245,11 @@ so agent clients other than this project's own console can reach the control pla
 - **Everything is journalled** with a named action — `stage_job`, `exec_claim`, `exec_start`,
   `exec_refused_replay`, `exec_refused_stale_approval`, `archive_served`, and more. "What
   took the console out" is a query, not a guess.
-- **Fleet mode** (`home` / `dual` / `work`) is one switch that decides whether model buses may
-  be called at all — and a refusal is journalled with the reason and the exact config path.
+- **Fleet mode** (`home` / `dual` / `work`) is one switch that decides what the built-in
+  console chat may spend — and a refusal is journalled with the reason and the exact config
+  path. It governs that chat and nothing else: 12.0 deleted every runner, so there is no bus
+  for it to gate. The connector itself makes no model call at all; your MCP client is the
+  model.
 - **Hard monthly caps** on model spend, checked before the agent loop opens.
 - **A BigQuery forever-archive, provisioned by the installer.** Phase 6c creates the
   `pc_archive` dataset and both time-partitioned tables (`journal`, `chat_history`), grants the

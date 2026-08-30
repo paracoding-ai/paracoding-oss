@@ -943,8 +943,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="58d5e53f3755014233c6c4312d1dffbbc8c714ff"
-PC_VERSION="12.2"
+PC_RELEASE="8f3d09c9970f861da16028c595ba8ac71180c87f"
+PC_VERSION="12.3"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -4691,7 +4691,7 @@ KNOWN = ("whoami read_graph search_nodes open_nodes list_work_items read_journal
          "answer_message ask_agent refresh stage_privileged_job run_command "
          "gcp_api run_roll "
          "gh_whoami gh_repos gh_read gh_list gh_log gh_diff gh_commit gh_branch "
-         "gh_fork gh_pr").split()
+         "gh_fork gh_pr gh_tag gh_release").split()
 GIT_TOOLS = "git_read git_list git_log git_grep git_diff git_archive git_propose git_propose_patch git_push".split()
 
 # collection-group, query-scope, ordered field list. ONE ROW PER pc_index() INVOCATION at
