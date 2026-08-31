@@ -1039,7 +1039,7 @@ window.pcWhimsyOn = function(){
   function ago(min){min=Math.max(0,Math.round(min));if(min<60)return min+'m';var h=Math.round(min/60);if(h<48)return h+'h';return Math.round(h/24)+'d';}
   function light(a){var age=(a.age_min==null)?999999:a.age_min;var w=(a.backlog||0)+(a.open_msgs||0);
     if(age>2880) return ['r','silent '+ago(age)+' — go check it'];
-    if(w>0) return ['y',(a.backlog||0)+' on the bus'+((a.open_msgs)?', '+a.open_msgs+' to answer':'')];
+    if(w>0) return ['y',(a.backlog||0)+' queued'+((a.open_msgs)?', '+a.open_msgs+' to answer':'')];
     return ['g', a.last_action?('idle · last: '+a.last_action):'idle until you need it'];}
 
   function themeSection(){

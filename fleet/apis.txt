@@ -25,7 +25,7 @@
 run.googleapis.com                  # control plane, mcp and gate-exec services
 cloudbuild.googleapis.com           # builds the container images
 artifactregistry.googleapis.com     # holds them
-firestore.googleapis.com            # sessions, memory graph, work-item bus, journal
+firestore.googleapis.com            # sessions, memory graph, the work-item list, journal
 secretmanager.googleapis.com        # api keys, github tokens, approval material
 iam.googleapis.com                  # service accounts and the custom audit role
 logging.googleapis.com              # job logs -- the gate UI is not evidence, this is

@@ -869,8 +869,12 @@ say "1/10 enabling APIs (this is the slow one)"
 #                       Storage is on by default in most projects; a project with it off had no
 #                       lake and no repository, and nothing in the install said so.
 #   iamcredentials      control-plane/src/gittools.ts -- minting the ID token /git/archive accepts.
-#   cloudscheduler      src/runner/deploy-build-runner.sh, deploy-work-runner.sh -- the runners are
-#                       SCHEDULED. Without it the deploy step fails after the services exist.
+#   cloudscheduler      THE LINE STAYS AND THIS SENTENCE IS WHY. It was here for scheduled runners
+#                       that 12.5 DELETES, and a stale comment naming a deleted component reads as
+#                       an instruction to drop the API -- the exact trap
+#                       [APIS-COMPUTE-IS-NOT-THE-WORKSTATION] records. install.sh creates no
+#                       scheduler job itself; step 2/10 grants admin on this API, and a gate
+#                       executor driven by a scheduled tick needs it.
 #   monitoring          control-plane/src/index.ts, and workstation.sh grants the VM SA
 #                       roles/monitoring.metricWriter, which is inert if the API is off.
 #   cloudbilling        cost reporting.
@@ -943,8 +947,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="5966424ee0e22cd2617ac4df7074925cfa7c2254"
-PC_VERSION="12.4"
+PC_RELEASE="fb40b85fa26202714898c62f8b4160653d3dc8f2"
+PC_VERSION="12.5"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this

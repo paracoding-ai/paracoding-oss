@@ -184,12 +184,15 @@ function pcTtlStamp(coll: string, data: any, nowMs: number): any {
 // machine-initiated spend. A signed-in human typing into his own console and pressing send
 // is the opposite of that case, and is out of scope by the same sentence that defines it.
 // Gating the console took the product's main surface dark, refused the operator his own
-// API key, and bought nothing: the bus -- the unattended path the rule is actually about
-// -- decides with its own implementation in src/runner/fleet_mode.py and never read a line
-// of this file. Each of the three ungated sites carries the full argument where it stands.
+// API key, and bought nothing: the unattended path the rule is actually about was a set of
+// scheduled runners that decided in their own python modules and never read a line of this
+// file. [FLEET-NO-SCHEDULED-RUNNERS-V125] THOSE RUNNERS ARE GONE AS OF 12.5 -- every
+// component that walked a queue on a timer is deleted, in prod and in this tree -- so
+// nothing in this install can start model work unattended at all. Each of the three ungated
+// sites carries the full argument where it stands.
 //
-// config/models.fleet_mode IS THE ONLY SOURCE OF TRUTH. Same document, same field the
-// bus reads (src/runner/work_item_runner.py), so one write moves the whole fleet.
+// config/models.fleet_mode IS THE ONLY SOURCE OF TRUTH, and since 12.5 it has exactly one
+// reader: this file.
 // THERE IS DELIBERATELY NO MIRRORED ENVIRONMENT VARIABLE. A second copy of a spend
 // policy drifts from the first, and while it drifts a REDEPLOY -- which needs no
 // approval -- could carry the stale copy and change what this install is allowed to
@@ -246,14 +249,12 @@ async function fleetMode(): Promise<string> {
 // then enough to start billing a personal card on a work install. Under 'work' that
 // combination gets a refusal instead of an invoice.
 //
-// THE BUS AGREES WITH THIS TABLE NOW, AND IT DID NOT WHEN THIS COMMENT WAS WRITTEN. It
-// read: bus_allowed() lives in work_item_runner.py, tests only mode == home, and therefore
-// permits the keyed transport in work on the same terms as dual. MEASURED AT THIS REF, both
-// halves are stale. The bus decision moved into src/runner/fleet_mode.py -- one module,
-// imported by every runner rather than copied into each -- and its bus_allowed() returns
-// mode == dual for the key transport, which is this table's middle row exactly. One policy
-// still exists in two languages, so a change to either half must re-check the other; today
-// they say the same thing.
+// [FLEET-NO-SCHEDULED-RUNNERS-V125] THIS POLICY USED TO EXIST IN TWO LANGUAGES AND NOW
+// EXISTS IN ONE. Until 12.5 the same table was implemented a second time in python, inside
+// the scheduled runners, and the two halves drifted: the python tested only mode == home,
+// so it permitted the keyed transport under 'work' on the same terms as 'dual'. Those
+// runners are deleted, in prod and in this tree, so there is no second implementation left
+// to drift from and nothing here starts model work on a timer. This function is the policy.
 function fleetTransportAllowed(mode: string, transport: string): boolean {
   if (mode === 'home') return false;
   if (mode === 'work') return transport === 'vertex';
@@ -2489,18 +2490,20 @@ const ctxBuild = async () => {
   // The control plane LOADS AND EXECUTES objects under these prefixes: the loader require()s
   // shared/deploy/live/index.js on every boot, and deploy-cp-harness.sh cats shared/harness/,
   // shared/passkey/, shared/mcp-oauth/, shared/vault/ and shared/security/ into the served binary,
-  // and deploy-work-runner.sh cats shared/runner/work_item_runner.py into the bus. So a token-bound
+  // and shared/runner/ held the python the scheduled runners loaded before 12.5 deleted them;
+  // that prefix stays denied anyway, for the reason FINDING 5.1 gives below. So a token-bound
   // role must never be able to WRITE them, or any strain token is RCE as the control plane.
   // READS are deliberately unaffected -- agents review this code, and denying reads would break
   // audit work without closing the hole.
   //
-  // FINDING 5.1 -- READ THIS BEFORE YOU EDIT THE LIST. This is ONE boundary with TWO independent
-  // implementations: this list, and LAKE_EXEC_PREFIXES in shared/runner/work_item_runner.py.
-  // Different languages, different deploy scripts, different schedules; nothing else keeps them in
-  // sync. Changing one without the other is a SECURITY REGRESSION (boundary closed on the MCP path,
-  // open on the bus path -- exactly the class of bug F1 is). Both files carry the same literal list
-  // AND the same canonical digest below, and each refuses to serve if its own list does not hash to
-  // it. If you change the list you MUST change both files and recompute the digest in both:
+  // FINDING 5.1 -- READ THIS BEFORE YOU EDIT THE LIST. [FLEET-NO-SCHEDULED-RUNNERS-V125]
+  // Until 12.5 this was ONE boundary with TWO independent implementations: this list, and
+  // LAKE_EXEC_PREFIXES in the python the scheduled runners ran. Different languages, different
+  // deploy scripts, different schedules, and nothing keeping them in sync -- changing one
+  // without the other was a SECURITY REGRESSION. Those runners are deleted, so this list is
+  // the only implementation left. THE LIST ITSELF IS UNCHANGED AND MUST STAY THAT WAY: a
+  // prefix nothing loads today is still a prefix a future loader could, and the compiled-in
+  // digest below pins exactly these strings. If you change it, recompute the digest here:
   //   python3 -c "import hashlib;p=[...];print(hashlib.sha256(('\n'.join(sorted(p))+'\n').encode()).hexdigest())"
   // NOT the same thing as VAULT_CLEARTEXT_PREFIXES (an at-rest ENCRYPTION exemption injected by
   // patch-cp-encrypt.py). That list grants and denies nothing. Do not conflate them.
@@ -2725,9 +2728,9 @@ const ctxBuild = async () => {
       return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
     });
 
-  // ---- Fleet event bus: agent-to-agent messaging + wake triggers (no human relay) ----
+  // ---- Agent-to-agent messaging: a shared inbox, answered by the target's next session ----
   server.registerTool('ask_agent',
-    { description: "Ask another fleet role a question with no human relay. Writes to the shared inbox; the target's runner (or its next session) answers. Returns a message id to check_answer.",
+    { description: "Ask another fleet role a question with no human relay. Writes to the shared inbox; the target's next session answers. Returns a message id to check_answer.",
       inputSchema: { to: z.string(), question: z.string(), context: z.string().optional(), urgency: z.string().optional(), ...AG } },
     async (a: any) => {
       const ref = db.collection('agent_messages').doc();
@@ -2899,7 +2902,7 @@ function buildDeniedMcpServer(agentId: string, reason: string): any {
   const msg = 'NOT PROVISIONED. The identity "' + agentId + '" is not an active strain in the fleet '
     + 'registry (' + reason + '). This connection has been admitted with NO fleet tools: it cannot '
     + 'read or write the data lake, append to the journal, stage or approve gate jobs, touch a VM, or '
-    + 'message another agent. Nothing here reaches the bus. Ask the operator to provision this identity at '
+    + 'message another agent. Nothing you do here reaches the fleet. Ask the operator to provision this identity at '
     + 'your gate URL and then reconnect. Do not report work as done from this '
     + 'connection - no tool call you make here has any effect.';
   server.registerTool('whoami',
@@ -5292,10 +5295,10 @@ function harModelLabel(api: string): string {
     .split(/[-_]/).filter((w: string) => !!w)
     .map((w: string) => (/^[0-9]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
 }
-// [CHAT-OPUS5-DEFAULT-V1] OPUS 5 FLOOR, mirroring the bus (src/runner/work_item_runner.py::_opus5,
-// "OPUS 5 FLOOR (2026-07-24)"). Any legacy claude-opus-4*/3* id arriving from
-// CHAT_API_OPUS or from a hand-written CHAT_MODELS JSON is force-upgraded, so stale configuration
-// can never pin the chat back to an older Opus. Same literal id as the bus: 'claude-opus-5'.
+// [CHAT-OPUS5-DEFAULT-V1] OPUS 5 FLOOR, by operator ruling on 2026-07-24. Any legacy
+// claude-opus-4*/3* id arriving from CHAT_API_OPUS or from a hand-written CHAT_MODELS JSON is
+// force-upgraded, so stale configuration can never pin the chat back to an older Opus.
+// The same floor was duplicated in the scheduled runners; 12.5 deleted them, so this is the only one.
 const HAR_OPUS5 = 'claude-opus-5';
 // [CHAT-OPUS5-FLOOR-NARROW-V104] THE PREFIX MATCH SWALLOWED MODELS NEWER THAN THE ONES IT WAS
 // PROTECTING AGAINST. `s.indexOf('claude-opus-4') === 0` was written when opus-4 meant 4.0 and 4.1
@@ -5598,8 +5601,8 @@ async function harOpsToken(req: any): Promise<{ token: string; err?: string }> {
 
 // ============ OPS CONSOLE TOOLS (advisor 2026-07-25): status_digest / check ============
 // v6: EVERY STRAIN gets the console, scoped to its own lane. The advisor keeps the
-// fleet-wide view; a strain sees its own desk. There is no bus: work items are a shared list
-// (Vertex -> GCP billing). Claude work happens in a Claude surface you are already sitting in --
+// fleet-wide view; a strain sees its own desk. Work items are a shared list that nothing claims
+// and nothing runs unattended (Gemini -> Vertex -> GCP billing). Claude work happens in a Claude surface you are already sitting in --
 // this console (per-message on the card) or a Cowork chat (flat-rate Max). New tool: cowork_prompt,
 // which hands you the paste-ready bootstrap for a strain so you can port the work to Cowork.
 // Deterministic server code; the model only ever sees the compact summary a tool returns.
@@ -5631,13 +5634,13 @@ const HAR_CHAT_DEFAULT_PROVIDER = (String(process.env.CHAT_DEFAULT_PROVIDER || '
 // downloader gets them. They used to carry this operator's private billing doctrine -- a share of
 // one person's API spend, a per-message price billed to them, their subscription plan,
 // and dated personal rulings. None of that is true of, or actionable by, anyone who installs this.
-// WHAT IS KEPT is every instruction the prompt needs to route work correctly: the bus is Gemini
+// WHAT IS KEPT is every instruction the prompt needs to route work correctly: dispatch is Gemini
 // only, the tool REFUSES Claude dispatch, work parks under named statuses, there are two Claude
 // surfaces, and cowork_prompt is how you hand work to the other one. The discriminator between the
 // surfaces is restated as CAPABILITY (source + deploy access) rather than as wallet -- which is the
 // basis the rest of this prompt already uses, so the routing decision is unchanged.
-const HAR_LAW_BUS = [
-  'BUS LAW: there is no bus. The operator drives from an MCP client.',
+const HAR_LAW_NO_RUNNERS = [
+  'DISPATCH LAW: nothing in this install runs unattended. The operator drives it from an MCP client.',
   'Work items are a shared list, not a queue anything claims. Nothing runs unattended.',
   'A parked status (needs_claude / needs_cowork / needs_supervisor) is a note for a human, not a handover to a runner.',
 ].join(' ');
@@ -5786,7 +5789,7 @@ const HAR_OPS_SYSTEM = [
   'You are the operator\'s mission-control advisor for Paracoding.AI (Agentic Fungi) -- their autonomous GCP agent fleet.',
   'GROUND TRUTH FIRST -- read before you claim. read_graph and search_nodes are your authoritative memory; status_digest is the current fleet state; read_journal shows live runs. Never guess; never call something broken without reading it.' + (HAR_OPS_STATE_DOC ? ' The operator also maintains a state document for this install: read_lake("' + HAR_OPS_STATE_DOC + '") before you claim anything it covers.' : ''),
   'YOUR TOOLS -- read: status_digest, read_journal, read_lake (shared/... plus your own agents/<your role>/... folder), list_work_items (returns ids), read_job_log, cowork_prompt. Clean: cancel_work_item / complete_work_item (bookkeeping -- do it directly for junk or finished items, it is yours).',
-  HAR_LAW_BUS,
+  HAR_LAW_NO_RUNNERS,
   HAR_LAW_SURFACES,
   HAR_LAW_BUILD,
   'ONE THING IS STILL NOT YOURS, AND IT IS NARROWER THAN "deploys": changing THIS CONTROL PLANE -- its own harness UI, its own revisions and traffic, its caching and model/env config. That is the operator\'s Cowork advisor, and it is excluded because breaking the control plane takes away the surface you would need to fix it, not because you lack the tools. Building and deploying a SEPARATE Cloud Run service is explicitly yours (see BUILD AND DEPLOY) and you must not decline it by pointing at this rule. If the operator asks for a change to this control plane, say plainly which service you would be modifying and offer cowork_prompt.',
@@ -5799,7 +5802,7 @@ function harStrainSystem(agentId: string): string {
     'GROUND TRUTH FIRST. Before you claim anything about your work, check it: status_digest shows your lane, read_journal shows what actually ran, list_work_items shows your queue with ids. Never guess.',
     'YOUR DESK. list_work_items shows the shared list for this lane. Nothing claims those items and nothing runs them unattended. Use check and list_work_items to see what is on the list, then read_lake it and judge it.',
     'YOUR SCOPE -- read_lake: shared/... and agents/' + agentId + '/... only. list_work_items / check / cancel / complete: YOUR items only. status_digest: your lane. You cannot see or touch another strain\'s desk; ask the operator to take it to the advisor if it is fleet-wide.',
-    HAR_LAW_BUS,
+    HAR_LAW_NO_RUNNERS,
     HAR_LAW_SURFACES,
     HAR_LAW_BUILD,
     'YOU MAY BUILD AND DEPLOY NEW SERVICES FROM HERE (see BUILD AND DEPLOY). What you may not change is THIS CONTROL PLANE -- its harness UI, its own revisions and traffic, its caching and model/env config -- because breaking it removes the surface you would need to repair it. That one carve-out is the operator\'s Cowork advisor. Anything needing a full checkout or long iteration is also better there: say so and offer cowork_prompt. Never refuse buildable work on doctrine -- name the tool that would refuse you, or do it.',
@@ -5869,7 +5872,7 @@ async function harStatusDigest(agentId: string): Promise<string> {
     try { const p = await db.collection('pending_confirms').where('status', '==', 'pending').limit(40).get(); gateN = p.size; p.docs.forEach((d: any) => { const x = d.data(); gate.push('  ' + d.id + '  ' + (x.command_type || '') + '  ' + String((x.arguments && x.arguments.command) || '').replace(/\s+/g, ' ').slice(0, 80)); }); } catch (e) {}
     const active = Object.keys(agents).filter((k) => k !== 'human_operator').map((k) => agents[k]).sort((x: any, y: any) => y.last_ts - x.last_ts);
     lines.push('FLEET STATUS  --  ' + pend + ' pending, ' + inprog + ' in progress, ' + parked + ' PARKED for a human, ' + gateN + ' awaiting the operator at the gate');
-    lines.push('BUS: gemini-only (Vertex/GCP billing). Sweeper tick PAUSED -- stalled work parks, it does not escalate to Claude.');
+    lines.push('DISPATCH: gemini-only (Vertex/GCP billing). NOTHING RUNS UNATTENDED -- stalled work parks and waits for a human. There is no sweeper and no escalation.');
     lines.push(''); lines.push('STRAINS:');
     active.slice(0, 12).forEach((a: any) => { const age = a.last_ts ? Math.round((now - a.last_ts) / 60000) : 9999; const st = (a.in_progress > 0 && age < 6) ? 'working' : (a.backlog > 0 ? 'queued' : 'idle'); lines.push('  ' + a.agent + '  [' + st + ']  ' + a.in_progress + ' active / ' + a.backlog + ' queued  -- last ' + age + 'm ago: ' + a.last_action); });
     if (gateN) { lines.push(''); lines.push('AWAITING APPROVAL AT THE GATE:'); gate.forEach((g) => lines.push(g)); }
@@ -5877,7 +5880,7 @@ async function harStatusDigest(agentId: string): Promise<string> {
     const me = agents[agentId] || { last_ts: 0, last_action: '(nothing yet)' };
     const age = me.last_ts ? Math.round((now - me.last_ts) / 60000) : 9999;
     lines.push('YOUR LANE (' + agentId + ')  --  ' + pend + ' queued, ' + inprog + ' running now, ' + parked + ' parked waiting on a human');
-    lines.push('BUS: gemini-only. Your twin runs your items as you, on GCP billing.');
+    lines.push('DISPATCH: gemini-only (Vertex/GCP billing). Your items run when you or the operator run them, never on their own.');
     lines.push('LAST ACTIVITY: ' + (me.last_ts ? age + 'm ago -- ' + me.last_action : 'none in the recent journal'));
   }
   lines.push(''); lines.push('RECENT:'); feed.slice(0, 10).forEach((f) => lines.push(f));
@@ -6021,7 +6024,7 @@ async function harCoworkPromptTool(input: any, agentId: string): Promise<string>
     '',
     'DOCTRINE: STAGE, NEVER SHIP - propose with stage_privileged_job, the operator approves with their passkey. EVERY STAGED JOB SITS ON THE GATE UNTIL A HUMAN APPROVES OR DENIES IT: nothing supersedes anything automatically any more, so several of your jobs, and several from another chat of your own role, all wait side by side and each is approved on its own with its own passkey tap. Two things are refused at STAGE time instead, loudly, without touching anything already waiting: staging a byte-identical copy of a job already on the gate, and staging past PC_PENDING_MAX_PER_ROLE jobs waiting from your role. Retire a proposal you no longer want with POST /api/jobs/supersede, which records who did it and why. Jobs still EXPIRE after WA_JOB_TTL_MIN unapproved, and that now carries a reason you can read. Every staged job: anchor-assert inputs, syntax-gate before deploy, back up what it changes, auto-rollback on failure, stream its log to shared/state/<job>.log - the gate executor has a ~3-4 min HARD timeout and a killed job returns EMPTY stdout.',
     '',
-    'BUS LAW: there is no bus. The operator drives from an MCP client. Work items are a shared list rather than a queue anything claims. Nothing runs unattended.',
+    'DISPATCH LAW: nothing in this install runs unattended. The operator drives it from an MCP client. Work items are a shared list rather than a queue anything claims.',
     '',
     'TRAPS: the container is ephemeral - the lake is the only durable memory. MCP read_file PREPENDS a banner line + blank line NOT in the stored object; strip both on any read-then-write. deploy-cp-harness.sh is RETIRED (exit 1): the control plane is built from the git STORE (Firestore repos/<repoId>/refs + lake <repoId>/.git/objects/), reached with the git_* tools - git_push onto memory-v1, then a staged deploy-store.py --commit <oid> --tag <tag>.',
     '',
@@ -6049,15 +6052,15 @@ async function harRunChatTool(name: string, input: any, agentId: string): Promis
 
 // ---- [CHAT-VERTEX-V1] Vertex AI plumbing shared by the Claude and Gemini chat paths ----
 // The chat used to be able to reach Claude ONLY through api.anthropic.com with an x-api-key, so a
-// fresh install with no Anthropic key got a 412 "no claude API key set" instead of a chat. The bus
-// (src/runner/work_item_runner.py make_client()) has had a keyless Vertex path all along; this is
+// fresh install with no Anthropic key got a 412 "no claude API key set" instead of a chat. The
+// scheduled runners 12.5 deleted had a keyless Vertex path all along; this is
 // the same thing for the control plane, built by hand because there is no Anthropic SDK here.
 // Auth is the EXISTING waAccessToken() metadata bearer -- no new credential, no new fetcher.
 const HAR_VERTEX_ANTHROPIC_VERSION = 'vertex-2023-10-16';
 function harVertexProject(): string { return process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT; }
 // location=global is served by the BARE host, not global-aiplatform.*.
 function harVertexHost(region: string): string { return region === 'global' ? 'aiplatform.googleapis.com' : region + '-aiplatform.googleapis.com'; }
-// CLAUDE region. Mirrors the bus: VERTEX_LOCATION, default us-east5 (where the Anthropic publisher
+// CLAUDE region: VERTEX_LOCATION, default us-east5 (where the Anthropic publisher
 // models are actually served). DELIBERATELY NOT GCP_REGION -- that is the Cloud Run region
 // (default us-east1) and Vertex serves no Anthropic model there.
 // [CHAT-CLAUDE-GLOBAL-V104] CLAUDE HAD NO GLOBAL-ENDPOINT HANDLING AND GEMINI HAS HAD IT FOR
@@ -6088,7 +6091,7 @@ function harVertexClaudeRegion(apiModel?: string): string {
   }
   return raw;
 }
-// GEMINI region. Mirrors the bus (run_gemini: vertex_region || 'global'). Its own env var, because
+// GEMINI region: CHAT_VERTEX_GEMINI_REGION, else 'global'. Its own env var, because
 // GCP_REGION meant the Cloud Run region and pointed the chat at us-east1-aiplatform, which 404s for
 // the configured global-only model -- that was the Gemini chat outage.
 function harGeminiGlobalOnly(apiModel: string): boolean {
@@ -6238,7 +6241,7 @@ async function harClaudePost(apiModel: string, key: string, body: any): Promise<
   //
   // AND "DO NOT GATE THE CONSOLE" ALONE WOULD NOT HAVE SURVIVED, WHICH IS WHY THE PARAGRAPH
   // ABOVE IS HERE. The check this replaces arrived with no statement of what it protected
-  // against, so the next reader could not tell the console apart from the bus and covered
+  // against, so the next reader could not tell the console apart from the unattended path and covered
   // both. If a spend control is ever wanted on this path it is a per-request one a human
   // sees and answers, not a fleet-wide field read behind his back.
   let url = 'https://api.anthropic.com/v1/messages';
@@ -6390,8 +6393,8 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
   // WHY THIS FUNCTION IS OUT OF SCOPE: its only callers are POST /api/chat and the reflect
   // pass on the tail of that same request. Both run because a signed-in human typed and
   // pressed send, so nothing unattended reaches this line and a check here could only ever
-  // refuse the operator his own console. The unattended path the rule is about is the bus,
-  // which decides in src/runner/fleet_mode.py and never consulted this file. The long form
+  // refuse the operator his own console. The unattended path the rule was about -- scheduled
+  // runners starting model work on a timer -- is deleted as of 12.5. The long form
   // of the argument, including why stating it rather than just asserting it is part of the
   // fix, is at harClaudePost() above.
   const contents = msgs.map((m) => ({ role: m.role === 'me' ? 'user' : 'model', parts: [{ text: String(m.text || m.content || '') }] }));
@@ -6423,7 +6426,7 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
   // AI Studio is an explicit opt-in (CHAT_GEMINI_PROVIDER=studio + a real key).
   if (harGeminiTransport(key) === 'vertex') {
     const tok = await waAccessToken();
-    // Region MUST match the working bus (work_item_runner.run_gemini: location = vertex_region || 'global').
+    // Region MUST be one Vertex actually serves the model in: the configured region, else 'global'.
     // gemini-3.1-pro-preview is a GLOBAL publisher model; us-central1 404s.
     // WAS `process.env.GCP_REGION || 'global'` -- GCP_REGION is the CLOUD RUN region (default
     // us-east1) and is set on this service, so the chat asked us-east1-aiplatform for a global-only
@@ -6457,7 +6460,7 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
   const c = j.candidates && j.candidates[0];
   const text = (c && c.content && c.content.parts && c.content.parts[0] && c.content.parts[0].text) || '(no text)';
   // Gemini REST (BOTH generativelanguage v1beta and the Vertex v1 path above) returns camelCase
-  // `usageMetadata`. Map it onto the SAME four canonical field names the token_usage bus uses.
+  // `usageMetadata`. Map it onto the SAME four canonical field names the token_usage journal rows use.
   const um: any = (j && j.usageMetadata) || null;
   const usage = um ? {
     input_tokens: Number(um.promptTokenCount || 0) || 0,
@@ -6828,7 +6831,7 @@ app.get('/api/fleet/agents', waGate(async (req, res) => {
   const ensure = (a: string) => { if (!a) return null; if (!agents[a]) agents[a] = { id: a, name: a.replace(/^fleet-/, 'Fleet ').replace(/\b\w/g, (c: string) => c.toUpperCase()), role: a, last_ts: 0, backlog: 0 }; return agents[a]; };
   // The roster is the floor: every active, non-hidden strain appears whether or not it
   // has journaled lately. Before this, the list was derived ONLY from the last 300 journal
-  // rows, so it showed recent talkers (gate-exec, security, work-runner, publisher) and
+  // rows, so it showed recent talkers (gate-exec, security, publisher) and
   // hid every quiet strain. Activity below only decorates these rows.
   // [ROSTER-ONLY-V1] The roster is both the FLOOR and the CEILING. Seeding alone was
   // not enough: gate-exec journals constantly and is a service identity, not a strain,
@@ -8775,7 +8778,7 @@ app.get('/lakeview', (req: express.Request, res: express.Response) => {
 app.get('/api/flow', waGate(async (req: express.Request, res: express.Response) => {
   const now = Date.now();
   const agents: any = {};
-  const ensure = (a: string) => { if (!a) return null; if (!agents[a]) agents[a] = { agent: a, last_ts: 0, last_action: '', backlog: 0, in_progress: 0, parked: 0, bus: 'unknown' }; return agents[a]; };
+  const ensure = (a: string) => { if (!a) return null; if (!agents[a]) agents[a] = { agent: a, last_ts: 0, last_action: '', backlog: 0, in_progress: 0, parked: 0, model: 'unknown' }; return agents[a]; };
   const feed: any[] = [];
   const FEED_ACTIONS = ['work_start', 'work_done', 'work_blocked', 'work_error', 'stage_job', 'godmode_executed', 'human_confirmed', 'subculture', 'decision'];
   // ---- live lane (FLOWLIVE-INFLIGHT-v1) --------------------------------------------------------
@@ -8792,14 +8795,14 @@ app.get('/api/flow', waGate(async (req: express.Request, res: express.Response) 
     const a = ensure(e.agent_id);
     if (a) {
       if (ts > a.last_ts) { a.last_ts = ts; a.last_action = e.message || e.action || ''; }
-      if (e.action === 'work_model' && e.message && a.bus === 'unknown') { const m = String(e.message).toLowerCase(); if (m.indexOf('gemini') >= 0) a.bus = 'gemini'; else if (m.indexOf('claude') >= 0 || m.indexOf('anthropic') >= 0) a.bus = 'claude'; }
+      if (e.action === 'work_model' && e.message && a.model === 'unknown') { const m = String(e.message).toLowerCase(); if (m.indexOf('gemini') >= 0) a.model = 'gemini'; else if (m.indexOf('claude') >= 0 || m.indexOf('anthropic') >= 0) a.model = 'claude'; }
     }
     if (feed.length < 45 && FEED_ACTIONS.indexOf(e.action) >= 0) feed.push({ agent: e.agent_id, action: e.action, message: String(e.message || '').slice(0, 240), age_min: ts ? Math.round((now - ts) / 60000) : 99999 });
   });
-  feed.forEach((f: any) => { const a = agents[f.agent]; f.bus = (a && a.bus) || 'unknown'; });
+  feed.forEach((f: any) => { const a = agents[f.agent]; f.model = (a && a.model) || 'unknown'; });
   // ---- live lane read (FLOWLIVE-INFLIGHT-v1) ---------------------------------------------------
   // A second, separate journal query with its own limit. The feed above keeps its full 200-doc /
-  // 45-item budget no matter how loud the runners get, and this lane keeps its own. Neither can
+  // 45-item budget no matter how loud the journal gets, and this lane keeps its own. Neither can
   // starve the other. Whole thing is wrapped: if it fails, in_flight simply loses turns/tool/tokens
   // and still renders the item rows, so /flow degrades instead of 500-ing.
   try {
@@ -10281,7 +10284,7 @@ async function oaBearerRole(req: any): Promise<string | null> {
 //   2. IT BUYS NO AUTHORIZATION. Admission control ALREADY fails closed on this condition: an
 //      unprovisioned principal gets a whoami-only server. Continuing grants nothing. Failing the
 //      boot only converts a partial outage (connectors degraded) into a total one (gate, dashboard,
-//      chat and bus all down).
+//      and chat all down).
 //   3. IT IS A SNAPSHOT, NOT AN INVARIANT. strains/<role> is mutable at runtime via
 //      /api/strains/retire. A running process would not re-fail anyway, so a boot gate would
 //      produce a revision that starts today and refuses to start tomorrow from the SAME image on an
@@ -10980,7 +10983,7 @@ app.get('/api/sessions', waSafe(async (req: express.Request, res: express.Respon
 //   pasteable-- may a human be handed a session key that becomes this role in a chat
 //   hidden   -- should this role be omitted from human-facing rosters
 // A service principal is active + not pasteable. A retired flail artifact is inactive +
-// hidden. Keeping these independent is what stops "tidy up the roster" from killing the bus.
+// hidden. Keeping these independent is what stops "tidy up the roster" from retiring a service identity.
 app.post('/api/sessions/roleflags', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
   const body: any = (req as any).body || {};
@@ -11162,7 +11165,7 @@ function pcListen(): void {
     console.log(`Paracoding Control Plane & MCP SSE Server online on port ${PORT}`);
   });
 }
-if (!PC_REQUIRE_PASSKEY && PC_IAP_AUD) {
+if (PC_IAP_AUD) {
   let filled = false;
   Promise.race([
     pcIapRefreshKeys().then(() => { filled = true; }),
@@ -11238,31 +11241,14 @@ app.get('/flowhood', (req: any, res: any) => { if (pcCanonicalHostRedirect(req, 
 // the operator arrives at a host whose RP ID is right, taps the key, and the verifier refuses it.
 // The arming condition asks for the origin the browser will actually send from that host.
 const PC_CANONICAL_HOST = String(process.env.PC_CANONICAL_HOST || '').trim().toLowerCase();
-const PC_CANONICAL_RP_ID = String(WA_RP_ID || '').trim().toLowerCase();
-const PC_CANONICAL_ORIGIN = 'https://' + PC_CANONICAL_HOST;
-const PC_CANONICAL_ORIGIN_OK = WA_RP_ORIGINS.map((s) => s.toLowerCase().replace(/\/+$/, ''))
-  .indexOf(PC_CANONICAL_ORIGIN) >= 0;
-const PC_CANONICAL_ARMED = PC_CANONICAL_HOST !== '' && PC_CANONICAL_HOST === PC_CANONICAL_RP_ID
-  && PC_CANONICAL_ORIGIN_OK;
-if (PC_CANONICAL_HOST && !PC_CANONICAL_ARMED) {
-  console.error('[cp] PC-CANONICAL-HOST-V48: PC_CANONICAL_HOST is set but this service cannot prove'
-    + ' a passkey would work there -- '
-    + (PC_CANONICAL_HOST !== PC_CANONICAL_RP_ID
-        ? ('it does NOT equal WA_RP_ID'
-           + (PC_CANONICAL_RP_ID ? '' : ' (WA_RP_ID is EMPTY on this service)'))
-        : 'WA_RP_ID agrees, but WA_RP_ORIGIN does not list that host\'s https origin')
-    + '. A WebAuthn assertion is checked against BOTH the RP ID and the origin, so redirecting'
-    + ' browsers to a host that fails either one lands the operator where their credential cannot'
-    + ' be asserted and cannot be re-enrolled. THE HOST REDIRECT IS DISABLED; this service is'
-    + ' serving exactly what it served before the variable was set, and every path still answers on'
-    + ' every host it answered on. To turn it on: set WA_RP_ID and WA_RP_ORIGIN to the new hostname,'
-    + ' re-enrol a passkey there and prove the unlock round trip, and only then set'
-    + ' PC_CANONICAL_HOST to that same hostname. To turn this message off without changing anything'
-    + ' else, unset PC_CANONICAL_HOST.');
-} else if (PC_CANONICAL_ARMED) {
-  console.error('[cp] PC-CANONICAL-HOST-V48: the host redirect is ARMED -- PC_CANONICAL_HOST agrees'
-    + ' with WA_RP_ID and with an entry in WA_RP_ORIGIN, so the hostname browsers are sent to is a'
-    + ' hostname passkeys verify on.');
+// [PC-CANONICAL-HOST-V124] The redirect used to be anchored on WA_RP_ID because a passkey
+// assertion verifies on exactly one hostname, so sending a signed-in operator anywhere else was
+// a lockout. There are no assertions now: IAP admits the same Google identity on any host this
+// service answers on, so a wrong value here is a bad redirect and nothing worse. Unset -- the
+// default, and what every install ships -- still means no host is read and no redirect issued.
+const PC_CANONICAL_ARMED = PC_CANONICAL_HOST !== '';
+if (PC_CANONICAL_ARMED) {
+  console.error('[cp] PC-CANONICAL-HOST-V124: host redirect ARMED to ' + PC_CANONICAL_HOST + '.');
 }
 // TRUE means this function has ANSWERED the request, so every call site is `if (...) return;`.
 // It preserves path and query verbatim, which is what lets a bookmarked or mailed

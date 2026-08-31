@@ -1,19 +1,19 @@
-# release manifest v12.4
-# generated from source commit 5966424ee0e22cd2617ac4df7074925cfa7c2254
+# release manifest v12.5
+# generated from source commit fb40b85fa26202714898c62f8b4160653d3dc8f2
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
-1e1282ec40b51191     17284  FEATURES.md
+0e18556407e1b379     17341  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 1b9c4ef446e34334      4527  NOTICE
-4377f557172687ce     26346  README.md
-243dada8c2dba9f8     12496  SECURITY.md
-206af327a8dca6ea    409143  install.sh
+aacd18e4e9c97f66     26357  README.md
+080a9ce8ef6f9f8a     12528  SECURITY.md
+6ffb51496bbc0c8f    409476  install.sh
 9f29b658758b85e8     45566  uninstall.sh
-6ec512fbf9730005     14689  upgrade.sh
+eee19d1472022edc     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-b18e715d25478099       639  agent-plugin/plugin.json
+435a105d109507d3       639  agent-plugin/plugin.json
 b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
@@ -28,8 +28,8 @@ e3f26784f73fc8fe     14216  control-plane/src/dash.html
 a945184f44c56f9f     38888  control-plane/src/ghtools.ts
 a2272e127e1d3651     79062  control-plane/src/gittools.ts
 67596eadcc4423bb     28968  control-plane/src/gppatch.ts
-115bebc94c84ba21    177026  control-plane/src/harness.html
-1020325144832a90    810283  control-plane/src/index.ts
+eab7d96638a32677    177022  control-plane/src/harness.html
+fb935a663aeee318    809412  control-plane/src/index.ts
 9cbc5383f199528a     22966  control-plane/src/locked.html
 296dac8ac2408861      9834  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
@@ -68,7 +68,7 @@ c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 62536782273b880a     23472  devgate/RUNBOOK.md
 da0f1b1bc01c4aa8    160454  devgate/smoke.py
 42d0543fa6d16d01     11864  fleet/BOOTSTRAP.md
-d9353e63ab2a1e0e      6649  fleet/apis.txt
+d117ed209be1573c      6654  fleet/apis.txt
 5337e239d6214e18      4486  fleet/cowork-prompts.md
 1e5354a315f022bf      3477  fleet/strains/fleet-advisor.md
 c6196041bd1b1197      3761  fleet/strains/fleet-gcp.md
@@ -94,14 +94,14 @@ deaedc0365f054b4     32484  pipeline/secret-destroy-preflight.py
 319af1a238df57a3      2839  wiki/_index.json
 71b8aebd9209c5b6      1198  wiki/_release.txt
 9732414ce3d3e1c0     15401  wiki/_shell.html
-718204f75e3b29bf     48542  wiki/pages/architecture.md
+796d0bd34fb47ace     48538  wiki/pages/architecture.md
 45c46eb6c103fa68     22728  wiki/pages/change-the-code.md
 f3496ca8575c8564     14361  wiki/pages/connect-an-agent.md
 1cb7f80fac4fe3b2     12634  wiki/pages/index.md
-599dac60f8b5c61f      7732  wiki/pages/model-config.md
-f9a6831057ac0e32     38741  wiki/pages/operators-guide.md
+3d7b6def6dfe7d06      7791  wiki/pages/model-config.md
+78eedcd73e3beb32     38746  wiki/pages/operators-guide.md
 755fb3d9b4d3f99a     74974  wiki/pages/systems-manual.md
 cfa7585fd82d0747     23097  wiki/pages/the-gate.md
-752c5ca6b059df2a      4502  wiki/pages/the-strains.md
+7fc2397636565bc8      4514  wiki/pages/the-strains.md
 f1f582f006ee9ccd     21269  wiki/pages/troubleshooting.md
 91b35e4c38d836df     11002  wiki/pages/working-with-agents.md

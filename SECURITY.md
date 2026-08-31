@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v12.4**
+**Paracoding — v12.5**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim
@@ -144,9 +144,9 @@ transports. `work` is keyless Vertex only, billed to the project, and the keyed 
 **refused in code** so a stray key cannot start billing a card. An unset, unreadable or
 unrecognised value reads as `home`. The installer sets `work`.
 
-Earlier releases described this as gating "model buses". That word is retired and the thing
-it named is gone: 12.0 deleted every runner and the autonomous loop, so nothing dispatches
-work to a model on a timer. One switch, one consumer.
+Earlier releases described this as gating a fleet-wide dispatcher. There is no dispatcher.
+12.0 deleted every runner and the autonomous loop, and 12.5 removed the last references to
+them, so nothing here dispatches work to a model on a timer. One switch, one consumer.
 
 Nothing in this release holds an API key, and none is needed to run it.
 

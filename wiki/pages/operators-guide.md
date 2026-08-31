@@ -442,7 +442,7 @@ distinct key across a batch is refused as `mixed`.
 ## 7. Driving it from your own machine
 
 12.0 is a GCP MCP connector a person drives from an MCP client on their own machine. There
-is no workstation VM, no bus, no autonomous loop, nothing running unattended. You do not
+is no workstation VM, no autonomous loop, and nothing at all that runs unattended. You do not
 add a box and you do not point `vm_*` tools at one -- those tools are not on this surface.
 
 Connect an MCP client (Claude is the reference cockpit, not a dependency; Grok and any

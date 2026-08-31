@@ -121,8 +121,8 @@ reason.
 
 ## Where Gemini fits
 
-Gemini is the second provider in the console's model toggle. It is not a bus and it does
-not run queued work -- 12.0 has no autonomous loop. It follows the same rule as Claude:
+Gemini is the second provider in the console's model toggle. It does not run queued
+work -- there is no autonomous loop and nothing that dispatches. It follows the same rule as Claude:
 **Vertex by default**, billed to your project, authenticated by the service account.
 
 The AI Studio endpoint is an explicit opt-in and needs both the switch and a real key:
@@ -159,12 +159,12 @@ endpoint. On a stock install the Gemini entry says `transport: vertex`,
 
 ## Cost
 
-Model buses ship **off** by default (`fleet_mode=home`). The system spends nothing
+Model access ships **off** by default (`fleet_mode=home`). The system spends nothing
 until you turn something on. When you do, it is your Vertex quota and your project's
 bill -- there is no intermediary metering you.
 
-Chat is per-turn and interactive. The work-item bus is not: it runs queued items
-without you watching. Turn it on knowing that.
+Chat is per-turn and interactive, and it is the only thing here that can spend. Nothing
+in this product runs queued work on its own, so there is no unattended spend to turn on.
 
 ## If a change seems to do nothing
 

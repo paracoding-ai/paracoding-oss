@@ -1,4 +1,4 @@
-# Paracoding — v12.4
+# Paracoding — v12.5
 
 **An MCP connector that gives a chat hands on your own Google Cloud project.**
 
@@ -55,9 +55,9 @@ own chat as well, for when you want one without leaving the project, and `models
 decides what that chat may spend: `home` makes no model call of any kind, `dual` runs on your
 own keys, `work` is keyless and employer-billed on Vertex with the keyed transport refused
 outright in code rather than remembered by a human. Anything unset, unreadable or
-unrecognised fails safe to `home`. NOTE, because earlier releases used a different word for
-this: there is no bus. 12.0 deleted every runner and the autonomous loop with them, and this
-switch now governs one thing -- the console chat -- not a fleet of dispatchers.
+unrecognised fails safe to `home`. NOTE, because earlier releases described this as governing
+a whole fleet: 12.0 deleted every runner and the autonomous loop with them, 12.5 removed the
+last references to them, and this switch now governs one thing -- the console chat.
 
 **Agent identity we built ourselves, then made interoperable.**
 Every strain is a first-class identity with its own scope, journal lane and memory, and
@@ -314,7 +314,7 @@ symptom.
 ## Driving it from your own machine
 
 12.x is a GCP MCP connector a person drives from an MCP client on their own machine. There
-is no workstation VM, no bus, no autonomous loop, nothing running unattended. `install.sh`
+is no workstation VM, no autonomous loop, and nothing at all that runs unattended. `install.sh`
 does not build a VM at step 9/10 and does not leave one stopped -- both halves of that older
 claim are false.
 

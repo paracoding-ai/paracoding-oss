@@ -28,8 +28,8 @@ because the system needs exactly three. Add, rename, or delete them.
 | `fleet-security` | the adversarial reader. Reviews changes, audits boundaries, says no. |
 
 Two more identities are seeded and are not strains you assign work to: a default
-low-privilege role that new connectors land on, and a worker identity that executes
-queued bus work. Both are seeded `hidden`, so the roster you see is the three above;
+low-privilege role that new connectors land on, and one service identity that holds no
+session and runs nothing. Both are seeded `hidden`, so the roster you see is the three above;
 they are service identities, not chats, and neither can be given a session key. Turn
 either one on with `POST /api/strains/<role>/flags` if you want to watch it.
 

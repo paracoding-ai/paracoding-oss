@@ -443,7 +443,7 @@ Measured from `harToolDefs`, the tool set `POST /api/chat` hands the model is te
 `status_digest`, `dispatch`, `check`, `read_journal`, `read_lake`, `list_work_items`,
 `cancel_work_item`, `complete_work_item`, `read_job_log`, `cowork_prompt` -- and none of
 them stages a privileged job. That chat can read a job's result with `read_job_log` and can
-create Gemini bus work items with `dispatch`; the chat that *runs things* is the operator's
+create Gemini work items with `dispatch`; the chat that *runs things* is the operator's
 MCP-connected client talking to the MCP service. If you go looking for the staging path in
 `harness.html` you will not find it, and that is the reason.
 

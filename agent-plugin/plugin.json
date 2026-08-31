@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "paracoding",
-  "version": "12.4",
+  "version": "12.5",
   "description": "An agent platform that installs into your own Google Cloud project -- your project, your bill, your key. Agents act under server-resolved roles with per-key tool classes, and every privileged job is KMS-signed and journalled. install.sh ships PC_AUTO_APPROVE=1, so a job an agent stages is signed and executed in the same call; set PC_AUTO_APPROVE=0 and it stops for a human instead.",
   "license": "Apache-2.0",
   "keywords": ["mcp", "google-cloud", "agent-platform", "self-hosted", "audit-log"]

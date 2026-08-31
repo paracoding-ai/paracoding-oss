@@ -247,9 +247,9 @@ so agent clients other than this project's own console can reach the control pla
   took the console out" is a query, not a guess.
 - **Fleet mode** (`home` / `dual` / `work`) is one switch that decides what the built-in
   console chat may spend — and a refusal is journalled with the reason and the exact config
-  path. It governs that chat and nothing else: 12.0 deleted every runner, so there is no bus
-  for it to gate. The connector itself makes no model call at all; your MCP client is the
-  model.
+  path. It governs that chat and nothing else: 12.0 deleted every runner and 12.5 removed the
+  last references to them, so there is nothing unattended for it to gate. The connector itself
+  makes no model call at all; your MCP client is the model.
 - **Hard monthly caps** on model spend, checked before the agent loop opens.
 - **A BigQuery forever-archive, provisioned by the installer.** Phase 6c creates the
   `pc_archive` dataset and both time-partitioned tables (`journal`, `chat_history`), grants the
