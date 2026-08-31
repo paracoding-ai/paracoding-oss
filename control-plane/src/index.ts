@@ -3071,7 +3071,7 @@ function waSetChal(res: express.Response, name: string, value: string): void {
 function waMakeSession(): string {
   // HFC4 fail-closed: refuse to ISSUE a session when the signing secret is missing/weak.
   if (!WA_SESSION_SECRET_OK) throw new Error('WA_SESSION_SECRET missing or too weak (min ' + WA_SESSION_SECRET_MIN + ' chars) — refusing to issue a gate session.');
-  const payload = waB64(Buffer.from(JSON.stringify({ u: WA_USER, pk: (PC_REQUIRE_PASSKEY ? 1 : 0), exp: Date.now() + WA_SESSION_MIN * 60 * 1000 })));
+  const payload = waB64(Buffer.from(JSON.stringify({ u: WA_USER, exp: Date.now() + WA_SESSION_MIN * 60 * 1000 })));
   const sig = crypto.createHmac('sha256', WA_SESSION_SECRET).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
@@ -3155,18 +3155,14 @@ function pcIapEmail(req: express.Request): string {
   return String(body.email || '').toLowerCase();
 }
 function waSessionOk(req: express.Request): boolean {
-  // [SEC-PASSKEY-TOGGLE-V1] Passkey off: a verified IAP identity on the approver allow-list is a
-  // Google-authenticated human, not an open door. It is still weaker than a passkey and the gate
-  // says so on screen.
-  if (!PC_REQUIRE_PASSKEY) {
-    // [SEC-AUDIT-V105-IAP-AUD-GUARD] FAIL-CLOSED: no PC_IAP_AUD, no IAP god-mode -- the same
-    // rule every sibling call site already applies (see the pcIapGodEmail and pcIapStatusOk
-    // guards). pcIapEmail() itself only checks audience `if (PC_IAP_AUD && ...)`, so calling it
-    // unconditionally here meant that with PC_IAP_AUD unset, an IAP assertion minted for ANY
-    // IAP-protected app -- not just this one -- would satisfy this gate's passkey-off path.
-    const em = PC_IAP_AUD ? pcIapEmail(req) : '';
-    if (em && WA_APPROVER_EMAILS.length && WA_APPROVER_EMAILS.indexOf(em) >= 0) return true;
-  }
+  // [SEC-IAP-IS-THE-DOOR-V124] A verified IAP identity on the approver allow-list IS the
+  // authentication. This used to sit behind `if (!PC_REQUIRE_PASSKEY)`, which was true on every
+  // install install.sh has ever produced, so the branch is now what it always was in practice.
+  // [SEC-AUDIT-V105-IAP-AUD-GUARD] FAIL-CLOSED, UNCHANGED: no PC_IAP_AUD, no IAP admission --
+  // pcIapEmail() only checks audience `if (PC_IAP_AUD && ...)`, so calling it unconditionally
+  // would let an assertion minted for ANY IAP-protected app satisfy this gate.
+  const em = PC_IAP_AUD ? pcIapEmail(req) : '';
+  if (em && WA_APPROVER_EMAILS.length && WA_APPROVER_EMAILS.indexOf(em) >= 0) return true;
   // HFC4 fail-closed: never VERIFY a session when the signing secret is missing/weak (an empty-key
   // HMAC is forgeable). With no strong secret there are no valid sessions — the gate stays locked.
   if (!WA_SESSION_SECRET_OK) return false;
@@ -3174,11 +3170,11 @@ function waSessionOk(req: express.Request): boolean {
   const parts = c.split('.'); const payload = parts[0]; const sig = parts[1];
   const expect = crypto.createHmac('sha256', WA_SESSION_SECRET).update(payload).digest('base64url');
   if (!waEq(sig, expect)) return false;
-  // [SEC-PASSKEY-TOGGLE-REVOKE-V1] A session minted while the passkey was OFF must not
-  // survive turning it back ON. Without this, disarming for even a few minutes hands out
-  // full-length sessions that outlive the policy that permitted them. waElevatedOk below
-  // is deliberately NOT changed: elevation is per-job and already needs a fresh assertion.
-  try { const sess = JSON.parse(Buffer.from(payload, 'base64url').toString()); if (PC_REQUIRE_PASSKEY && sess.pk !== 1) return false; return sess.exp > Date.now(); } catch (e) { return false; }
+  // [SEC-PASSKEY-TOGGLE-REVOKE-V1] RETIRED WITH THE PASSKEY. The `pk` field it guarded is no
+  // longer stamped by waMakeSession, and a cookie minted before this deploy still carries one --
+  // it is ignored rather than rejected, so live sessions survive the upgrade. Stamping without
+  // checking, or checking without stamping, is a total lockout in one direction or the other.
+  try { const sess = JSON.parse(Buffer.from(payload, 'base64url').toString()); return sess.exp > Date.now(); } catch (e) { return false; }
 }
 const WA_ELEVATE_MIN = parseInt(process.env.WA_ELEVATE_MIN || '5', 10);
 const WA_JOB_TTL_MIN = parseInt(process.env.WA_JOB_TTL_MIN || '60', 10);
@@ -4843,19 +4839,6 @@ app.post('/api/webauthn/confirm/verify', waSafe(async (req, res) => {
     try { await db.collection('journal').add({ agent_id: 'human_operator', action: 'approve_refused_canon', message: 'Refused approval of job ' + String(jobId) + ' - the command contains an unpaired UTF-16 surrogate, which this control plane and the Python approval verifier canonicalise differently. Nothing was approved, stamped or executed.', timestamp: FieldValue.serverTimestamp() }); } catch (e) {}
     res.status(403).json({ error: 'cannot approve: the command contains an unpaired UTF-16 surrogate and cannot be canonicalised identically by the approval verifier', canon: 'lone-surrogate' });
     return;
-  }
-  // [SEC-ASSERT-EVERY-V1] Every approval takes a tap, not just the ones a text classifier
-    // calls dangerous. The classifier is a heuristic over command TEXT; a job it does not
-    // recognise still runs as the operator. danger is kept for MESSAGING only below.
-    if (PC_REQUIRE_PASSKEY && !waElevatedForJob(req, jobId, command)) {
-    if (!(req.body && req.body.dangerConfirmed) || !req.body.response) { res.status(428).json({ danger: true, needFaceID: true, command }); return; }
-    const expectedChallenge = waCookie(req, 'wa_confirm');
-    if (!expectedChallenge) { res.status(428).json({ danger: true, needFaceID: true, command, error: 'need fresh Face ID' }); return; }
-    const raw = Buffer.from(expectedChallenge, 'base64url');
-    if (raw.length < 32 || !waEq(raw.subarray(raw.length - 32), waSha(jobId + '|' + action))) { res.status(400).json({ error: 'binding mismatch' }); return; }
-    const ok = await waVerifyAssertion(req.body.response, expectedChallenge);
-    res.clearCookie('wa_confirm', { path: '/' });
-    if (!ok) { res.status(400).json({ error: 'Face ID not verified' }); return; }
   }
   // [APPROVED-SHA256-WRITER-V1] 2026-08-01. Record the digest of the command the human is
   // approving, AT APPROVAL TIME. exec_server.py pins a presented script against
@@ -6960,7 +6943,6 @@ app.post('/api/github/config', waGate(async (req, res) => {
 }));
 
 app.post('/api/strain/delete', waGate(async (req, res) => {
-  if (!waElevatedOk(req)) { res.status(401).json({ error: 'Face ID required' }); return; }
   const agentId = String((req.body && req.body.agentId) || '');
   if (agentId && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(agentId)) {
     harJournalAs('harness', 'security_quarantine', 'Refused agentId: bad charset (possible path traversal): ' + String(agentId).slice(0, 64));
@@ -6998,7 +6980,6 @@ app.post('/api/strain/delete', waGate(async (req, res) => {
 
 // ---- strain subculture (clone/fork: the new strain inherits the parent's full history) ----
 app.post('/api/strain/subculture', waGate(async (req, res) => {
-  if (!waElevatedOk(req)) { res.status(401).json({ error: 'Face ID required' }); return; }
   const parentId = String((req.body && req.body.parentId) || '');
   let name = String((req.body && req.body.name) || '').trim();
   if (!parentId || parentId === 'human_operator') { res.status(400).json({ error: 'bad parent strain' }); return; }
@@ -8154,7 +8135,7 @@ async function harGcpStage(caller: string, method: string, url: string, body: an
   const hasBody = !!(body && typeof body === 'object' && Object.keys(body).length > 0);
   const bodyB64 = hasBody ? Buffer.from(JSON.stringify(body)).toString('base64') : '';
   const lines: string[] = [];
-  lines.push(danger ? '# DANGER destroy-class GCP call (' + method + ') — Face ID required' : '# gcp_api ' + method);
+  lines.push(danger ? '# DANGER destroy-class GCP call (' + method + ') — journalled; refused only when PC_GUARDRAILS=1' : '# gcp_api ' + method);
   lines.push('# ' + method + ' ' + url);
   if (reason) lines.push('# reason: ' + String(reason).replace(/[\r\n]+/g, ' ').slice(0, 300));
   if (hasBody) lines.push("printf %s '" + bodyB64 + "' | base64 -d > /tmp/gcp_body.json");
@@ -10907,7 +10888,6 @@ async function slMintSessionKey(role: string, label: string): Promise<string> {
   return key;
 }
 app.post('/api/strain/create', waGate(async (req, res) => {
-  if (!waElevatedOk(req)) { res.status(401).json({ error: 'Face ID required' }); return; }
   const b: any = (req as any).body || {};
   const id = String(b.id || '').trim().toLowerCase();
   const display = String(b.display_name || id).trim().slice(0, 80);

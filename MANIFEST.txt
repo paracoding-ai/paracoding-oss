@@ -1,19 +1,19 @@
-# release manifest v12.3
-# generated from source commit 8f3d09c9970f861da16028c595ba8ac71180c87f
+# release manifest v12.4
+# generated from source commit 5966424ee0e22cd2617ac4df7074925cfa7c2254
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 1e1282ec40b51191     17284  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 1b9c4ef446e34334      4527  NOTICE
-196b51e3122f4f36     26346  README.md
-da939e5846c9c39d     12496  SECURITY.md
-9c726d8c990c7a35    409143  install.sh
+4377f557172687ce     26346  README.md
+243dada8c2dba9f8     12496  SECURITY.md
+206af327a8dca6ea    409143  install.sh
 9f29b658758b85e8     45566  uninstall.sh
-4356cc5ef6e5a6ff     14689  upgrade.sh
+6ec512fbf9730005     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-f1cf5304f3259843       639  agent-plugin/plugin.json
+b18e715d25478099       639  agent-plugin/plugin.json
 b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
@@ -28,8 +28,8 @@ e3f26784f73fc8fe     14216  control-plane/src/dash.html
 a945184f44c56f9f     38888  control-plane/src/ghtools.ts
 a2272e127e1d3651     79062  control-plane/src/gittools.ts
 67596eadcc4423bb     28968  control-plane/src/gppatch.ts
-1e919b1961daec38    178729  control-plane/src/harness.html
-2086d42437d0890a    811887  control-plane/src/index.ts
+115bebc94c84ba21    177026  control-plane/src/harness.html
+1020325144832a90    810283  control-plane/src/index.ts
 9cbc5383f199528a     22966  control-plane/src/locked.html
 296dac8ac2408861      9834  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts

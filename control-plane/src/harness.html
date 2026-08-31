@@ -746,11 +746,7 @@ window.pcWhimsyOn = function(){
     var nm=a.querySelector('.nm');var name=nm?nm.textContent.trim():'strain';var id=rid(a);
     if(!confirm('Delete the '+name+'?\n\nIts history is backed up to the Mycelium, then removed. This cannot be undone.'))return;
     try{
-      var SA=window.SimpleWebAuthnBrowser;if(!SA){alert('Passkey library not loaded.');return;}
-      var r=await jp('/api/webauthn/elevate/options',{});if(!r.ok){alert('Passkey: '+(r.data.error||r.status)+(r.status===401?' (unlock at the Autoclave first)':''));return;}
-      var asr=await SA.startAuthentication(r.data);
-      r=await jp('/api/webauthn/elevate/verify',{response:asr});if(!r.ok){alert('Passkey check failed: '+(r.data.error||r.status));return;}
-      r=await jp('/api/strain/delete',{agentId:id});if(!r.ok){alert('Delete failed: '+(r.data.error||r.status));return;}
+      var r=await jp('/api/strain/delete',{agentId:id});if(!r.ok){alert('Delete failed: '+(r.data.error||r.status));return;}
       if(typeof loadFleet==='function')loadFleet();
     }catch(e){}
   };
@@ -759,11 +755,7 @@ window.pcWhimsyOn = function(){
     var name=prompt('Subculture '+pname+' into a new strain.\n\nThe new strain inherits its full history. Name it:','');
     if(!name)return;name=name.trim();if(!name)return;
     try{
-      var SA=window.SimpleWebAuthnBrowser;if(!SA){alert('Passkey library not loaded.');return;}
-      var r=await jp('/api/webauthn/elevate/options',{});if(!r.ok){alert('Passkey: '+(r.data.error||r.status)+(r.status===401?' (unlock at the Autoclave first)':''));return;}
-      var asr=await SA.startAuthentication(r.data);
-      r=await jp('/api/webauthn/elevate/verify',{response:asr});if(!r.ok){alert('Passkey check failed: '+(r.data.error||r.status));return;}
-      r=await jp('/api/strain/subculture',{parentId:pid,name:name});if(!r.ok){alert('Subculture failed: '+(r.data.error||r.status));return;}
+      var r=await jp('/api/strain/subculture',{parentId:pid,name:name});if(!r.ok){alert('Subculture failed: '+(r.data.error||r.status));return;}
       alert('Subcultured '+pname+' -> '+(r.data.childId||name)+'. Inherited '+(r.data.inherited||0)+' turns of history.');
       if(typeof loadFleet==='function')loadFleet();
     }catch(e){}
@@ -800,11 +792,7 @@ window.pcWhimsyOn = function(){
     var id=slug.indexOf('fleet-')===0?slug:('fleet-'+slug);
     if(!confirm('Create the strain "'+id+'"?\n\nIt starts with a seed LESSONS.md of its own and is handed one session key.'))return;
     try{
-      var SA=window.SimpleWebAuthnBrowser;if(!SA){alert('Passkey library not loaded.');return;}
-      var r=await jp('/api/webauthn/elevate/options',{});if(!r.ok){alert('Passkey: '+(r.data.error||r.status)+(r.status===401?' (unlock at the Autoclave first)':''));return;}
-      var asr=await SA.startAuthentication(r.data);
-      r=await jp('/api/webauthn/elevate/verify',{response:asr});if(!r.ok){alert('Passkey check failed: '+(r.data.error||r.status));return;}
-      r=await jp('/api/strain/create',{id:id,display_name:name,mode:'new',pasteable:true});
+      var r=await jp('/api/strain/create',{id:id,display_name:name,mode:'new',pasteable:true});
       if(!r.ok){alert('Create failed: '+(r.data.error||r.status));return;}
       if(typeof loadFleet==='function')loadFleet();
       if(r.data&&r.data.paste){slPaste(id,r.data.paste);}
@@ -1236,8 +1224,6 @@ window.pcWhimsyOn = function(){
     if(rr){ rr.classList.remove('show'); rr.onclick=null; rr.setAttribute('style','display:none!important'); }
     var rp=document.getElementById('rdpPanel'); if(rp){ rp.classList.add('collapsed'); rp.style.width=''; } }
   if(document.readyState!=='loading') hideLegacy(); else document.addEventListener('DOMContentLoaded',hideLegacy);
-  async function pollPending(){ try{ var r=await fetch('/api/webauthn/pending',{credentials:'include'}); if(r.ok){ var j=await r.json(); var b=document.getElementById('pcl-btn'); if(b) b.classList.toggle('hasjobs', Array.isArray(j)&&j.length>0); } }catch(e){} }
-  setInterval(pollPending,15000); setTimeout(pollPending,2500);
 })();
 </script>
 <!-- ===== end Approvals drawer ===== -->

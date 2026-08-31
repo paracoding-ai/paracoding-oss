@@ -943,8 +943,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="8f3d09c9970f861da16028c595ba8ac71180c87f"
-PC_VERSION="12.3"
+PC_RELEASE="5966424ee0e22cd2617ac4df7074925cfa7c2254"
+PC_VERSION="12.4"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
