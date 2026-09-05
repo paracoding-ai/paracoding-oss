@@ -6,7 +6,7 @@
 # older install's leftovers. It says so, out loud, after it has looked: see
 # [SEC-UNINSTALL-TRUTH-V1] at the end of this file.
 # install.sh creates the Firestore database (step 2/10), so a reinstall rebuilds it from
-# nothing. Pass --keep-data to preserve approvals, journal, memory and passkeys.
+# nothing. Pass --keep-data to preserve approvals, journal and memory.
 #
 # [SEC-UNINSTALL-BUCKETS-V1] TWO THINGS THIS SCRIPT WILL NEVER DELETE, AND THE REASON IS
 # NOT SQUEAMISHNESS. [SEC-UNINSTALL-LANEHELD-V1] adds the rest of the HELD set -- the KMS
@@ -142,7 +142,7 @@ if [ -n "$PC_LANE" ]; then
   echo "  BELONGS TO ANOTHER LANE, and is neither deleted nor recommended for deletion."
 fi
 if [ "$KEEP" -eq 1 ]; then echo "  --keep-data: Firestore will be PRESERVED."
-else echo "  FULL WIPE: the Firestore database goes too -- approvals, journal, memory, passkeys."; fi
+else echo "  FULL WIPE: the Firestore database goes too -- approvals, journal, memory."; fi
 echo "  The two Cloud Storage buckets are NEVER deleted by this script, with or without"
 echo "  --keep-data. They are reported at the end with the command that removes them."
 # [SEC-EXECBUCKET-V1] THE EXECUTOR RECORD BUCKET IS THE ONE BUCKET THIS SCRIPT DOES DELETE,
@@ -150,7 +150,7 @@ echo "  --keep-data. They are reported at the end with the command that removes 
 # bytes YOU wrote that exist nowhere else -- memory, the wiki, the git object store. This one
 # holds the claim objects, the results and the executor journal of jobs run by an install that
 # is being torn down, and it is the storage-side twin of the Firestore database three lines
-# above: a FULL WIPE takes the journal, the approvals and the passkeys, so leaving the same
+# above: a FULL WIPE takes the journal and the approvals, so leaving the same
 # records behind in a bucket would be an inconsistency, not a kindness. --keep-data preserves
 # BOTH, exactly as it does for Firestore.
 if [ "$KEEP" -eq 1 ]; then echo "  --keep-data: the executor record bucket is PRESERVED too."

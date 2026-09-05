@@ -61,8 +61,8 @@ Four outcomes, and only one of them is the console you want:
 **What you will not see any more, and should not go looking for: a redirect to
 `/gate`.** That route, the 142,608-byte document behind it, and all ten redirects into
 it were deleted on 2026-08-14. Every site that used to bounce you now serves
-`control-plane/src/locked.html` **in place**, under a `401`, at the URL you actually
-asked for -- no redirect, no `?next=`. Unlocking reloads you where you already were.
+`control-plane/src/login.html` **in place**, under a `401`, at the URL you actually
+asked for -- no redirect, no `?next=`. Signing in reloads you where you already were.
 `GET /gate`, `GET /jobs` and `GET /pastes` return `404` (measured against a running
 build). The one `302` that remains is `GET /` to `/harness`, which is a bare
 unconditional redirect that reads nothing and issues no session.
@@ -256,9 +256,8 @@ So if a job did not run, check, in this order:
 1. Was it **staged** rather than run? Some tool paths still answer `{"mode":"staged"}`
    and stop. **The approval channel is now chat, not a page you tap** -- the gate
    console it used to point at is deleted, so a staged job waits on an answer in the
-   conversation and comes back re-issued once you give one. The console's own fire
-   endpoint requires a fresh elevation, and on a stock install (`PC_REQUIRE_PASSKEY=0`)
-   no console page calls it.
+   conversation and comes back re-issued once you give one. No console page fires a
+   pending job.
 2. Was it **refused** rather than pending? `read_job_log(job_id)` returns a reason.
    A refusal happens before the approval is consumed, so a refused job costs you
    nothing and the same approval can be presented again once the cause is fixed.
@@ -271,11 +270,11 @@ So if a job did not run, check, in this order:
 
 ## Nobody can get into the console
 
-A fresh install sets `PC_REQUIRE_PASSKEY=0`, so what admits you is a **verified IAP
-identity on the approver allow-list** (`WA_APPROVER_EMAILS`) and nothing else. If your
-account is not on that list, or IAP will not admit it, you get the `401` and
-`control-plane/src/locked.html` -- which on this posture is a dead end, because there is no
-credential enrolled to unlock with.
+What admits you is a **verified IAP identity on the approver allow-list**
+(`WA_APPROVER_EMAILS`), or a session cookie the console issued to one earlier, and nothing
+else. If your account is not on that list, or IAP will not admit it, you get the `401` and
+`control-plane/src/login.html`, which tells you to sign in with Google and retries while
+the IAP key cache warms; past its retry budget it names the allow-list as the likely cause.
 
 It refuses rather than defaulting open, and there is no path around that from inside the
 console itself. The escape is a deploy-time change to `WA_APPROVER_EMAILS` (or to the IAP
@@ -283,10 +282,9 @@ binding), and either needs `run.admin` / IAM rights -- which the control plane's
 service account deliberately does not hold. That is the point: a compromised control plane
 cannot unlock itself.
 
-The WebAuthn unlock did **not** go away with the gate. It lost the larger of its two
-documents and kept the small one, and `PC_REQUIRE_PASSKEY=1` puts it back in the path --
-which is the way back in if the identity provider in front of the console ever fails. The
-operator's guide has that switch.
+There is no second way in. If the identity provider in front of the console fails, the
+console is unreachable until it is back, and the recovery path for a configuration mistake
+is Cloud Shell, which you hold.
 
 Prevent it: **keep at least two accounts able to reach the console**, on the IAP binding
 and on `WA_APPROVER_EMAILS`. Do it now, not after you have lost the first. Make the second

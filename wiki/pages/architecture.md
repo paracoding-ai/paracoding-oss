@@ -64,8 +64,8 @@ flowchart TB
 ![One image, two Cloud Run services: the console with IAP on and the MCP surface with IAP off, each registering its own half of one route table.](/wiki/assets/01-surface-split.png)
 
 **Why there cannot be one service.** IAP on Cloud Run is one switch per service. The
-console is the bootstrap path into a brand-new install, so it must sit behind IAP -- that
-is how the operator reaches a working page with no credential enrolled. The MCP surface must
+console must sit behind IAP -- the Google sign-in IAP runs is the operator's only sign-in,
+and the identity it verifies is what the console admits. The MCP surface must
 *not* sit behind IAP, because IAP consumes the `Authorization` header and an MCP client has
 no Google identity to present. Both of the obvious builds were tried and both are recorded
 in the source comment at `index.ts` around line 393: one service with IAP on made `/mcp`
@@ -145,26 +145,23 @@ sequenceDiagram
   participant IAP as Google IAP
   participant ORG as Org policy allowedPolicyMemberDomains
   participant CP as Console service
-  participant L as locked.html
+  participant L as login.html
 
   Note over ORG: enforced when an IAM binding is WRITTEN
   B->>IAP: GET /harness
-  IAP-->>B: Google sign-in, hardware key or passkey
+  IAP-->>B: Google sign-in, hardware security key
   IAP->>CP: request plus X-Goog-IAP-JWT-Assertion, ES256
   CP->>CP: waSessionOk
 
-  alt gate_session cookie valid, HMAC ok, not expired, pk flag ok
+  alt IAP JWT verifies against Google JWKS, iss, exp, aud ok, email in WA_APPROVER_EMAILS
     CP-->>B: 200 harness.html
-  else no session, PC_REQUIRE_PASSKEY=1
+  else gate_session cookie valid, HMAC ok, not expired
+    CP-->>B: 200 harness.html
+  else neither -- key cache cold, or not on the allow-list
     CP-->>L: waSendLocked
-    L-->>B: 401 locked.html AT THE SAME URL, no redirect, no next
-    B->>CP: POST /api/webauthn/unlock/options
-    B->>CP: POST /api/webauthn/unlock/verify
-    CP-->>B: Set-Cookie gate_session, then RELOAD in place
-  else PC_REQUIRE_PASSKEY=0 -- what install.sh ships
-    CP->>CP: verify IAP JWT against Google JWKS, check iss, exp, aud
-    CP->>CP: email must be in WA_APPROVER_EMAILS
-    CP-->>B: 200 harness.html
+    L-->>B: 401 login.html AT THE SAME URL, no redirect, no next
+    B->>CP: GET /api/auth/status, until iap is true
+    B->>B: RELOAD in place
   end
 ```
 
@@ -173,9 +170,10 @@ sequenceDiagram
 **Three controls, in order, and each one does a different job.**
 
 **IAP** is the outer door and it is the only one an anonymous caller ever meets on the
-console service. It authenticates a Google account; the posture this fleet runs is an
-account carrying a hardware key -- a Titan -- or a passkey. IAP hands the request on with an
-ES256 assertion in `X-Goog-IAP-JWT-Assertion`.
+console service. It authenticates a Google account, and signing in to that account at IAP's
+prompt is the only sign-in there is; the posture this fleet runs is an account carrying a
+hardware security key -- a Titan. IAP hands the request on with an ES256 assertion in
+`X-Goog-IAP-JWT-Assertion`.
 
 **The org policy** `constraints/iam.allowedPolicyMemberDomains` is the third control and it
 does not sit on the request path at all. It makes granting console access to an
@@ -197,21 +195,20 @@ statement of every guarded handler:
 - **Fail closed on a weak secret.** `WA_SESSION_SECRET` shorter than 16 characters means the
   gate never *issues* and never *verifies* a session. An empty-key HMAC is forgeable, so a
   missing secret must mean no valid sessions rather than any cookie passing.
-- **The cookie is `payload.sig`**, an HMAC-SHA256 over a base64url payload holding the user,
-  a `pk` flag and an expiry. The signature is compared, then the expiry.
-- **A session minted while the passkey was off does not survive turning it back on.** With
-  `PC_REQUIRE_PASSKEY=1` a payload whose `pk !== 1` is refused. Without that, disarming for
-  ten minutes would hand out full-length sessions that outlive the policy that permitted
-  them.
-- **`PC_REQUIRE_PASSKEY` is on in code and off as installed.** The in-code default is on
-  (`index.ts:2669`: anything other than the string `'0'` is on); `install.sh` writes `0` onto
-  both services, so the shipped install takes the second branch. With it off, a *verified*
-  IAP identity on `WA_APPROVER_EMAILS` is accepted. Verified means: signature checked against Google's IAP JWKS at
+- **A verified IAP identity on `WA_APPROVER_EMAILS` is accepted first**, on every request.
+  Verified means: signature checked against Google's IAP JWKS at
   `https://www.gstatic.com/iap/verify/public_key-jwk`, `iss` equal to
-  `https://cloud.google.com/iap`, `exp` in the future, and `aud` equal to `PC_IAP_AUD` when
-  that is set. `X-Goog-Authenticated-User-Email` is **not** trusted on its own -- it is
-  trivially forged by anyone who reaches the service directly if IAP is ever detached -- and
-  a cold JWKS cache fails closed and schedules a refresh rather than admitting the caller.
+  `https://cloud.google.com/iap`, `exp` in the future, and `aud` equal to `PC_IAP_AUD` --
+  and with `PC_IAP_AUD` unset there is no IAP admission at all, because an assertion minted
+  for any IAP-protected application would otherwise pass. `X-Goog-Authenticated-User-Email`
+  is **not** trusted on its own -- it is trivially forged by anyone who reaches the service
+  directly if IAP is ever detached -- and a cold JWKS cache fails closed and schedules a
+  refresh rather than admitting the caller.
+- **The cookie is `payload.sig`**, an HMAC-SHA256 over a base64url payload holding the user
+  and an expiry. The signature is compared, then the expiry. It is honoured for
+  `WA_SESSION_MIN` minutes and is the only credential the console issues; any other field a
+  cookie carries is ignored rather than rejected, so a cookie from an earlier revision
+  survives an upgrade.
 
 **What the diagram does not show.**
 
@@ -224,44 +221,37 @@ and that is the whole front door.
 
 *The 401 is served in place, which is the design and not an accident.* `waSendLocked` sets
 status 401, `Cache-Control: no-store, no-cache, must-revalidate`, and sends
-`locked.html` at the URL the caller asked for. Three consequences, all deliberate:
+`login.html` at the URL the caller asked for. Three consequences, all deliberate:
 `?next=` is deleted rather than reimplemented, because the caller's URL never changed and
-the unlock lands them where they already were by reloading -- and the enumeration oracle
+the sign-in lands them where they already were by reloading -- and the enumeration oracle
 goes with it; the status *means* refused, where the old 302 was indistinguishable from a
 page that had moved; and **no `WWW-Authenticate` header is sent**, so no browser credential
 dialog appears.
 
-*The unlock page is small and carries exactly four flows.* `locked.html` is the only
-document any console URL serves to a caller with no session: unlock, first setup with the
-bootstrap secret, add-a-device consuming an enrol token, and the status call that chooses
-between them. It **consumes** an enrol token and never mints one -- minting
-(`/api/webauthn/enroll/link`) stays behind a session check, because handing out an
-enrolment link is a privileged act. Removing any of the four locks the operator out with no
-way back except a manual bootstrap, which is why the file says so at the top.
+*The locked page is small and carries exactly one flow.* `login.html` is the only document
+any console URL serves to a caller `waSessionOk` did not admit. It tells the caller to sign
+in with Google, polls `GET /api/auth/status` with a short backoff while the IAP key cache
+warms, and reloads the URL it was served at once a verified identity is visible -- capped,
+and counted in `sessionStorage`, so a refusal cannot spin the front door. Past the cap it
+stops and names the likely cause: the account is not on `WA_APPROVER_EMAILS`. It loads no
+third-party script and raises no prompt of its own, because if you can read it, Google has
+already let you in.
 
 *One endpoint answers without a session, and it is smaller than it sounds.*
-`GET /api/webauthn/status` is mapped `console`, so IAP has already admitted the caller
+`GET /api/auth/status` is mapped `console`, so IAP has already admitted the caller
 against an in-domain Google account -- it is not reachable anonymously from the internet.
-It answers
-`{registered, setupEnabled, sessionMin, iap}` without a **session**, which is
-unavoidable: the locked page must choose a flow before a session can exist. What it used to
-disclose was a standing answer to "is the first-registration window open", for the whole life
-of the install. Since [SEC-STATUS-SETUPFLAG-V83] `setupEnabled` is reported **only while no
-credential is registered** -- the one state in which the page reads it, since its branch sits
-after `else if (st.registered)` -- so once a credential exists the field is constant false.
-On a stock 9.0 install none is registered and the page is never reached, because
-`PC_REQUIRE_PASSKEY=0` admits the IAP identity before `locked.html` is served at all. Note
-also what it never was: both setup endpoints refuse without a constant-time
-`waEq()` match on `WA_BOOTSTRAP_SECRET`, so knowing the window is open was never sufficient
-to walk through it.
+It answers `{sessionMin, iap}` without a **session**, which is unavoidable: the locked page
+must tell a cold key cache from a refusal before a session can exist. `iap` is computed
+through the same key cache `waSessionOk` reads, so it says only whether *this* request
+carried a verified identity -- which its caller already knows.
 
 *A session is not an approval.* `WA_SESSION_MIN` has an in-code default of 10 minutes;
 `oss/wiki/pages/operators-guide.md` records that a fresh install sets 240, i.e. a session
-lasts four hours. Elevation is separate and narrower: `waMakeElevated` binds
-an elevation to **one job id and one command digest**, `WA_ELEVATE_MIN` defaults to 5
-minutes, and `waElevatedForJob` re-hashes the command from the job's *current* arguments so
-an edited command is refused. A generic "this browser authenticated recently" cookie has
-never been allowed to satisfy a destructive approval, and that is unchanged by anything below.
+lasts four hours. Nothing in a session approves a job: the approval is the KMS signature
+`pcAutoRun` produces, bound to **one job id, one command digest and one argument digest**,
+so an edited command is refused by the executor. A generic "this browser authenticated
+recently" cookie has never been allowed to satisfy an approval, and that is unchanged by
+anything below.
 
 ---
 
@@ -624,8 +614,8 @@ are looking at the file this page describes.
 ### `control-plane/src/index.ts` -- 634,893 bytes
 
 The control plane. One Express app holding the entire route table: the console pages, the
-cookie session code (`waSessionOk`, `waSendLocked`, `waMakeSession`,
-`waMakeElevated`, `waElevatedForJob`), the MCP tool registrations, the OAuth 2.1 and
+session code (`waSessionOk`, `waSendLocked`, `waMakeSession`, `pcIapEmail`), the MCP tool
+registrations, the OAuth 2.1 and
 discovery endpoints, the chat provider plumbing, and the dispatcher that calls the executor
 (`waCallExec`, `waApprovalEnvelope`). It is also where `PC_SURFACE` and `PC_SURFACE_MAP`
 live, so this single file is what both deployed services are. It is **transpiled, not
@@ -664,15 +654,12 @@ and the file says so.
 
 ### The three HTML documents
 
-- **`control-plane/src/locked.html` -- 18,446 bytes.** The only document any console URL
+- **`control-plane/src/login.html` -- 9,314 bytes.** The only document any console URL
   serves to a caller with no session, served in place under a 401 at whichever URL was
-  asked for. Four flows: unlock, first setup, add-a-device, status. On a stock install it is
-  reached only by a caller carrying no IAP identity at all, since `PC_REQUIRE_PASSKEY=0`
-  admits a verified identity on the approver allow-list without it; the file stays in the
-  tree because `PC_REQUIRE_PASSKEY=1` puts it back in the path unchanged. It consumes enrol
-  tokens and never mints them. The SimpleWebAuthn browser bundle is vendored inline and
-  pinned by tarball sha512 and file sha384; it used to be described as a byte-identical copy
-  of the one in `gate.html`, and since that file is gone this is now the only copy.
+  asked for. One flow: tell the caller to sign in with Google, poll `GET /api/auth/status`
+  while the IAP key cache warms, reload in place once a verified identity is visible, and
+  stop -- capped -- to say what it measured. It loads no third-party script and carries the
+  `pc-locked-stage` marker the installer's self-test greps for.
 - **`control-plane/src/harness.html` -- 106,732 bytes.** The authenticated console: chat,
   the shell, VM controls, the fleet views. `GET /harness` and `GET /chat` both serve it, and
   both call `waSessionOk` first and `waSendLocked` otherwise. `GET /` redirects here.

@@ -1,7 +1,6 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <html lang="en">
-<!-- PC-PASSKEY-UX-v1 : passkey-neutral wording + truthful abort copy -->
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
@@ -731,7 +730,7 @@ window.pcWhimsyOn = function(){
 .agent .st{box-shadow:none!important}
 </style>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png">
-<style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(var(--acc-rgb),.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style><script src="https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@10.0.0/dist/bundle/index.umd.min.js"></script>
+<style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(var(--acc-rgb),.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style>
 
 <script id="pcdecor">
 (function(){
@@ -1074,7 +1073,7 @@ window.pcWhimsyOn = function(){
         row.innerHTML='<span class="dpdot '+lt[0]+'"></span><div><div class="nm">'+esc(a.agent.replace(/^fleet-/,''))+'</div><div class="wt">'+esc(lt[1])+'</div></div><div class="meta">'+(a.last_ts?ago(a.age_min):'')+'</div>';
         inner.appendChild(row);});
       if(!list.length) inner.innerHTML='<div class="dpag"><div class="wt">no strains reporting</div></div>';
-    } else if(sum&&sum.__st===401){ inner.innerHTML='<div class="dpag"><div class="wt">Unlock at the Autoclave to see live fleet status.</div></div>'; }
+    } else if(sum&&sum.__st===401){ inner.innerHTML='<div class="dpag"><div class="wt">Sign in to see live fleet status.</div></div>'; }
     else { inner.innerHTML='<div class="dpag"><div class="wt">—</div></div>'; }
     asec.appendChild(inner); wrap.appendChild(asec);
     body.innerHTML=''; body.appendChild(wrap);
@@ -1523,7 +1522,7 @@ window.pcWhimsyOn = function(){
       }
       function load(){
         fetch('/api/oauth/allowed',{credentials:'same-origin'}).then(function(r){
-          if(r.status===401){ say('Unlock the gate to manage this list.'); return null; }
+          if(r.status===401){ say('Sign in to manage this list.'); return null; }
           return r.json();
         }).then(function(d){
           if(!d) return;

@@ -76,13 +76,14 @@ installer printed both when it finished.
   console: it reads nothing and issues no session.
 - MCP URL, at `/mcp` -- give this to an agent client. See **Connect an agent**.
 
-Underneath IAP the console is still guarded by the application's own session check; a
-fresh install sets `PC_REQUIRE_PASSKEY=0`, and in that mode a verified IAP identity on
-the approver allow-list is what satisfies it. Two independent locks, on purpose. If IAP
+Underneath IAP the console is still guarded by the application's own session check: a
+verified IAP identity on the approver allow-list is what satisfies it, and a session
+cookie with a TTL is the only credential the console issues. Two independent locks, on
+purpose. If IAP
 were ever removed, the console would still not be readable by an anonymous caller:
 `/harness`, `/wiki`, `/flow`, `/chat`, `/lakeview` and `/flowhood` answer an anonymous
 request with `401` and the locked document served **in place**, at the URL you asked
-for -- no redirect and no `?next=`. Unlocking therefore reloads you where you already
+for -- no redirect and no `?next=`. Signing in therefore reloads you where you already
 were, rather than dropping you at a front door.
 
 **There is no `/gate` page, and looking for one is the surest sign you are reading
@@ -105,7 +106,7 @@ Three controls, and the third is the one people leave out.
 
 1. **A phishing-resistant hardware key.** IAP authenticates you against your Google
    account, so whatever that account requires is what the console requires. Put a
-   Titan key or a passkey on it and reaching the console costs a physical touch.
+   Titan key on it and reaching the console costs a physical touch.
    There is no password to phish and no code to relay.
 2. **Enforced at the edge, not by the app.** IAP refuses an unauthenticated request
    at Google's front door. Your container is never reached, so a bug in the

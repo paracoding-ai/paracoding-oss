@@ -73,8 +73,9 @@ The authentication root moved from a per-job tap to the account behind the conso
 so it is worth stating what that account has to get past.
 
 **Identity-Aware Proxy**, in front of the console service, authenticating a Google account.
-The posture this fleet runs is an account carrying a hardware key (Titan) or a passkey,
-plus the organization policy `constraints/iam.allowedPolicyMemberDomains`, which makes
+Signing in to that account at IAP's prompt is the only sign-in there is. The posture this
+fleet runs is an account carrying a hardware security key (Titan), plus the organization
+policy `constraints/iam.allowedPolicyMemberDomains`, which makes
 granting an out-of-domain account *impossible* rather than merely discouraged -- the grant
 is refused at the moment it is written. Measured: adding a consumer Gmail address returned
 `FAILED_PRECONDITION`, "not in permitted organization".
@@ -85,12 +86,16 @@ account and re-enabling it *does* work, and the exception it creates is permanen
 recommendation for a second pair of hands is a second **in-domain** account with its own
 key, not a personal address let in through a temporary hole.
 
-**Then the approver allow-list.** A fresh install sets `PC_REQUIRE_PASSKEY=0` and seeds
-`WA_APPROVER_EMAILS` with the installing account, so the application's own check is
-satisfied by a verified IAP identity on that list -- no enrolment, no credential to
-register. `WA_SESSION_MIN=240` still bounds a session at four hours. An anonymous caller,
-who carries no IAP identity at all, still gets the 401 with the locked document served in
-place, at the URL asked for.
+**Then the approver allow-list.** A fresh install seeds `WA_APPROVER_EMAILS` with the
+installing account, and the application's own check is satisfied by a verified IAP identity
+on that list -- the control plane verifies the assertion IAP attaches against Google's
+published keys and its own audience (`PC_IAP_AUD`) on every request, and never trusts the
+bare identity header. There is no enrolment and no credential of the console's own to
+register. The one thing the console issues is a session cookie, `gate_session`, signed under
+`WA_SESSION_SECRET` and honoured for `WA_SESSION_MIN` minutes (`install.sh` writes 240, four
+hours); a missing or short secret means no session is ever issued or accepted, so the gate
+fails closed rather than open. An anonymous caller, who carries no IAP identity at all, gets
+the 401 with the locked document served in place, at the URL asked for.
 
 ## What is refused at runtime: by default, nothing
 
@@ -212,8 +217,8 @@ whether a command is a good idea -- it is about recoverability. Everything in it
 you unable to reach the console that would let you undo it.
 
 The nine, as rule ids you will see in the journal: `LC1` console service rename (renaming it
-changes the console hostname, which is both the IAP audience and the WebAuthn Relying Party
-ID -- so it takes out the way in and invalidates any credential enrolled under it), `LC2` the
+changes the console hostname, which is the IAP audience the control plane checks -- so it
+takes out the way in), `LC2` the
 MCP service name and its domain mapping, `LC3` the OAuth config, `LC4` the auth-path
 secrets, `LC5` the approval KMS keyrings, `LC6` the signer's own code and config, `LC7`
 `PC_REQUIRE_ASSERTION`, `LC8` writes to the identity collections, `LC9`
@@ -262,12 +267,14 @@ acknowledged lockout-class job through, journalled as `exec_lockout_acked` so "a
 yes to a lockout-class change" can never be confused in the transcript with "the checker
 found nothing".
 
-## Not everything auto-runs, and this is the part to know at 2am
+## What auto-runs, and this is the part to know at 2am
 
-`run_command` is the **only** tool wired to the auto-run path. `stage_privileged_job`, every
-`gcp_api` mutation, and `run_roll` still write a `pending` job and wait for a human. They
-return `STAGED ... job <id>`, or
-`{ "mode": "staged", "job_id": "..." }`.
+`run_command`, `stage_privileged_job`, every `gcp_api` mutation and `run_roll` all go through
+the same auto-run path: with `PC_AUTO_APPROVE=1` the job is stamped, signed and fired in the
+call that staged it, and the result comes straight back. Two things still stop at `pending`
+on a stock install: a staged job that carries no command text for the executor to run, and
+-- with `PC_GUARDRAILS=1` -- a destructive body, which is handed back to you in chat instead.
+Those return `STAGED ... job <id>`, or `{ "mode": "staged", "job_id": "..." }`.
 
 So the most useful thing to read in a tool result is the first word. **`RAN` means it
 happened. `STAGED` means it did not.** If you read `STAGED` and walk away believing the work
@@ -278,37 +285,22 @@ instantly as the control plane's own service account, and if that comes back 401
 stages a gated job rather than failing. Calling it "just to read something" can put a real
 job in the queue.
 
-## Approving something that did wait
+## A job that did wait
 
-The console page that rendered the queue was deleted with `/gate`, and the view that replaced
-it is a **lake object** (`shared/harness/flow-view.html`) read at request time -- so what you
-see in the drawer depends on the copy in your lake rather than on the deploy. The console
-polls `GET /api/webauthn/pending` every fifteen seconds and lights an indicator when the list
-is not empty; that indicator is the reliable signal. If it is lit and the drawer shows you
-nothing, go at it directly: `list_pending_confirm` for the list, `GET /api/webauthn/job/:id`
-for one job, `read_job_log` afterwards for the result.
+A job that stopped at `pending` -- because `PC_AUTO_APPROVE` is off, or because it carried
+nothing the executor could run -- sits there. Nothing comes along and runs it: there is no
+timer, no retry, no approval route and no console page that fires a pending job. Read the
+pile with `list_pending_confirm`, read one job's outcome afterwards with `read_job_log`, and
+retire a proposal you no longer want with `POST /api/jobs/supersede`, which records who did
+it and why. Nothing else retires it: a job that stopped at `pending` stays there until you do.
 
-Approving one of these goes through the legacy approval routes, which no console page calls
-on a stock install. When they are used, an approval is bound to that job id and to the sha256
-of that job's command as it stands at approval time -- so a command edited underneath you is
-refused rather than approved as new text -- and it runs under the approving human's Google
-access token. Three answers you will see instead of a result:
+If what you staged should have run, the fix is the switch, not a queue: set
+`PC_AUTO_APPROVE=1` on both services, or run the command yourself from Cloud Shell.
 
-**`412 google_not_connected`** -- approvals run as you, so they need a Google connection.
-Nothing was changed and the job is still waiting. Anything that reloads the page kills the
-browser-held Google token with it; reconnect and approve once.
-
-**`409 stale_gate_view`** -- the document drifted between the render and the approval, so
-nothing was done to it. Reload and read the job again. Deny is bound the same way, because a deny
-aimed at a drifted id destroys a staged job nobody chose to discard.
-
-**`409` with `preserved_exit_code`** -- you approved something that has already run or is
-running now. Nothing was overwritten. If `inflight` is true, wait.
-
-**Nothing supersedes automatically.** Every staged job stays listed until it is approved,
-denied, superseded on purpose, quarantined, or expires. An earlier automatic supersede --
-which retired every pending job that was not the newest of its `staged_by` + `command_type`
-key, at the moment you opened the page to read the list -- is deleted.
+**Nothing supersedes automatically.** Every staged job stays listed until it is superseded
+on purpose. An earlier automatic supersede -- which retired every
+pending job that was not the newest of its `staged_by` + `command_type` key, at the moment
+the list was read -- is deleted.
 
 ## Reading the result
 

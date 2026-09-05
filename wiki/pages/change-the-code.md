@@ -38,7 +38,7 @@ control-plane/src/mcp2026.ts
 control-plane/src/pcgit/          the object store: refs in Firestore, blobs in the lake
 control-plane/src/dash.html       the dashboard
 control-plane/src/harness.html    the main console UI
-control-plane/src/locked.html     the 401 page, served in place at any human URL
+control-plane/src/login.html      the 401 page, served in place at any human URL
 control-plane/Dockerfile          the build
 gate-exec/exec_server.py          the executor
 install.sh                        provisioning
@@ -71,7 +71,7 @@ are in tells you whether you need a deploy.
 
 ### (a) The three HTML files -- needs a rebuild
 
-`dash.html`, `harness.html`, `locked.html`. **Three, not four.** The fourth was
+`dash.html`, `harness.html`, `login.html`. **Three, not four.** The fourth was
 `gate.html`, roughly 142KB of it, and it is deleted along with the `/gate` route that
 served it. If you are working from an older checkout or an older copy of this page and
 you go looking for it, it is not missing -- it is gone on purpose.
@@ -80,13 +80,13 @@ These are real files on disk. `index.ts` reads them at boot with a helper, so th
 baked into the running container. The product name, the page titles, the header, the
 colours and the footer copy are all in here.
 
-`locked.html` is worth knowing the shape of before you edit it, because its role changed
-with the gate. It is no longer a page you get redirected *to*. An anonymous request to
-`/harness`, `/wiki`, `/flow`, `/chat`, `/lakeview` or `/flowhood` is answered **401 with
-this document served in place, at the URL the caller asked for** -- no redirect, no
-`?next=`. `GET /` is a 302 to `/harness`. The installer sets `PC_REQUIRE_PASSKEY=0`, so on a
-stock install this document is what an identity-less caller gets and nothing more; set
-`PC_REQUIRE_PASSKEY=1` and it is also the working WebAuthn unlock page.
+`login.html` is worth knowing the shape of before you edit it. It is not a page you get
+redirected *to*. An anonymous request to `/harness`, `/wiki`, `/flow`, `/chat`,
+`/lakeview` or `/flowhood` is answered **401 with this document served in place, at the
+URL the caller asked for** -- no redirect, no `?next=`. It tells the caller to sign in
+with Google, polls `GET /api/auth/status` while the IAP key cache warms, and reloads the
+URL it was served at once a verified identity is visible. Keep the `pc-locked-stage`
+marker on its card element: the installer's self-test greps for it.
 
 Find them:
 
@@ -117,14 +117,14 @@ Prose only.
 
 **Do not rename the console Cloud Run service.**
 
-That hostname is load-bearing twice. It is the IAP audience the installer pins into
-`PC_IAP_AUD`, and it is the WebAuthn Relying Party ID the installer writes into `WA_RP_ID`
-and `WA_RP_ORIGIN`. Rename the service, the hostname changes, and **both break** -- the IAP
-audience check stops matching, and any credential enrolled under the old name stops working.
+That hostname is load-bearing. It is the IAP audience the installer pins into
+`PC_IAP_AUD` on both services, it is what `PC_CONSOLE_URL` names in the OAuth discovery
+document, and it is the URL every operator has bookmarked. Rename the service, the
+hostname changes, and the IAP audience check stops matching -- every sign-in is refused
+until both services are redeployed with the new value.
 
-That is why `LC1` names a console service rename as lockout-class. The way back into the
-console if the identity provider in front of it ever fails is the WebAuthn unlock page, and
-breaking it leaves you depending on the outer door being healthy on the day you need it.
+That is why `LC1` names a console service rename as lockout-class: the console's only way
+in is the identity provider in front of it, and a rename takes that out.
 
 Change the display name in the HTML. Leave the service name alone. If you genuinely
 must move to your own domain, stand the new console up and prove you can reach it *before*
@@ -357,7 +357,7 @@ gcloud run services describe <console-service> \
   --format='value(status.traffic.filter("percent:100").revisionName,status.url)'
 ```
 
-Then open the console URL and hard-reload. If you changed `locked.html` you will see it
+Then open the console URL and hard-reload. If you changed `login.html` you will see it
 **without signing in** -- an anonymous request gets it at 401, in place -- and that is
 the fastest confirmation available anywhere in this system, because it needs no session,
 no credential and no IAP round trip.

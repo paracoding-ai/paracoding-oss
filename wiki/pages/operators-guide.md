@@ -60,8 +60,8 @@ front door; there is nothing else to type.
 Two doors stand in front of it, in this order.
 
 **Identity-Aware Proxy**, in front of the console service, authenticating a Google account.
-The posture this fleet runs is an account carrying a hardware key (Titan) or a passkey,
-plus the org policy `constraints/iam.allowedPolicyMemberDomains`, which makes granting an
+Signing in to that account at IAP's prompt is the only sign-in there is. The posture this
+fleet runs is an account carrying a hardware security key (Titan), plus the org policy `constraints/iam.allowedPolicyMemberDomains`, which makes granting an
 out-of-domain account *impossible* rather than merely discouraged -- the grant is refused at
 the moment it is written. Measured: adding a consumer Gmail address returned
 `FAILED_PRECONDITION`, "not in permitted organization".
@@ -72,13 +72,16 @@ account and re-enabling it does work, and the exception it creates is permanent.
 recommendation for a second pair of hands is a second **in-domain** account with its own
 key, not a personal address let in through a temporary hole.
 
-**Then the approver allow-list.** A fresh install sets `PC_REQUIRE_PASSKEY=0` and seeds
-`WA_APPROVER_EMAILS` with the installing account, so the application's own check is satisfied
-by the verified IAP identity you already presented -- there is nothing to enrol and nothing
-to unlock. `WA_SESSION_MIN=240` still bounds a session at four hours. An anonymous caller
-carries no IAP identity, so it still gets the 401 with the locked document served in place;
-because that 401 is served at the URL you asked for, the way back is a **reload**, which is
-why `?next=` was deleted rather than reimplemented.
+**Then the approver allow-list.** A fresh install seeds `WA_APPROVER_EMAILS` with the
+installing account, and the application's own check is satisfied by the verified IAP
+identity you already presented -- the control plane checks the assertion's signature and
+audience itself, on every request, and trusts no bare header. There is nothing to enrol and
+nothing to unlock. The one credential the console issues is a session cookie signed under
+`WA_SESSION_SECRET`; `WA_SESSION_MIN=240` bounds it at four hours, and a missing or short
+secret means no session is issued or accepted at all. An anonymous caller carries no IAP
+identity, so it gets the 401 with the locked document served in place; because that 401 is
+served at the URL you asked for, the way back is a **reload**, which is why `?next=` was
+deleted rather than reimplemented.
 
 **Add a second operator now, before you need one.** The console fails closed with nobody on
 the allow-list, and there is no console path around it: recovery from zero is a redeploy and
@@ -86,23 +89,15 @@ is not a documented happy path. Two grants do it -- the account on the console s
 binding, and its address in `WA_APPROVER_EMAILS` on both services. Treat two accounts able to
 reach the console as an operating requirement, not advice.
 
-### The legacy passkey gate
+### There is no second way in
 
-`PC_REQUIRE_PASSKEY=1` is the one line that re-arms the whole legacy WebAuthn gate. Nothing
-was deleted to reach the current posture: `locked.html` and all fifteen `webauthn` routes are
-still in the tree, unreferenced, and that variable puts them back in the path unchanged --
-the console then requires an enrolled credential and an unlock, and `WA_SESSION_SECRET` is
-still minted at install for exactly this reason.
-
-It is a deploy-time variable on both services, so arming it is a Cloud Run revision and no
-job can flip it. Arm it before you lose access, not after: with the gate on and no credential
-enrolled, the console fails closed the same way, and the credential store is a Secret Manager
-secret that is one of the five the uninstaller deletes.
-
-```
-gcloud run services update CONSOLE-SERVICE --region REGION --project PROJECT \
-  --update-env-vars PC_REQUIRE_PASSKEY=1
-```
+IAP, the Google identity it verifies, the approver allow-list and the session cookie are the
+whole of console authentication. There is no credential of the console's own to register
+and no switch that adds one. If the identity provider in front of the console fails, the
+console is unreachable until it is back; if you lock yourself out by configuration, the
+recovery is a deploy-time change from Cloud Shell, which you hold. Both `WA_APPROVER_EMAILS`
+and the IAP binding are Cloud Run configuration, so no job can change them and no compromised
+control plane can widen them.
 
 One error worth recognising:
 
@@ -217,47 +212,27 @@ by anything that can reach the executor. An acked run is journalled separately, 
 `exec_lockout_acked`, so "a human said yes to a lockout-class change" can never be confused
 in the transcript with "the checker found nothing".
 
-### Not everything auto-runs, and this is the part to know at 2am
+### What auto-runs, and this is the part to know at 2am
 
-`run_command` is the only tool wired to the auto-run path. **`stage_privileged_job`, every
-`gcp_api` mutation, and `run_roll` still write a `pending` job and wait for a human.** They
-return `STAGED ... job <id>`, or
+`run_command`, `stage_privileged_job`, every `gcp_api` mutation and `run_roll` all go through
+the same auto-run path: with `PC_AUTO_APPROVE=1` the job is stamped, signed and fired in the
+call that staged it. **Two things still stop at `pending`:** a staged job that carries no
+command text for the executor to run, and -- with `PC_GUARDRAILS=1` -- a destructive body,
+which is handed back to you in chat. Those return `STAGED ... job <id>`, or
 `{ mode: "staged", job_id }`.
 
 So the single most useful thing to read in a tool result is the first word. **`RAN` means it
 happened. `STAGED` means it did not.** If you read `STAGED` and walk away believing the work
 is done, nothing will tell you otherwise until you check the world.
 
-Approving one of those goes through the legacy approval routes, which no console page calls
-on a stock install. An approval made that way is bound to that job id and to the command text
-as it stands at the time, and it runs under the approving human's Google access token. Three
-answers you will see instead of a result:
-
-**`412 google_not_connected`** -- "Approvals run as you, so they need a Google connection.
-Nothing was changed and this job is still waiting." Anything that reloads the page kills the
-browser-held Google token with it. Reconnect Google and approve once. The job is still
-pending and nothing was consumed.
-
-**`409 stale_gate_view`** -- the document drifted between the render and the approval, so nothing
-was done to it. Reload the console page and read the job again; do not retry against the
-stale one. Deny is bound the same way, because a deny aimed at a drifted id destroys a staged
-job nobody chose to discard.
-
-**`409` with `preserved_exit_code`** -- you approved something that has already run, or is
-running right now. Nothing was overwritten. If `inflight` is true, wait; the job is still
-executing from your earlier approval.
-
 ### Where the remaining queue lives
 
-The console polls `GET /api/webauthn/pending` every fifteen seconds and puts a red dot on the
-LAYERS button when the pending list is not empty. That dot is the reliable signal.
-
-Be careful how much you infer from the panel itself. The document that used to render the
-queue was deleted with `/gate`, and the view that replaced it is a **lake object**
-(`shared/harness/flow-view.html`) read at request time -- so what you actually see depends on
-the copy in your lake rather than on the deploy. If the drawer shows you nothing and the dot
-is lit, go at it directly: `list_pending_confirm` for the list, `GET /api/webauthn/job/:id`
-for one job, and `read_job_log` afterwards for the result.
+A job that stopped at `pending` sits there. Nothing comes along and runs it -- no timer, no
+retry, no approval route and no console page that fires it. `list_pending_confirm` lists the
+pile, `read_job_log` reads one job's outcome afterwards, and `POST /api/jobs/supersede`
+retires a proposal you no longer want, recording who did it and why. If what you staged
+should have run, the fix is the switch -- `PC_AUTO_APPROVE=1` on both services -- or running
+the command yourself from Cloud Shell.
 
 ### Refusals at stage time, which cost you nothing
 
@@ -285,12 +260,10 @@ superseding job id and no role, and so destroyed staged work that afterwards rep
 could have served are answered at stage time instead, on the exact command bytes, with a loud
 refusal that destroys nothing.
 
-**`expired_reason` has a writer now.** It did not, while three readers projected it, which
-is why an expired job used to come back with `reason: null`. Expiry still runs on a
-pending-list load -- `WA_JOB_TTL_MIN`, default 60 minutes -- and it now writes a sentence
-saying the job sat staged past its time-to-live, ran nothing, and can be re-staged. Quarantine
-of a job whose `staged_by` is not an active provisioned strain also still runs there, exactly
-once per job, and writes `quarantine_reason`.
+**Nothing expires a pending job either.** There is no time-to-live and no sweep: a job
+that stopped at `pending` stays there until it is superseded on purpose. `read_job_log`
+still projects `expired_reason` and `quarantine_reason` for records an earlier release
+wrote, so an old job's reason is not lost.
 
 Two classes of bad job still never get staged at all: one that destroys a Secret Manager
 secret without invoking the destroy preflight, and one whose command contains an unpaired
@@ -645,7 +618,7 @@ do and then does it.
 
 Without `--keep-data` it deletes the Firestore database it created -- approvals, journal,
 work items, strain records, session keys. Either way it deletes five Secret Manager secrets,
-one of which is the WebAuthn credential store. **Both are irreversible.** Pass `--keep-data`
+one of which is the executor's credential store. **Both are irreversible.** Pass `--keep-data`
 if you intend to reinstall over the same state.
 
 It deletes a leftover workstation instance from an earlier release if one exists, and says
@@ -702,7 +675,7 @@ Each is called out in place above. Collected so you can recognise one before you
 | Action | What does not come back |
 |---|---|
 | `uninstall.sh` without `--keep-data` | the Firestore database: approvals, journal, work items, strains, session keys |
-| `uninstall.sh`, either way | five Secret Manager secrets, including the WebAuthn credential store |
+| `uninstall.sh`, either way | five Secret Manager secrets, including the executor's credential store |
 | Deleting either Cloud Storage bucket | agent memory and the handoffs; the git object store, which is your commit history |
 | Deleting a leftover workstation instance | its boot disk |
 | Overwriting the vault master | every object sealed under the old one |

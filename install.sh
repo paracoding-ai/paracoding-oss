@@ -67,11 +67,32 @@ PC_ARG_REGION=""
 PC_NO_DEVPIPE="${PC_NO_DEVPIPE:-0}"
 PC_NO_HISTORY="${PC_NO_HISTORY:-0}"
 PC_PROFILE="${PC_PROFILE:-}"
+# [SEC-APPROVER-EMAILS-V1] WHO MAY SIGN IN, DECIDED ON THE COMMAND LINE AND NOWHERE ELSE.
+# 6d/10 used to ASK for additional allowed Google accounts on the terminal, looping until an
+# empty line -- the one prompt left in an installer that is otherwise unattended start to end,
+# and it shipped in four releases before anyone noticed because the rehearsal harness never
+# sat at it. It asks nothing now. The account running the install is always allowed, and
+# EVERY other address comes from exactly one of:
+#   --approver-emails a@b.com,c@d.com     (wins when both are given)
+#   PC_APPROVER_EMAILS=a@b.com,c@d.com    (the env form, for scripted installs)
+# Comma-separated, lower-cased, shape-checked and de-duplicated HERE, at second zero, so a typo
+# is refused before a single API is enabled rather than at 6d/10 with everything else built.
+# Anything not given here is added later in the console Settings (Allowed accounts), which
+# edits the same Firestore document 6d/10 seeds; no re-install and no redeploy.
+PC_ARG_APPROVER=""
 PC_USAGE="usage: ./install.sh [--project ID] [--region REGION] [--no-adopt] [--plan]
-                   [--minimal] [--profile minimal|full] [--no-devpipe] [--no-history]"
+                   [--minimal] [--profile minimal|full] [--no-devpipe] [--no-history]
+                   [--approver-emails a@b.com,c@d.com]
+  --approver-emails LIST   additional Google accounts allowed to sign in, comma-separated.
+                           The account running this install is always allowed and is never
+                           asked for. Env form: PC_APPROVER_EMAILS=LIST (the flag wins).
+                           Omit it: only the installing account is seeded, and more can be
+                           added later in the console Settings."
 while [ $# -gt 0 ]; do
   case "$1" in
-    --rehearse|--stop-before-passkey) PC_REHEARSE=1; shift ;;
+    --rehearse) PC_REHEARSE=1; shift ;;
+    --approver-emails) PC_ARG_APPROVER="${2:-}"; [ -n "$PC_ARG_APPROVER" ] || { echo "--approver-emails needs a comma-separated list of addresses"; exit 2; }; shift 2 ;;
+    --approver-emails=*) PC_ARG_APPROVER="${1#--approver-emails=}"; shift ;;
     --plan) PC_PLAN=1; shift ;;
     --no-adopt) PC_NO_ADOPT=1; shift ;;
     --no-devpipe) PC_NO_DEVPIPE=1; shift ;;
@@ -97,6 +118,44 @@ while [ $# -gt 0 ]; do
        else echo "unexpected argument: $1"; echo "$PC_USAGE"; exit 2; fi; shift ;;
   esac
 done
+# [SEC-APPROVER-EMAILS-V1] RESOLVE THE ADDRESS LIST: flag over env, then validate every entry.
+# The result is PC_EXTRA_EMAILS, a space-separated, lower-cased, de-duplicated list. It is
+# expanded UNQUOTED into a python3 argv at 6d/10, so the accepted alphabet below deliberately
+# has no whitespace and no glob character in it -- that is a safety property, not pedantry.
+# The installing account is not known yet (gcloud is asked at 0/10); 6d/10 drops it from this
+# list if it was repeated, because it is the env floor and is always first regardless.
+PC_APPROVER_SRC=""
+PC_APPROVER_RAW=""
+if [ -n "$PC_ARG_APPROVER" ]; then
+  PC_APPROVER_SRC="--approver-emails"; PC_APPROVER_RAW="$PC_ARG_APPROVER"
+elif [ -n "${PC_APPROVER_EMAILS:-}" ]; then
+  PC_APPROVER_SRC="PC_APPROVER_EMAILS"; PC_APPROVER_RAW="$PC_APPROVER_EMAILS"
+fi
+PC_EXTRA_EMAILS=""
+if [ -n "$PC_APPROVER_RAW" ]; then
+  for _pc_em in $(printf '%s' "$PC_APPROVER_RAW" | tr ',;' '  ' | tr '[:upper:]' '[:lower:]'); do
+    case "$_pc_em" in
+      *[!a-z0-9.@_%+-]*|*@*@*|@*|*@|*@.*|*.@*|*@*.|*@*..*)
+        echo "BAD APPROVER EMAIL: \"$_pc_em\" (from $PC_APPROVER_SRC) is not an email address."
+        echo "  Addresses are comma-separated: --approver-emails a@b.com,c@d.com"
+        echo "  NOTHING HAS BEEN CREATED. This is refused before step 0/10."
+        exit 2 ;;
+      *@*.*) : ;;
+      *)
+        echo "BAD APPROVER EMAIL: \"$_pc_em\" (from $PC_APPROVER_SRC) is not an email address."
+        echo "  Addresses are comma-separated: --approver-emails a@b.com,c@d.com"
+        echo "  NOTHING HAS BEEN CREATED. This is refused before step 0/10."
+        exit 2 ;;
+    esac
+    case " $PC_EXTRA_EMAILS " in
+      *" $_pc_em "*) : ;;
+      *) PC_EXTRA_EMAILS="$PC_EXTRA_EMAILS $_pc_em" ;;
+    esac
+  done
+  _pc_em=""
+  [ -n "$PC_EXTRA_EMAILS" ] || { echo "$PC_APPROVER_SRC was given but holds no address"; exit 2; }
+  echo "additional allowed Google accounts ($PC_APPROVER_SRC):$PC_EXTRA_EMAILS"
+fi
 # [SEC-INSTALL-PROFILE-V1] RESOLVE THE PROFILE, THEN SAY WHAT WILL AND WILL NOT RUN.
 # A profile only ever turns things OFF. An explicit --no-* alongside a profile stays off; a
 # profile never turns back on something a flag switched off, so the two cannot fight.
@@ -160,30 +219,31 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # [SEC-LIVE-OUTPUT-V90] NO REDIRECT. THIS SCRIPT WRITES TO THE TERMINAL, LIVE.
 # A previous cut sent stdout to a log file and printed only headlines. It made the install
-# quieter and it also made it UNUSABLE: 6d/10 asks the operator to type allowed Google
-# accounts, and its prompt went to the log, so the run appeared to hang after a step header
-# with nothing on screen to answer. The operator had to Ctrl-C a working install.
+# quieter and it also made it UNUSABLE: at the time 6d/10 asked the operator to type allowed
+# Google accounts, and its prompt went to the log, so the run appeared to hang after a step
+# header with nothing on screen to answer. The operator had to Ctrl-C a working install.
+# [SEC-APPROVER-EMAILS-V1] 6d/10 no longer asks anything -- the default install takes NO
+# keyboard input at any step; the only reads left are --plan's typed confirmation, which is
+# opt-in. The rule stands anyway, because it is about the next prompt someone adds:
 # THE RULE THAT CAME OUT OF IT: a script that asks a human anything cannot redirect the
 # stream it asks on. Verbosity is a preference; an invisible prompt is a broken program.
 # Removing the workstation step already took ~2,300 lines and a third of the output out of
 # this installer, which was most of the actual noise.
 
 # [SEC-SURFACE-SPLIT-V1] TWO CLOUD RUN SERVICES FROM ONE IMAGE, BECAUSE IAP IS ONE SWITCH
-# PER SERVICE. The console (gate, dash, harness, flow, wiki) is the bootstrap path into a
-# brand-new install -- it is how you reach the gate BEFORE any passkey exists -- so it sits
+# PER SERVICE. The console (dash, harness, flow, wiki) is the human path into a brand-new
+# install -- IAP and the Google sign-in it runs ARE its authentication -- so it sits
 # BEHIND IAP. The MCP surface must NOT: IAP consumes the Authorization header and an MCP
 # client has no Google identity to present, so with IAP on, POST /mcp is refused at the edge
 # and no connector can ever reach the app. One service cannot be both. Two were shipped
 # wrong before this: one service with IAP ON (MCP unreachable), then IAP OFF entirely
 # (bootstrap destroyed). This is the third option and the only correct one.
 #
-# THE CONSOLE KEEPS THE OLD SERVICE NAME AND THAT IS NOT COSMETIC. WA_RP_ID is the WebAuthn
-# Relying Party ID and a registered passkey is bound to it. Moving the console to a new
-# service would change its *.run.app host, change WA_RP_ID, and INVALIDATE EVERY PASSKEY
-# ALREADY REGISTERED on an upgrade -- locking the operator out of their own gate with no way
-# back in. PC_IAP_AUD names this service too. So the console is $CP_SVC, unchanged, and the
-# NEW service is the MCP one: re-pointing a connector URL is a copy and paste, and that is
-# the cost this direction pays instead.
+# THE CONSOLE KEEPS THE OLD SERVICE NAME AND THAT IS NOT COSMETIC. PC_IAP_AUD names this
+# service, the IAP binding sits on it, and the URL the operator has bookmarked is its host.
+# Moving the console to a new service would change all three on an upgrade. So the console
+# is $CP_SVC, unchanged, and the NEW service is the MCP one: re-pointing a connector URL is a
+# copy and paste, and that is the cost this direction pays instead.
 # @@PC_SHARED_BEGIN:PC_COMMON@@
 # [SEC-LIVE-OUTPUT-V90] SHARED OUTPUT HELPERS. They live INSIDE the PC_COMMON region because
 # workstation.sh is composed from it and its say()/die() call tell(). They were once above the
@@ -191,7 +251,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # does NOT catch, because an undefined function is a RUNTIME error. Measured before it shipped:
 # tell() defined 0 times and called 8 times in workstation.sh. Keep them here.
 # They are deliberately trivial. An earlier cut made tell() write to both a log file and a saved
-# terminal fd; that is what hid the 6d/10 prompt and made a working install look hung.
+# terminal fd; that is what hid the prompt 6d/10 used to have and made a working install look
+# hung. 6d/10 asks nothing now (SEC-APPROVER-EMAILS-V1); keep them trivial regardless.
 tell() { printf '%s\n' "$*"; }
 tellblock() { cat >&2; }
 pc_urls() {
@@ -356,12 +417,10 @@ pc_list_err() {
 # [SEC-STDIN-DRAIN-V1] BUFFERED ENTER PRESSES USED TO ANSWER THE PROMPTS BELOW, AND ONE OF
 # THOSE PROMPTS GUARDS AN IRRECOVERABLE STEP. Steps 1/10 and 6/10 take minutes. An operator
 # who presses ENTER during them leaves newlines sitting in the terminal input queue; the next
-# bare `read` consumes one INSTANTLY and returns "success" with an empty line. At 9/10 that
-# fake answer was immediately followed by --remove-secrets WA_BOOTSTRAP_SECRET, which closes
-# the passkey registration window for good -- nothing privileged can run without a passkey,
-# including anything that would fix it, so the only way out is a COMPLETE REINSTALL. That
-# happened. These two helpers are the fix, and every interactive read in this script goes
-# through them.
+# bare `read` consumes one INSTANTLY and returns "success" with an empty line. In an earlier
+# release that fake answer was immediately followed by an irreversible --remove-secrets on
+# the console, and the only way out was a COMPLETE REINSTALL. That happened. These two
+# helpers are the fix, and every interactive read in this script goes through them.
 #
 # READ FROM THE CONTROLLING TERMINAL, NOT FROM FD 0. If stdin has been redirected the drain
 # would flush the wrong queue and the prompt would read the wrong thing. /dev/tty is the
@@ -490,15 +549,15 @@ command -v gcloud >/dev/null || die "gcloud not found."
 command -v openssl >/dev/null || die "openssl not found."
 command -v python3 >/dev/null || die "python3 not found."
 # [SEC-KEMPREREQ-V1] ML-KEM-768 IS A HARD PREREQUISITE AND IT IS CHECKED HERE, IN THE FIRST TEN
-# SECONDS, BECAUSE THE ALTERNATIVE IS A TWENTY-MINUTE FAILURE THAT SPENDS YOUR PASSKEY FIRST.
+# SECONDS, BECAUSE THE ALTERNATIVE IS A TWENTY-MINUTE FAILURE THAT DEPLOYS EVERYTHING FIRST.
 #
 # THE EXACT PATH THIS REPLACES, WALKED END TO END. Without ML-KEM: 5e/10 probed the same import,
 # printed a reassuring non-fatal paragraph and CONTINUED; the vault master object was never
 # minted; the control plane resolved epoch 2 to a 404 and threw; every git object write was
 # refused because the store seals through that master; 8b/10 FN.GIT_SEED then drove
 # git_propose and git_push over the whole release tree and every single step was refused; 10/10
-# set FAIL=1 and the script exited 1. Twenty minutes and a full deploy from here, AFTER 9/10 has
-# spent the operator passkey, with NOTHING in the output naming a missing Python library. On the
+# set FAIL=1 and the script exited 1. Twenty minutes and a full deploy from here, with NOTHING
+# in the output naming a missing Python library. On the
 # path README recommends -- Cloud Shell -- that was the DEFAULT outcome, not an edge case.
 #
 # WHY IT IS FATAL RATHER THAN A WARNING. It used to be an enhancement: a lake that stayed
@@ -510,14 +569,14 @@ command -v python3 >/dev/null || die "python3 not found."
 # already exists does not need to mint anything, and this check cannot know that -- the bucket
 # does not exist yet at 0/10 and the API that would answer is not enabled until 1/10. So that
 # re-run is refused too. The remedy is the same one line, and a false refusal that costs a pip
-# install is the right side of this trade against a true acceptance that costs a passkey.
+# install is the right side of this trade against a true acceptance that costs a full deploy.
 python3 -c "from cryptography.hazmat.primitives.asymmetric import mlkem, x25519
 mlkem.MLKEM768PublicKey" >/dev/null 2>&1 || die "this python3 cannot do ML-KEM-768, and every
 lane of this install now depends on it.
 WHAT IT IS FOR: 5e/10 mints the vault master by X-Wing encapsulation (ML-KEM-768 + X25519)
 against Cloud KMS. The data lake and the git object store are BOTH sealed under that master, so
 without it 8b/10 seeds no repository, 10/10 reports a failed install, and you find that out
-after step 9/10 has already spent your passkey.
+twenty minutes in, after every service has been deployed.
 WHY NOTHING ELSE WILL DO: openssl implements ML-KEM but NOT X-Wing, and the TLS hybrid group
 X25519MLKEM768 is not a substitute -- it concatenates where X-Wing runs a SHA3-256 combiner.
 Python cryptography is the only library this script can name for it, and it must be a build
@@ -563,8 +622,8 @@ GET THE WHOLE RELEASE, then run it from inside the unpacked directory with the l
 NOTHING HAS BEEN CREATED. This is step 0/10 and no resource, no API and no billing has been touched."
 done
 # [SEC-UNATTENDED-V90] THE INTERACTIVE-TERMINAL GUARD IS REMOVED. It read
-#   [ -t 0 ] || die "install.sh needs an interactive terminal. Step 9/10 stops to have you
-#   register a passkey and then waits on ENTER ..."
+#   [ -t 0 ] || die "install.sh needs an interactive terminal. Step 9/10 stops ... and then
+#   waits on ENTER ..."
 # -- and that reason is gone with step 9/10. Refusing to start without a tty is now exactly
 # backwards: this installer is meant to be kicked off and left alone, including from CI.
 # gcloud is still never allowed to prompt; that is handled where it is caused, below.
@@ -637,8 +696,8 @@ ACCT=$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/
 # the gate: approved jobs execute using the approver's own OAuth token, so no amount of IAM
 # makes one acceptable. Outside rehearsal that is fatal and the wording below is unchanged.
 # Under --rehearse it is a WARNING instead, because this run halts at the 9/10 boundary
-# further down: no consent is solicited, no passkey is registered, and pc-bootstrap-secret
-# is never minted -- so there is nothing here for a human identity to mean. Without this,
+# further down: no consent is solicited and nothing is minted for a person -- so there is
+# nothing here for a human identity to mean. Without this,
 # --rehearse and step 0/10 are mutually exclusive by construction and no CI can ever
 # rehearse. This does NOT relax the -t 0 guard and does NOT move the boundary.
 case "$ACCT" in
@@ -947,8 +1006,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="fb40b85fa26202714898c62f8b4160653d3dc8f2"
-PC_VERSION="12.5"
+PC_RELEASE="f141ef6dae8f1ecf5b4ab2e4a428c13dc5a86435"
+PC_VERSION="12.6"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -1473,7 +1532,7 @@ fi
 # still be tokenless here, and only one of them mints:
 #   * the marker exists: resolved above. A marker WITHOUT the label is a LEGACY install and
 #     stays on unsuffixed names FOREVER -- re-tokenising a live install would rename the
-#     WebAuthn origin service and invalidate every registered passkey.
+#     console service, and with it the IAP audience and every bookmarked URL.
 #   * no marker, but this lane's resources or adoptable BUCKETS are here: an OLDER release
 #     (which recorded nothing) made them under unsuffixed names, and consenting to adopt
 #     them means USING those names, so the run stays legacy and the marker written below
@@ -2317,7 +2376,7 @@ until somebody looked."
 mk "$PC_SEC_SESSION"
 # [SEC-LEGACY-CONFIRM-RETIRE-V1] pc-${PC_LP}human-confirm-secret IS NO LONGER CREATED, AND ITS
 # ACCESSOR GRANT IS NO LONGER MADE. The only thing that ever read HUMAN_CONFIRM_SECRET was
-# POST /api/confirm/verify -- a shared-bearer approval route with no passkey and no danger
+# POST /api/confirm/verify -- a shared-bearer approval route with no operator session and no danger
 # checks, which could not execute anything anyway because it called the private executor with
 # no Authorization header. That route and humanTokenOk() are deleted from control-plane/src/
 # index.ts, so creating this secret would provision a credential nothing reads.
@@ -2455,9 +2514,9 @@ echo "      gcloud secrets add-iam-policy-binding ${PC_GH_SEC_PREFIX}<identity> 
 # needs the PUBLIC key, which step 5b/10 grants instead.
 
 say "5/10 reserving the URLs (deploy twice, build once)"
-# WebAuthn RP ID must equal the host that serves the gate, and the origin allowlist is a
-# SEPARATE exact match. Neither is knowable until the service exists. Getting it wrong locks
-# you out of your own gate, so: ship a stock image first purely to learn the URL.
+# PC_IAP_AUD names the console service and PC_CONSOLE_URL / MCP_PUBLIC_URL name the two hosts,
+# and none of them is knowable until the services exist. So: ship a stock image first purely
+# to learn the URLs.
 #
 # [SEC-SURFACE-SPLIT-V1] BOTH URLs ARE RESERVED HERE, NOT ONE. The MCP service's URL is not a
 # convenience: oaPubBase() in index.ts resolves MCP_PUBLIC_URL first and only falls back to
@@ -2484,7 +2543,6 @@ Check the service, then re-run:
 MC_HOST="${MC_URL#https://}"
 echo "  console $CP_URL"
 echo "  mcp     $MC_URL"
-echo "  WA_RP_ID=$CP_HOST  (the gate is served by the console, so the RP ID is its host)"
 
 say "5b/10 approval signing key (Cloud KMS, asymmetric -- Stage C)"
 # [SEC-KMSSIGN-INSTALL-V1] A FRESH INSTALL SHIPS AT STAGE C. There is nothing to soak: a
@@ -3178,8 +3236,8 @@ fi
 # [SEC-KEMPREREQ-V1] THIS USED TO PRINT A REASSURING PARAGRAPH AND CONTINUE, AND CONTINUING IS
 # THE DISASTER. The paragraph was written when an unminted vault meant a degraded lake you could
 # live with. It stopped meaning that when the git object store went behind the same master and
-# 8b/10 gained a step that writes the whole release tree through it: continuing from here spends
-# the operator passkey at 9/10 and then fails at 10/10 naming none of this.
+# 8b/10 gained a step that writes the whole release tree through it: continuing from here
+# deploys everything and then fails at 10/10 naming none of this.
 #
 # THE PROBE STAYS EVEN THOUGH 0/10 NOW REFUSES THE SAME CONDITION. It is not dead weight: PATH,
 # the interpreter and the environment can all differ between step 0 and step 5e, and a probe
@@ -3451,8 +3509,8 @@ fi
 #   PC_CONSOLE_URL   BOTH. NEW in v5.5. The console's public address, so the MCP service can
 #                    name it in that same discovery document. Only the browser step moves --
 #                    /oauth/token, /oauth/register and /mcp stay on the MCP host.
-# WA_RP_ID/WA_RP_ORIGIN are the CONSOLE host on both: the gate is served by the console, and a
-# passkey is bound to that host. Everything else is identical by construction.
+# PC_CONSOLE_URL and PC_IAP_AUD name the CONSOLE on both. Everything else is identical by
+# construction.
 # [SEC-ENVCARRY-V1] --set-env-vars IS A DECLARED SET, AND THREE VALUES ONLY EVER ARRIVE LATER.
 # The two deploys below use --set-env-vars, which REPLACES the whole environment of the
 # revision. Three variables are never in those strings because they are not known yet at 6/10:
@@ -3506,7 +3564,7 @@ if [ -n "$PC_CARRY_CP$PC_CARRY_MC" ]; then
 fi
 retry gcloud run deploy "$CP_SVC" --source "$HERE/control-plane" --region "$REGION" --project "$PROJECT" \
   --service-account "$CP_SA" --allow-unauthenticated $PC_CBI_FLAG --quiet \
-  --set-env-vars "PC_SURFACE=console,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV$PC_CARRY_CP" \
+  --set-env-vars "PC_SURFACE=console,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV$PC_CARRY_CP" \
   --set-secrets "WA_SESSION_SECRET=${PC_SEC_SESSION}:latest" \
   >/dev/null || die "console deploy failed"
 echo "  console deployed"
@@ -3526,7 +3584,7 @@ that image serves no /mcp at all."
 echo "  image $PC_IMAGE"
 retry gcloud run deploy "$MC_SVC" --image "$PC_IMAGE" --region "$REGION" --project "$PROJECT" \
   --service-account "$CP_SA" --allow-unauthenticated --quiet \
-  --set-env-vars "PC_SURFACE=mcp,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,WA_RP_ID=$CP_HOST,WA_RP_ORIGIN=https://$CP_HOST,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_REQUIRE_PASSKEY=0,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV$PC_CARRY_MC" \
+  --set-env-vars "PC_SURFACE=mcp,PC_AUTO_APPROVE=$PC_AUTO_APPROVE,PC_GUARDRAILS=$PC_GUARDRAILS,MCP_PUBLIC_URL=$MC_URL,PC_CONSOLE_URL=https://$CP_HOST,PC_IAP_AUD=/projects/$PROJNUM/locations/$REGION/services/$CP_SVC,OAUTH_DEFAULT_ROLE=fleet-onboarder,PC_FIRESTORE_DB=$FSDB,PC_SESSION_ENFORCE=1,PC_KEY_TTL_DAYS=7,PC_TOOLS_ENFORCE=1,WA_APPROVER_EMAILS=$ACCT,WA_SESSION_MIN=240,DATA_LAKE_BUCKET=$PC_LAKE_BUCKET,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,GCP_PROJECT=$PROJECT,GCP_REGION=$REGION,PC_GH_SECRET_PREFIX=$PC_GH_SEC_PREFIX$PC_VM_ENV$PC_GIT_ENV$PC_VAULT_ENV$PC_CARRY_MC" \
   --set-secrets "WA_SESSION_SECRET=${PC_SEC_SESSION}:latest" \
   >/dev/null || die "MCP service deploy failed"
 echo "  mcp deployed from the same image"
@@ -3627,7 +3685,7 @@ say "6b/10 seeding the starter wiki into the lake"
 # by looking for the PCV1 magic in the bytes it downloaded: an object without it is returned
 # as-is. shared/wiki/ is documentation, never credentials -- and wikiServe scans every page
 # for credential patterns and withholds one that matches. Nothing here needs the vault, and
-# nothing here can reach it: this runs before any passkey exists.
+# nothing here can reach it: this runs before any session exists.
 #
 # THIS STEP NEVER CALLS die(). A wiki that did not upload is not a reason to throw away an
 # otherwise good install. Every object that failed is named, and the summary at the end says
@@ -3911,7 +3969,18 @@ say "6d/10 allowed Google accounts"
 # you install with is very often NOT the account your Claude app signs in with. A Workspace
 # address can also resolve to a different underlying Google account than the one shown in your
 # browser profile picker, and when that happens the refusal names an address you do not
-# recognise. Asking here is cheaper than discovering it after the install.
+# recognise. The refusal, when it comes, is fixed in the console Settings.
+#
+# [SEC-APPROVER-EMAILS-V1] THIS STEP ASKS NOTHING. It used to prompt for extra addresses on
+# the terminal, looping until an empty line -- the only keyboard input left in an installer
+# that is meant to be kicked off and left alone, and it shipped in four releases before it was
+# noticed. It seeds ONE address by default, the account running this install, which 6/10
+# already wrote into WA_APPROVER_EMAILS on both services. Extra addresses come only from
+# --approver-emails or PC_APPROVER_EMAILS, validated at second zero and carried here as
+# PC_EXTRA_EMAILS. Nothing is inferred and the default is not widened: the ADMISSION rule
+# (PC_IAP_AUD, the fail-closed allow-list check in index.ts) is untouched -- only what is seeded
+# changed. There is no rehearsal special case here on purpose: --rehearse and a real run take
+# the identical path through this step, so a prompt can never hide from the harness again.
 #
 # THE EXTRA ADDRESSES ARE NOT WRITTEN TO WA_APPROVER_EMAILS, AND THAT IS DELIBERATE. Two reasons.
 # (1) gcloud --set-env-vars treats a comma as a separator, so a multi-address value silently
@@ -3920,31 +3989,19 @@ say "6d/10 allowed Google accounts"
 # edited by the person it locks out -- it needs a new revision on BOTH services. So the installer
 # address stays the single-valued floor in WA_APPROVER_EMAILS, and everything else lives in the
 # Firestore document Settings edits. One list, one place, no redeploy.
-PC_EXTRA_EMAILS=""
-printf '
-  Connector sign-in is your Google account. %s can already sign in.
-  If you sign in to Claude with a DIFFERENT Google account, add it now -- otherwise it
-  will be refused when you add the connector. You can change this later in Settings.
-
-' "$ACCT"
-while :; do
-  pc_drain_stdin
-  printf '  another allowed Google account (ENTER when done): '
-  if read -r _pc_em < "$PC_TTY" 2>/dev/null; then :; else _pc_em=""; fi
-  _pc_em=$(printf '%s' "$_pc_em" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-  [ -z "$_pc_em" ] && break
-  case "$_pc_em" in
-    *@*.*) : ;;
-    *) printf '    "%s" is not an email address.\n' "$_pc_em"; continue ;;
-  esac
-  if [ "$_pc_em" = "$ACCT" ]; then printf '    that is the install account; already allowed.\n'; continue; fi
-  case " $PC_EXTRA_EMAILS " in
-    *" $_pc_em "*) printf '    already added.\n'; continue ;;
-  esac
-  PC_EXTRA_EMAILS="$PC_EXTRA_EMAILS $_pc_em"
-  printf '    added.\n'
-done
-_pc_em=""
+echo "  allowed Google account: $ACCT (the account running this install)"
+echo "  More accounts can be added later in the console Settings (Allowed accounts) -- no re-install."
+# The installing account is the env floor and is always first; drop it from the extras if it
+# was repeated on the command line, so it is never written twice.
+_pc_acct_lc=$(printf '%s' "$ACCT" | tr '[:upper:]' '[:lower:]')
+if [ -n "$PC_EXTRA_EMAILS" ]; then
+  _pc_keep=""
+  for _pc_em in $PC_EXTRA_EMAILS; do
+    [ "$_pc_em" = "$_pc_acct_lc" ] || _pc_keep="$_pc_keep $_pc_em"
+  done
+  PC_EXTRA_EMAILS="$_pc_keep"; _pc_keep=""; _pc_em=""
+fi
+_pc_acct_lc=""
 # Seeded over the Firestore REST API with the installer's own credential, because there is no
 # gcloud verb that writes a document. NON-FATAL BY DESIGN, like every other optional step here:
 # a failure means the list is just the install account and Settings can add the rest, which is a
@@ -3989,9 +4046,9 @@ fi
 
 say "7/10 gated executor (private) "
 # [SEC-ASSERTION-NOT-YET-V1] Ships DISARMED on purpose. gate-exec demands a per-job
-# WebAuthn assertion when PC_REQUIRE_ASSERTION is 1, and the control plane does not forward
-# one yet, so arming it refuses EVERY approval with HTTP 428 -- a gate that can never run
-# anything. Proven end-to-end 2026-08-05. Flip to 1 in the same commit that adds forwarding.
+# operator assertion when PC_REQUIRE_ASSERTION is 1 -- a facility of the executor's own
+# release -- and the control plane forwards none, so arming it refuses EVERY approval with
+# HTTP 428 -- a gate that can never run anything. Proven end-to-end 2026-08-05.
 #
 # [SEC-INSTALL-STEP7-V1] THIS COMMENT LIVES ABOVE THE COMMAND, NOT INSIDE IT. It used to sit
 # between two backslash-continued argument lines. The continuation joined the comment line,
@@ -4011,22 +4068,15 @@ say "7/10 gated executor (private) "
 # It was set NOWHERE. This line was the only place gate-exec was given any environment, and
 # the comment 40 lines below has always listed PC_RP_ID as part of that environment, so the
 # tree DESCRIBED a variable it never wrote. exec_server.py reads it twice: /selftest defaults
-# it to the literal 'example.invalid', and the PC_REQUIRE_ASSERTION path calls
-# pcwebauthn.verify(..., os.environ.get("PC_RP_ID", "")) -- an EMPTY relying party. So every
-# install to date failed its own F5.4 check and armed an executor that would verify passkey
-# assertions against a relying party that is not the gate. A silent wrong default, not an
-# error, which is exactly why nothing reported it.
+# it to the literal 'example.invalid', and the PC_REQUIRE_ASSERTION path reads it as the
+# host an operator assertion is bound to -- so unset, it was an EMPTY host, and every
+# install to date failed its own F5.4 check. A silent wrong default, not an error, which is
+# exactly why nothing reported it.
 #
-# WHY THE CONSOLE HOST AND NOT THE EXECUTOR'S OWN. A WebAuthn RP ID is not "the host of the
-# service doing the checking"; it is the host the CREDENTIAL WAS REGISTERED AGAINST, and it
-# is baked into every assertion the authenticator signs. The gate is served by the console,
-# so 6/10 writes WA_RP_ID=$CP_HOST on both surfaces (the note above that deploy says exactly
-# this), index.ts feeds WA_RP_ID to generateAuthenticationOptions and
-# verifyRegistrationResponse as rpID, and pcwebauthn.verify() then refuses with 'rpIdHash
-# mismatch' unless sha256(PC_RP_ID) equals the first 32 bytes of authenticatorData -- i.e.
-# unless PC_RP_ID is the console host, byte for byte. $GX_URL's host and $MC_HOST are both
-# wrong here and would fail closed on every approval. This is also what the rehearsal
-# harness asserts, F5.4: executor PC_RP_ID must EQUAL control-plane WA_RP_ID.
+# WHY THE CONSOLE HOST AND NOT THE EXECUTOR'S OWN. The executor's own release reads this as
+# the host the CONSOLE is served on -- the host a person signs in at -- not the host of the
+# service doing the checking. $GX_URL's host and $MC_HOST are both wrong here. This is also
+# what the rehearsal harness asserts, F5.4: executor PC_RP_ID must EQUAL the console host.
 #
 # EMPTY IS NOT REACHABLE HERE. CP_HOST is derived at 5/10 from a CP_URL that step already
 # asserts non-empty before continuing, and die() exits on every path including --rehearse,
@@ -4094,10 +4144,10 @@ into the control plane as GATE_EXEC_URL, and writing it EMPTY leaves you with a 
 that cannot reach its executor -- no gated job can ever run. Check the service, then re-run:
     gcloud run services describe $GX_SVC --region $REGION --project $PROJECT"
 # [SEC-SURFACE-SPLIT-V1] BOTH SERVICES GET GATE_EXEC_URL, BECAUSE BOTH DISPATCH TO THE
-# EXECUTOR. The console fires an approved job from the gate (POST /api/webauthn/confirm/verify);
-# the MCP service fires one from the legacy agent API (POST /api/jobs/fire) and stages from the
-# tool surface. Setting it on the console alone would leave every machine-side dispatch
-# reaching for an empty URL -- and the failure would look like the executor's IAM.
+# EXECUTOR. The console stages and auto-runs from its harness routes; the MCP service fires
+# one from the legacy agent API (POST /api/jobs/fire) and stages and auto-runs from the tool
+# surface. Setting it on the console alone would leave every machine-side dispatch reaching
+# for an empty URL -- and the failure would look like the executor's IAM.
 #
 # THE TRAFFIC IS ONE-WAY AND THAT WAS CHECKED, NOT ASSUMED. gate-exec is handed NO control-plane
 # URL by this installer and needs none: exec_server.py writes its results straight back into
@@ -4309,10 +4359,9 @@ say "8/10 two surfaces: the console behind IAP, the MCP service in front of it"
 #                         Authorization header, so a token that satisfies IAP cannot also
 #                         carry MCP session identity. Measured: POST /mcp with a bearer still
 #                         answered 401 with x-goog-iap-generated-response: true.
-#   ONE SERVICE, IAP OFF  /mcp works and the console is exposed to anyone who learns the URL,
-#                         with the app's own passkey session as the only layer. That also
-#                         destroys the bootstrap path this install depends on -- IAP is how
-#                         you reach the gate on a brand-new install, BEFORE a passkey exists.
+#   ONE SERVICE, IAP OFF  /mcp works and the console has no sign-in at all: a verified IAP
+#                         identity is what the app's own session check admits, so with IAP
+#                         off nobody can be admitted and the console cannot be reached.
 #
 # A PATH-LEVEL CARVE-OUT DOES NOT EXIST ON CLOUD RUN, PROVEN AGAINST THE REAL APIS:
 #   1. IapSettings (iap.googleapis.com v1, discovery revision 20260803) carries accessSettings
@@ -4338,8 +4387,8 @@ say "8/10 two surfaces: the console behind IAP, the MCP service in front of it"
 # ---- the app's own guard, asserted BEFORE IAP goes in front of it ----
 # This runs first ON PURPOSE. Once IAP is on, an anonymous request never reaches the app, so
 # this is the last moment the compensating control can be observed at all. It is not made
-# redundant by IAP: IAP is defence in depth in front of the passkey session, and if IAP ever
-# comes off -- or fails to go on, three paragraphs down -- the session guard is what is left.
+# redundant by IAP: the app's own session check is what stands behind IAP, and if IAP ever
+# comes off -- or fails to go on, three paragraphs down -- that guard is what refuses.
 # [SEC-IAP-RERUN-V54] CLEAR IAP BEFORE ASSERTING, BECAUSE THIS STEP USED TO ASSUME A FRESH
 # PROJECT AND BROKE EVERY RE-RUN. MEASURED 2026-08-15 on a real install: run 2 reached this
 # step and enabled IAP; run 3 then probed /harness, got IAP's own 302 to the Google sign-in
@@ -4397,7 +4446,7 @@ case "$PC_HARNESS_CODE" in
   *)
     die "the console at $CP_URL/harness answered $PC_HARNESS_CODE to an ANONYMOUS caller,
 after IAP was cleared and the probe was retried 6 times over ~90s.
-Underneath IAP the app's own passkey session is what protects the console, and that guard is
+Underneath IAP the app's own session check is what protects the console, and that guard is
 not answering. Refusing to continue rather than put IAP in front of a console that would be
 readable by anyone the moment IAP came off.
 A 30x here means IAP is STILL in front of the app despite the clear above -- check for an
@@ -4536,7 +4585,7 @@ if [ "$PC_IAPIAM_RC" != "0" ]; then
   echo "  $PC_IAPIAM_RC), so IAP could be switched on and nobody granted access -- which locks"
   echo "  you out of your own console. Refusing to do half of it. Run 'gcloud components"
   echo "  update', then re-run this installer. Until then the console rests on the app's own"
-  echo "  passkey session and is reachable by anyone who learns its URL."
+  echo "  session check, which admits nobody without IAP in front of it."
 else
   PC_IAP_RC=0
   gcloud beta run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" --iap --quiet >/dev/null 2>&1 || PC_IAP_RC=$?
@@ -4561,9 +4610,9 @@ else
       --role=roles/iap.httpsResourceAccessor >/dev/null 2>&1 || PC_GRANT_RC=$?
     if [ "$PC_GRANT_RC" != "0" ]; then
       # ROLL BACK RATHER THAN DIE. Dying here leaves IAP ON with nobody granted -- a console
-      # nobody can open, including the person who would fix it, and including the gate that
-      # every repair has to be approved at. Undoing both halves returns the install to the
-      # state the paragraph above describes: guarded by the passkey session, and reachable.
+      # nobody can open, including the person who would fix it. Undoing both halves returns
+      # the install to the state the paragraph above describes: guarded by the app's own
+      # session check, with IAP not yet in front.
       echo "  IAP WAS ENABLED AND $ACCT COULD NOT BE GRANTED ACCESS (exit $PC_GRANT_RC)."
       echo "  Rolling IAP back rather than leaving you locked out of your own gate."
       gcloud beta run services update "$CP_SVC" --region "$REGION" --project "$PROJECT" --no-iap --quiet >/dev/null 2>&1
@@ -4608,8 +4657,8 @@ echo "  These are not interchangeable. Handing a connector the console URL is th
 echo "  step exists to prevent; handing a browser the MCP URL gets you a 404 at the root,"
 echo "  because GET / is a console route and the MCP service deliberately does not serve it."
 if [ "$PC_IAP_ON" != "1" ]; then
-  echo "  IAP IS NOT ON. The console is guarded by the app's passkey session alone. That guard"
-  echo "  was asserted against your live deployment above, but it is one layer, not two."
+  echo "  IAP IS NOT ON. The console is guarded by the app's own session check alone, and that"
+  echo "  check admits a verified IAP identity -- so until IAP is on, nobody is admitted."
 fi
 
 say "8b/10 functional self-test -- does the installed system actually ANSWER?"
@@ -4623,7 +4672,7 @@ say "8b/10 functional self-test -- does the installed system actually ANSWER?"
 # `exit 20` and the pc-bootstrap-secret mint are exactly where they were. What changed is
 # that the functional phase now runs BEFORE either -- so an unattended --rehearse gets the
 # same coverage a full install does, and a real install learns its tool surface is broken
-# BEFORE it spends the operator's Face ID rather than after.
+# BEFORE the final self-test rather than from it.
 #
 # TWO DESIGN RULES, BOTH LEARNED FROM A GREEN RUN THAT MEANT NOTHING:
 #  1. ASSERT ON CONTENT, NEVER ON THE ABSENCE OF AN ERROR. index.ts returns a NORMAL,
@@ -4682,8 +4731,8 @@ UNEXERCISABLE = {
                      "the lake is FAIL-CLOSED, not plaintext -- every write outside the five "
                      "cleartext prefixes THROWS, with no plaintext fallback. Either way 5e/10 "
                      "reports it. The bucket and the grant are asserted instead.",
-    "FN.STAGE_TOOLS": "stage_privileged_job and run_command each need a human passkey with "
-                      "user presence. No approval is produced or verified here.",
+    "FN.STAGE_TOOLS": "stage_privileged_job and run_command each sign and execute a job "
+                      "against the live executor. No approval is produced or verified here.",
 }
 
 KNOWN = ("whoami read_graph search_nodes open_nodes list_work_items read_journal "
@@ -4871,8 +4920,8 @@ elif not IAP_ON:
     UNEXERCISABLE["FN.CONSOLE_IAP"] = (
         "step 8/10 could not enable IAP on the console -- most often because the project is "
         "not in a Google Cloud Organization -- and said so at the time. The console is "
-        "running on the app's own passkey session alone, which 8/10 asserted against the live "
-        "deployment. That is one layer where the design calls for two, and it is reported "
+        "running on the app's own session check alone, which 8/10 asserted against the live "
+        "deployment, and that check admits nobody without IAP in front of it. It is reported "
         "here as NOT-EXERCISED rather than as a pass.")
 else:
     # [SEC-IAP-RACE-V1] THIS CHECK USED TO RACE THE THING IT MEASURES, AND THAT RACE IS THE
@@ -5847,16 +5896,15 @@ echo "    or that list names it."
 echo "  - the data lake and the git object store, deliberately and permanently."
 fi
 
-# [SEC-UNATTENDED-V90] STEP 9/10 "REGISTER YOUR PASSKEY" IS GONE, AND SO IS THE REHEARSAL
-# BOUNDARY THAT EXISTED ONLY TO STOP ABOVE IT. This installer ships PC_REQUIRE_PASSKEY=0, and
-# in that mode a verified IAP identity on the approver allow-list satisfies the console with no
-# cookie and no credential -- so nothing in this script needs a person any more. The run is
-# unattended from kickoff to the two URLs at the end.
-# THE LEGACY GATE IS NOT DELETED. locked.html and all fifteen webauthn routes stay in the tree,
-# unreferenced, and PC_REQUIRE_PASSKEY=1 re-arms every one of them unchanged for a client who
-# wants that posture. WA_SESSION_SECRET is still minted at 4/10 for exactly that reason.
-# --rehearse is still ACCEPTED so existing harnesses keep working, but it no longer stops early:
-# there is no longer a human step for it to stop above.
+# [SEC-UNATTENDED-V90] THERE IS NO STEP 9/10, AND NO REHEARSAL BOUNDARY. A verified IAP
+# identity on the approver allow-list satisfies the console with no credential of the
+# console's own -- so nothing in this script needs a person. The run is unattended from
+# kickoff to the two URLs at the end.
+# IAP, the Google identity it verifies, the approver allow-list and a session cookie with a
+# TTL are the whole of console authentication. WA_SESSION_SECRET is minted at 4/10 because it
+# signs that cookie, which is the only credential the console issues.
+# --rehearse is still ACCEPTED so existing harnesses keep working, but it does not stop early:
+# there is no human step for it to stop above.
 fi
 
 say "10/10 self-test"
@@ -5919,7 +5967,7 @@ if [ "$PC_IAP_ON" = "1" ]; then
   # A pass here retires that finding by name; it does not silently cancel a number.
   chk_has "console is behind IAP" "x-goog-iap-generated-response" "$(curl -s -D - -o /dev/null --max-time 30 "$CP_URL/harness" 2>/dev/null)" \
     && pc_retire FN.CONSOLE_IAP
-  printf '  --   %-38s %s\n' "console passkey guard" "asserted at 8/10, before IAP went in front"
+  printf '  --   %-38s %s\n' "console session guard" "asserted at 8/10, before IAP went in front"
 else
   chk_in  "console requires a session" "401" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/harness")"
   # [SEC-NOGATE-V1] This used to read the Location header and assert it named /gate. There is no
@@ -5927,15 +5975,13 @@ else
   # URL -- so the check reads the BODY for that page's title instead. A redirect target was only
   # ever a proxy for "an anonymous caller gets the unlock page"; this asserts it directly.
   # [SEC-SELFTEST-NEEDLE-V1] THE NEEDLE IS THE LOCKED STAGE'S STRUCTURAL MARKER, NOT A BRAND WORD.
-  # This grepped for a page TITLE, and it was wrong twice over. (1) There are two locked-stage
-  # documents -- locked.html for the passkey posture, login.html for PC_REQUIRE_PASSKEY=0 -- and
-  # this installer ships PC_REQUIRE_PASSKEY=0 unconditionally, so every install it produces serves
-  # login.html, which does not contain that title at all. The check was RED on a working console on
-  # any install where IAP did not come up, which is precisely the install whose self-test matters.
+  # This grepped for a page TITLE, and it was wrong twice over. (1) The title it named belonged
+  # to a document this release no longer serves; every install serves login.html, which does not
+  # contain that title at all. The check was RED on a working console on any install where IAP
+  # did not come up, which is precisely the install whose self-test matters.
   # (2) A self-test that fails when somebody renames a brand word is a self-test people learn to
   # ignore, and this release makes the brand surface configurable. pc-locked-stage is on the card
-  # element of BOTH documents: it asserts an anonymous caller gets the locked stage without
-  # asserting which posture is deployed.
+  # element of the locked stage: it asserts an anonymous caller gets that stage and nothing more.
   chk_has "console serves the locked page" "pc-locked-stage" "$(curl -s --max-time 30 "$CP_URL/harness")"
   chk     "dashboard data refuses anonymous" 401 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$CP_URL/api/dash/summary")"
 fi
@@ -6044,8 +6090,8 @@ cat <<EOF
     MCP URL   ${MC_URL}/mcp      (NOT behind IAP -- this is the connector endpoint)
 
   TWO SERVICES, ONE IMAGE, AND THE URLS ARE NOT INTERCHANGEABLE. IAP on Cloud Run is one
-  switch per service: the console needs it (it is how you reach the console before a passkey
-  exists) and the MCP surface cannot have it (IAP consumes the Authorization header, so an
+  switch per service: the console needs it (the Google sign-in IAP runs IS how you reach the
+  console) and the MCP surface cannot have it (IAP consumes the Authorization header, so an
   MCP client would be refused at the edge). Giving a connector the console URL is the one
   mistake this arrangement exists to prevent.
 

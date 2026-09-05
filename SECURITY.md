@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v12.5**
+**Paracoding — v12.6**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim
@@ -16,8 +16,8 @@ matches the code, that is a defect and we want the report — see **Reporting** 
 > Cloud KMS signature it cannot produce, claims each approval exactly once, and executes
 > under a `PATH` jail.**
 
-That is the claim this release supports. It is narrower than "you approve every command with
-a passkey", and the difference is the thing to read before you install: **the shipped posture
+That is the claim this release supports. It is narrower than "you approve every command by
+hand", and the difference is the thing to read before you install: **the shipped posture
 is unattended.** `install.sh` sets `PC_AUTO_APPROVE=1`, so a job an agent stages is signed
 and executed in the same call, with no human in the loop. The console page that offered a
 per-job tap was deleted. This document describes the controls that are actually in the path,
@@ -62,19 +62,22 @@ opt-in. What is enforced:
 ## Who can reach the console
 
 Identity-Aware Proxy is the outer door, and the application's own session check is the inner
-one. `install.sh` ships `PC_REQUIRE_PASSKEY=0`: in that mode a **verified IAP identity on the
-approver allow-list** (`WA_APPROVER_EMAILS`, seeded with the installing account) is what
-satisfies the inner check. No WebAuthn credential is enrolled and none is needed. Put a
-hardware key or a passkey on the Google account itself and the outer door costs a physical
-touch — that protection is IAP's, and it is the one in the path on a stock install.
+one. Signing in to Google at IAP's prompt is the only sign-in there is. Behind it, a
+**verified IAP identity on the approver allow-list** (`WA_APPROVER_EMAILS`, seeded with the
+installing account) is what satisfies the inner check: the control plane verifies the ES256
+assertion IAP attaches against Google's published keys and its own audience (`PC_IAP_AUD`),
+never the bare identity header, and it does so on every request. The console enrols no
+credential of its own and asks for none. Put a hardware security key on the Google account
+itself and the outer door costs a physical touch — that protection is IAP's, and it is the
+one in the path on a stock install.
 
-The WebAuthn code is not deleted. `locked.html` and all fifteen `webauthn` routes remain in
-the tree, unreferenced by any console page — including `/api/webauthn/confirm/*` for a live
-assertion and `/api/webauthn/preapprove` plus `/api/jobs/fire` for a signed run-later token
-with a single-use secret, a 12-hour expiry and a command-digest recheck that returns 409 if
-the command moved. `preapprove` hard-refuses a destructive body with 403. Treat them as
-reachable API surface behind IAP rather than as dead code: nothing in the browser calls them,
-and none of them is a per-command approval you can go and use.
+The console also honours a session cookie with a TTL. `gate_session` is an HMAC under
+`WA_SESSION_SECRET` over `{ user, expiry }` and is accepted for `WA_SESSION_MIN` minutes; a
+missing or short secret means the control plane neither issues nor verifies one, so the gate
+stays closed rather than degrading. A session is worth exactly what the sign-in behind it
+was worth: it opens the console, and nothing in it approves a job — approval is the KMS
+signature described above, and a stock install produces that signature without a person in
+the loop.
 
 ---
 

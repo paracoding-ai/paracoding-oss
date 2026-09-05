@@ -135,13 +135,12 @@ LAYER 2 -- CLOUD RUN INVOKER. THE AUDIENCE TRAP, and it cost three builds:
   `gcloud auth print-identity-token --audiences=` silently produces nothing
   usable in a build step. Use the metadata server.
 
-LAYER 3 -- THE APP'S OWN GATE. waSessionOk accepts a verified IAP identity only
-  when PC_REQUIRE_PASSKEY=0, and with IAP off there is no IAP assertion to
-  verify, so that branch is unreachable by construction. The remaining path is
-  the service's OWN session format: gate_session = base64url(json) "."
-  base64url(HMAC-SHA256(payload, WA_SESSION_SECRET)), pk MUST be 1
-  (waSessionOk refuses PC_REQUIRE_PASSKEY && sess.pk !== 1). Minted from Secret
-  Manager. THE SECRET IS NEVER PRINTED AND NEVER ENTERS THE EVIDENCE.
+LAYER 3 -- THE APP'S OWN GATE. waSessionOk accepts a verified IAP identity on the
+  approver allow-list, and with IAP off there is no IAP assertion to verify, so
+  that branch is unreachable by construction. The remaining path is the
+  service's OWN session format: gate_session = base64url(json) "."
+  base64url(HMAC-SHA256(payload, WA_SESSION_SECRET)) over { u, exp }. Minted
+  from Secret Manager. THE SECRET IS NEVER PRINTED AND NEVER ENTERS THE EVIDENCE.
 
 OTHER MEASURED FACTS RELIED ON HERE
   * dev_api CANNOT read Cloud Logging (entries:list is POST-only and refused).
@@ -208,8 +207,9 @@ RECIPE_PIN_OID = "6c2b2c336cf463d64e234d7601ab7cc46e176fb5"
 # [CE-GX-ENV-SOURCES] THIS TUPLE NAMED TWO OF THE FOUR FILES THE IMAGE ACTUALLY
 # CARRIES, AND scan_env_py()'s OWN DOCSTRING HAD ALREADY WRITTEN DOWN WHY THAT IS THE
 # defect THAT MANUFACTURES FINDINGS. Measured in this tree, not recalled:
-# gate-exec/Dockerfile COPYs FOUR python sources -- exec_server.py (line 52),
-# pcwebauthn.py (53), pcmint.py (54) and lockout_check.py (58). The tuple named two.
+# gate-exec/Dockerfile COPYs FOUR python sources -- exec_server.py (line 52), the
+# executor's assertion verifier (53), pcmint.py (54) and lockout_check.py (58). The
+# tuple named two.
 #
 # WHAT THE MISSING FILE READS, counted with a grep over the real blob:
 # gate-exec/lockout_check.py reads PC_LOCKOUT_CP_SVC and PC_LOCKOUT_MC_SVC directly
@@ -228,8 +228,8 @@ RECIPE_PIN_OID = "6c2b2c336cf463d64e234d7601ab7cc46e176fb5"
 # invents a finding teaches its readers to delete things.
 #
 # DERIVED FROM THE DOCKERFILE, NOT FROM MEMORY. Every `COPY <name>.py` line in
-# gate-exec/Dockerfile belongs here. pcwebauthn.py reads NO environment variable
-# today -- grep 'os.environ' over it returns zero hits, measured -- and is listed
+# gate-exec/Dockerfile belongs here. The assertion verifier reads NO environment
+# variable today -- grep 'os.environ' over it returns zero hits, measured -- and is listed
 # anyway, because the honest scope of the claim is "the python in the image", not
 # "the files that looked interesting when someone last checked".
 #
@@ -1200,9 +1200,9 @@ def scan_env_py(*sources):
 
     and exec_server.py calls it -- `import pcmint as _M` then `_M.load_creds()` --
     on the PC_REQUIRE_ASSERTION=1 path, which is the executor's INDEPENDENT
-    approval check: the one control that still holds when the control plane itself
-    is compromised, because it verifies the operator's WebAuthn assertion against
-    credentials the control plane cannot write. gate-exec/Dockerfile COPYs
+    approval check -- a facility of the executor's own release, shipped disarmed
+    -- verifying against credentials the control plane cannot write.
+    gate-exec/Dockerfile COPYs
     pcmint.py, so it is in the image on every install.
 
     Consequence of scanning one file: F3.2 reported PC_CREDS_SECRET as
@@ -1331,8 +1331,7 @@ def mint_gate_session(project, secret_name="pc-session-secret", user="operator",
     """gate_session = base64url(json) "." base64url(HMAC-SHA256(payload, secret)).
 
     waSessionOk() re-parses this payload and re-HMACs it, so the JSON spelling only
-    has to be self-consistent. pk MUST be 1: waSessionOk refuses
-    `PC_REQUIRE_PASSKEY && sess.pk !== 1`.
+    has to be self-consistent: it reads `exp` and ignores any other field.
 
     THE SECRET IS READ, USED, AND DROPPED. It is never returned, never logged and
     never written into the evidence bundle -- only the boolean fact that a cookie
@@ -1375,7 +1374,7 @@ def mint_gate_session(project, secret_name="pc-session-secret", user="operator",
     # also put a network round trip into a pure credential builder. The measurement
     # below is what makes the omission safe to leave.
     secret = out.strip()
-    payload = json.dumps({"u": user, "pk": 1,
+    payload = json.dumps({"u": user,
                           "exp": int(time.time() * 1000) + ttl_ms},
                          separators=(",", ":")).encode()
     pl = base64.urlsafe_b64encode(payload).rstrip(b"=")
@@ -1832,7 +1831,7 @@ def probe_vm_routes(target, tok, cookie):
                         "handler, so this says nothing about whether the VM guard "
                         "holds, and recording it as a route answer would "
                         "manufacture a false failure."
-                        % ("waGate (no passkey session)" if gate_refused
+                        % ("waGate (no console session)" if gate_refused
                            else "the Cloud Run ingress"))}
         else:
             got[route] = {"_http": code, "refused_by": None if code == 503 else layer}
@@ -1877,9 +1876,10 @@ def named_secret_names(*envmaps):
     """Every secret name a revision NAMES, under either spelling:
       * a secret-backed env var        -> valueSource.secretKeyRef.secret
       * a value that is a secret PATH  -> projects/<p>/secrets/<name>
-    The second spelling is the one that matters: install.sh:690 writes
-    PC_CREDS_SECRET=projects/$PROJECT/secrets/pc-webauthn-creds onto gate-exec as a
-    plain VALUE. A scan that looked only at secretKeyRef would see nothing at all.
+    The second spelling is the one that matters: install.sh 7/10 writes
+    PC_CREDS_SECRET=projects/$PROJECT/secrets/<the executor's credential store>
+    onto gate-exec as a plain VALUE. A scan that looked only at secretKeyRef would
+    see nothing at all.
 
     NOTE, because these two are easy to confuse: F3.3 asks "does the secret this
     revision NAMES exist?" and it is a real question about the install. F3.2 asks
@@ -2955,8 +2955,8 @@ def main(argv):
     # THE DEFAULT IS CONSTRAINED, NOT A MATTER OF TASTE. Measured against
     # control-plane/src/index.ts:
     #   * resolveKey(path, me, 'write') REFUSES the nine LAKE_EXEC_PREFIXES
-    #     (shared/ deploy|harness|passkey|mcp-oauth|vault|security|runner|gate-exec|
-    #     reaper/). A probe under any of them makes F1.4/F1.5 red on an ACL refusal
+    #     (shared/deploy/ shared/harness/ shared/passkey/ shared/mcp-oauth/ shared/vault/
+    #     shared/security/ shared/runner/ shared/gate-exec/ shared/reaper/). A probe under any of them makes F1.4/F1.5 red on an ACL refusal
     #     instead of on anything to do with encryption.
     #   * VAULT_CLEARTEXT_PREFIXES -- the first FIVE of those -- are stored PLAINTEXT
     #     BY DESIGN. A probe there lists at exactly the plaintext size, which is the

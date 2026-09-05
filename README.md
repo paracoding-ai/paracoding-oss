@@ -1,4 +1,4 @@
-# Paracoding — v12.5
+# Paracoding — v12.6
 
 **An MCP connector that gives a chat hands on your own Google Cloud project.**
 
@@ -108,13 +108,13 @@ in chat rather than run. Note what that switch does NOT touch: every check that 
 release CUT is unconditional and stays exactly where it is.
 
 **Identity-Aware Proxy guards the console, not the job.**
-`PC_REQUIRE_PASSKEY=0` is the installed default: a verified IAP identity on the approver
-allow-list (`WA_APPROVER_EMAILS`) is what reaches the console, with no cookie and no credential
-of its own. The passkey gate is not deleted -- every WebAuthn route stays in the tree and
-`PC_REQUIRE_PASSKEY=1` re-arms the whole of it for an operator who wants that posture.
-Either way it decides who reaches the browser surface, not what runs. It is not a per-command
-approval, and this document will not describe
-it as one.
+IAP is the front door: you sign in to your Google account at its prompt, and the control
+plane admits a verified IAP identity on the approver allow-list (`WA_APPROVER_EMAILS`) on
+every request, checking the assertion's signature and audience itself rather than trusting a
+header. The console issues one credential of its own -- a session cookie signed under
+`WA_SESSION_SECRET` that expires after `WA_SESSION_MIN` minutes -- and enrols nothing else.
+That decides who reaches the browser surface, not what runs. It is not a per-command
+approval, and this document will not describe it as one.
 
 **Jobs run inside a binary jail.**
 The approved script executes with `PATH` restricted to an enumerated set, so an unlisted
@@ -217,10 +217,10 @@ identity, and the Google accounts allowed to authorise an MCP connector.
 The installer deploys one built image as two Cloud Run services, and the separation between
 them is a security boundary rather than a packaging detail.
 
-`paracoding-control-plane` is the console: the browser pages, and the place where you register
-a passkey and approve work. Step 8 puts it behind Identity-Aware Proxy, grants the installing
-account `roles/iap.httpsResourceAccessor`, and removes its public invoker binding, so an
-anonymous request is refused at Google's edge before your container is reached.
+`paracoding-control-plane` is the console: the browser pages a signed-in operator works in.
+Step 8 puts it behind Identity-Aware Proxy, grants the installing account
+`roles/iap.httpsResourceAccessor`, and removes its public invoker binding, so an anonymous
+request is refused at Google's edge before your container is reached.
 
 `paracoding-mcp` is the machine-facing surface: the MCP transports, OAuth 2.1 and its
 discovery documents, the agent cards, and the token-authenticated agent API. It is publicly
@@ -230,17 +230,18 @@ refused at the edge and no client can connect at all. IAP on Cloud Run is one sw
 service with no path-level carve-out, which is why one service cannot serve both purposes.
 
 Separating them means a compromise of the machine-facing surface does not reach the human
-console. It is also the bootstrap path into a fresh install: before you have registered a
-passkey, IAP is how you reach the console at all, and the passkey session is the upgrade from
-there. The console keeps its service name deliberately -- the WebAuthn RP ID is that host,
-and renaming the service would invalidate every passkey already registered against it.
+console. It is also how you get in at all: IAP runs the Google sign-in, and the identity it
+verifies is the identity the console admits. There is no second sign-in and nothing to
+enrol. The console keeps its service name deliberately -- the IAP audience the control plane
+checks names that service, and renaming it would change the audience and every URL you have
+bookmarked.
 
 The two URLs are not interchangeable, and the installer prints both when it finishes:
 
 - the console URL, at `/harness`, is the one you open in a browser
 - the MCP URL, at `/mcp`, is the one you give an MCP client
 
-Underneath IAP the console is still guarded by the application's own passkey session, and
+Underneath IAP the console is still guarded by the application's own session check, and
 step 8 asserts that guard against your live deployment in the moment before IAP goes in front
 of it: `/harness` must answer an anonymous caller `401` with the locked page. It stops rather
 than putting IAP in front of a console that would be readable by anyone the moment IAP came
@@ -301,10 +302,10 @@ sign in -- the account you install with is very often not the account your Claud
 in with, and that is cheaper to answer here than to discover as a refusal afterwards. It is
 also editable later in Settings, so an empty answer costs you nothing.
 
-Nothing else stops. There is no workstation question because 12.x builds no VM, and the
-passkey stop is gone because a default install ships
-`PC_REQUIRE_PASSKEY=0`. The installer no longer refuses to start without a terminal, which
-means an unattended run -- Cloud Shell you walked away from, or a script -- reaches the end.
+Nothing else stops. There is no workstation question because 12.x builds no VM, and there
+is no credential to register because the Google sign-in IAP runs is the only sign-in there
+is. The installer does not refuse to start without a terminal, which means an unattended
+run -- Cloud Shell you walked away from, or a script -- reaches the end.
 
 Open Cloud Shell and point the installer at a project that has billing linked -- Cloud Shell
 already provides `gcloud`, `python3`, `openssl`, `curl` and an interactive terminal. Step 0

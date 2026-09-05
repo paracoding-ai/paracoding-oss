@@ -1362,7 +1362,6 @@ const PCGIT_PROTECTED_REFS: string[] = (function () {
   // PC_AUTO_APPROVE IS NOT CONSULTED. It governs whether a staged privileged job runs
   // without a tap and has nothing to say about ref moves -- and this fleet ships it at
   // 1, so honouring it here would make the control a no-op exactly where it matters.
-  // Same for PC_REQUIRE_PASSKEY, which ships at 0.
   //
   // FAILS CLOSED. Unset, malformed, wrong branch or wrong oid all refuse and write
   // nothing. The default protected set is `prod` although no `prod` ref exists in this

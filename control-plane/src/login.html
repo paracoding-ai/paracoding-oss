@@ -4,17 +4,13 @@
   [SEC-LOGIN-RECOVER-V1]  THE RECOVERABLE LOCKED STAGE.
 
   What this is: the document served, under a 401, in place at whichever console URL was
-  asked for, WHEN THE PASSKEY IS OFF (PC_REQUIRE_PASSKEY=0). locked.html still serves the
-  passkey posture and is unchanged; waSendLocked() picks between the two.
+  asked for, to a caller waSessionOk() has not admitted. waSendLocked() serves it.
 
-  WHY IT EXISTS. With the passkey off, a verified IAP assertion is the only thing
-  waSessionOk() can admit on, and locked.html has nothing to offer that caller: its three
-  flows are unlock, first-setup and enrol, all of which need WebAuthn. On an install with no
-  credential registered and no WA_BOOTSTRAP_SECRET it therefore rendered its terminal
-  branch -- "No way in from here", a page whose own advice is to go and re-run the installer
-  bootstrap from a shell. The operator met that page after nothing worse than a cold start
-  ([SEC-IAP-JWKS-COLDCACHE-V1]) and it told him he was locked out of his own console. He was
-  not. A reload fixed it.
+  WHY IT EXISTS. A verified IAP assertion from an address on WA_APPROVER_EMAILS is what
+  waSessionOk() admits a new arrival on, and that check reads a key cache which is empty for
+  a moment after a cold start ([SEC-IAP-JWKS-COLDCACHE-V1]). A page that simply said "no" at
+  that moment told the operator he was locked out of his own console. He was not. A reload
+  fixed it.
 
   THIS PAGE DOES THE RELOAD. That is the whole idea and it is smaller than it sounds:
 
@@ -25,7 +21,7 @@
   settled that -- it is only whether THIS PROCESS can currently verify the assertion IAP
   attached, and whether the verified address is on WA_APPROVER_EMAILS.
 
-  GET /api/webauthn/status ANSWERS THE FIRST QUESTION EXACTLY. Its `iap` field is
+  GET /api/auth/status ANSWERS THE FIRST QUESTION EXACTLY. Its `iap` field is
   `!!PC_IAP_AUD && !!pcIapEmail(req)` -- computed through the SAME key cache waSessionOk()
   uses. So `iap:false` on a freshly started container is precisely the cold-cache state, and
   `iap` flipping to true is a direct signal that a retry will now succeed. We poll it with a
@@ -77,10 +73,9 @@
   </style>
 </head>
 <body>
-  <!-- pc-locked-stage: the stable marker install.sh's self-test greps for. It is on BOTH
-       this page and locked.html, so the check asserts "an anonymous caller gets the locked
-       stage" without asserting WHICH of the two postures is deployed, and without keying on
-       a brand word that a rebrand is free to change. -->
+  <!-- pc-locked-stage: the stable marker install.sh's self-test greps for. The check asserts
+       "an anonymous caller gets the locked stage" without keying on a brand word that a
+       rebrand is free to change. -->
   <div class="card" data-pc-locked-stage="1">
     <div class="brand">Paracoding.AI</div>
     <h1>Sign in</h1>
@@ -134,7 +129,7 @@
   }
 
   async function status() {
-    var r = await fetch('/api/webauthn/status', { credentials: 'include', cache: 'no-store' });
+    var r = await fetch('/api/auth/status', { credentials: 'include', cache: 'no-store' });
     return await r.json();
   }
 
@@ -175,8 +170,8 @@
       // spinning on the front door.
       say('Google signed you in, but the console refused the session.', 'err');
       offerButton('Try once more',
-        'Your account is authenticated but may not be on the approver list (WA_APPROVER_EMAILS), '
-        + 'or this install requires a passkey. Retrying will not fix either.');
+        'Your account is authenticated but is not on the approver list (WA_APPROVER_EMAILS). '
+        + 'Retrying will not fix that.');
       return;
     }
 

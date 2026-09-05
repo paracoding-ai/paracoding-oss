@@ -1,25 +1,25 @@
-# release manifest v12.5
-# generated from source commit fb40b85fa26202714898c62f8b4160653d3dc8f2
+# release manifest v12.6
+# generated from source commit f141ef6dae8f1ecf5b4ab2e4a428c13dc5a86435
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
-0e18556407e1b379     17341  FEATURES.md
+d63d2d77df2f9872     17310  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
-1b9c4ef446e34334      4527  NOTICE
-aacd18e4e9c97f66     26357  README.md
-080a9ce8ef6f9f8a     12528  SECURITY.md
-6ffb51496bbc0c8f    409476  install.sh
-9f29b658758b85e8     45566  uninstall.sh
-eee19d1472022edc     14689  upgrade.sh
+78cc7525c53ed734      4150  NOTICE
+88c097f632030096     26435  README.md
+61c9c95c6bc29c3d     12678  SECURITY.md
+83afc0aa32ef4e78    412307  install.sh
+a9692055a950925d     45532  uninstall.sh
+578c788e7ab4713b     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-435a105d109507d3       639  agent-plugin/plugin.json
+7a84c239c2b7f747       639  agent-plugin/plugin.json
 b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
-8e56fc9bee8a929e      1104  control-plane/package.json
+eb686039b4985d17      1064  control-plane/package.json
 1a35e4cba08a9aee     39055  control-plane/route-audit.mjs
-d952a39f0a94b014     27788  control-plane/route-baseline.json
+fe5d59373cc92502     28228  control-plane/route-baseline.json
 06552f3a3ea14007       257  control-plane/tsconfig.json
 0185af4b61634a5a     67494  control-plane/mcp2026/CONFORMANCE.md
 fe5d3e41d95ee509     23060  control-plane/mcp2026/DUAL-ERA.md
@@ -28,10 +28,9 @@ e3f26784f73fc8fe     14216  control-plane/src/dash.html
 a945184f44c56f9f     38888  control-plane/src/ghtools.ts
 a2272e127e1d3651     79062  control-plane/src/gittools.ts
 67596eadcc4423bb     28968  control-plane/src/gppatch.ts
-eab7d96638a32677    177022  control-plane/src/harness.html
-fb935a663aeee318    809412  control-plane/src/index.ts
-9cbc5383f199528a     22966  control-plane/src/locked.html
-296dac8ac2408861      9834  control-plane/src/login.html
+caa5f22bcc7d2227    176812  control-plane/src/harness.html
+cb0eb40bf3696122    764534  control-plane/src/index.ts
+22db75f0e21c8e3d      9314  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
 0822f926ce6e5727     32916  control-plane/src/mcp2026.ts
 81310ff02144a71a      5032  control-plane/src/brand/favicon.ico
@@ -57,16 +56,16 @@ ecdc94f12edde025     16261  control-plane/src/pcgit/07-refs/src/push.ts
 c5b69b06cd702d38      8049  control-plane/src/pcgit/09-mcp/src/context.ts
 e277961bba823332     10114  control-plane/src/pcgit/09-mcp/src/diff.ts
 a2bb5727fe6a17e2      4182  control-plane/src/pcgit/09-mcp/src/errors.ts
-2e7a40c54bdb795c     61590  control-plane/src/pcgit/09-mcp/src/ops.ts
+35879030ca376297     61538  control-plane/src/pcgit/09-mcp/src/ops.ts
 406ae47e0d07f066      9957  control-plane/src/pcgit/09-mcp/src/ref-gate.ts
 2b07148791737798     15144  control-plane/src/pcgit/09-mcp/src/tree.ts
 7903b244d135e858     95941  control-plane/src/wiki-assets/01-surface-split.png
-373ef11e35d873dd    100742  control-plane/src/wiki-assets/02-auth-path.png
+537dab7fd8f8e0d2     32194  control-plane/src/wiki-assets/02-auth-path.png
 1ee08c44ae9d1062     58897  control-plane/src/wiki-assets/03-git-store.png
 c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 35f3d015dcb55c41     71006  control-plane/src/wiki-assets/05-deploy.png
-62536782273b880a     23472  devgate/RUNBOOK.md
-da0f1b1bc01c4aa8    160454  devgate/smoke.py
+6cc36c8b24fb878e     23474  devgate/RUNBOOK.md
+8bc17c265e755616    160754  devgate/smoke.py
 42d0543fa6d16d01     11864  fleet/BOOTSTRAP.md
 d117ed209be1573c      6654  fleet/apis.txt
 5337e239d6214e18      4486  fleet/cowork-prompts.md
@@ -84,24 +83,24 @@ bed7eaa575af395f      3003  gate-exec/pcwebauthn.py
 62d115d2450583df      6721  pipeline/check-apis.py
 e894207ba55ef7ad      5660  pipeline/check-no-embedded-assets.py
 9421142614dee360     10610  pipeline/check-python-names.py
-566534d17f3caccd     51499  pipeline/cloudbuild-dev.yaml
+5479693b48b77417     51528  pipeline/cloudbuild-dev.yaml
 8b0bae1904d2b72e     49882  pipeline/cloudbuild-prod.yaml
 42f76a3cde69c2b4     33397  pipeline/cloudbuild-release-check.yaml
-87f27e4464aa9546    173331  pipeline/collect-evidence.py
+37debdd74ab45a7c    173282  pipeline/collect-evidence.py
 0b3c129d1a72f624     31477  pipeline/promote-gate.sh
 88c59067a7c7a72f     12105  pipeline/publish-build-request.sh
 deaedc0365f054b4     32484  pipeline/secret-destroy-preflight.py
 319af1a238df57a3      2839  wiki/_index.json
 71b8aebd9209c5b6      1198  wiki/_release.txt
 9732414ce3d3e1c0     15401  wiki/_shell.html
-796d0bd34fb47ace     48538  wiki/pages/architecture.md
-45c46eb6c103fa68     22728  wiki/pages/change-the-code.md
+de28e65b9c22e8eb     47358  wiki/pages/architecture.md
+cce72ff58c8bd5e7     22635  wiki/pages/change-the-code.md
 f3496ca8575c8564     14361  wiki/pages/connect-an-agent.md
-1cb7f80fac4fe3b2     12634  wiki/pages/index.md
+d4d388134ba2bed0     12635  wiki/pages/index.md
 3d7b6def6dfe7d06      7791  wiki/pages/model-config.md
-78eedcd73e3beb32     38746  wiki/pages/operators-guide.md
-755fb3d9b4d3f99a     74974  wiki/pages/systems-manual.md
-cfa7585fd82d0747     23097  wiki/pages/the-gate.md
+8091381e6f769fbf     37419  wiki/pages/operators-guide.md
+b6682517c9491921     73478  wiki/pages/systems-manual.md
+dbc9e137e73dfa0a     22730  wiki/pages/the-gate.md
 7fc2397636565bc8      4514  wiki/pages/the-strains.md
-f1f582f006ee9ccd     21269  wiki/pages/troubleshooting.md
+c3d0f08c1d9acea1     21142  wiki/pages/troubleshooting.md
 91b35e4c38d836df     11002  wiki/pages/working-with-agents.md

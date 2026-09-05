@@ -381,7 +381,7 @@ gate that refuses everything is a different broken, not a working one.
   account and is not the approving human. An IAM-propagation poll goes green
   instantly wherever the runner already has access -- it exercises the code path, it
   does not prove a grant propagates.
-- **The real approval path.** No signature, no passkey assertion, no minter. F5's
+- **The real approval path.** No signature is produced or verified end to end. F5's
   round trip is declared and then skipped, in the judge's own words.
 - **Real state.** No job documents, no journal history, no `pcv1` metadata on
   objects anyone else wrote.

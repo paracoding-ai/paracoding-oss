@@ -38,7 +38,6 @@ dependency, add it here.
 RUNTIME DEPENDENCIES (npm)
 
   @modelcontextprotocol/sdk  ^1.12.0   MIT
-  @simplewebauthn/server     ^10.0.1   MIT
   express                    ^4.19.2   MIT
   firebase-admin             ^12.7.0   Apache-2.0
   uuid                       ^9.0.1    MIT
@@ -55,8 +54,6 @@ BROWSER COMPONENTS LOADED AT RUNTIME FROM A CDN
   These are not listed in package.json and will be missed by an SBOM tool
   pointed only at the manifest. They are fetched by the browser at page load.
 
-  @simplewebauthn/browser    10.0.0    MIT
-                                       vendored inline in src/locked.html
   Google Identity Services   n/a       Proprietary — Google Terms of Service
                                        https://accounts.google.com/gsi/client
                                        loaded by the OAuth consent page the
@@ -64,10 +61,7 @@ BROWSER COMPONENTS LOADED AT RUNTIME FROM A CDN
 
   2026-08-14: src/gate.html is deleted along with the three routes that served it,
   and the two entries that named it as their only loader went with it. qrcodejs is
-  no longer fetched anywhere in this tree. @simplewebauthn/browser is no longer
-  fetched from a CDN either -- src/locked.html carries it inline, pinned by tarball
-  sha512 and file sha384, so the Subresource Integrity finding below no longer
-  applies to it.
+  no longer fetched anywhere in this tree.
 
   2026-08-19 [SEC-AUDIT-V105-NOTICE]: this entry used to name src/mcp-oauth.ts as
   the loader of the Google Identity Services script. There is no such file in this

@@ -89,7 +89,8 @@ PCV1_OVERHEAD = 34
 # it is the only way a NOT-EXERCISED finding is allowed to coexist with exit 0.
 UNEXERCISABLE = {
     "F5.APPROVAL_ROUNDTRIP":
-        "A real approval requires a human WebAuthn passkey with user presence. "
+        "A real approval is a KMS signature the control plane produces inside the "
+        "call that stages a job, against the live executor. "
         "No signature is produced or verified end to end by this harness. What "
         "is asserted instead is that the key exists, that only the control plane "
         "can sign with it, and that the executor holds public-key read only.",
@@ -1095,8 +1096,9 @@ def judge(ev):
     f = Finding("F3.2.NO_ENV_SET_THAT_CODE_IGNORES", "ASSERTED",
                 "The reverse direction. Every variable the installer SETS is one "
                 "the code READS. A variable that is set and never read is a lie "
-                "in the install -- it is how pc-webauthn-creds got named on "
-                "gate-exec by a deploy while exec_server.py reads no such thing.")
+                "in the install -- it is how the executor's credential-store "
+                "secret got named on gate-exec by a deploy before anyone had "
+                "checked what read it.")
     gx_reads = set(src.get("gx_env_read", []) or [])
     cp_reads = set(src.get("cp_env_read", []) or [])
     # BUILD_COMMIT added 2026-08-10 [SEC-DEVGATE-COLLECT-V1]. It is in the same class as
@@ -1134,9 +1136,9 @@ def judge(ev):
         f.ok("every deployed variable is read by the code")
     F.append(f)
 
-    f = Finding("F3.3.WEBAUTHN_CREDS_SECRET_EXISTS", "ASSERTED",
+    f = Finding("F3.3.NAMED_SECRETS_EXIST", "ASSERTED",
                 "Every secret a deployed revision names actually exists. The "
-                "installer wrote PC_CREDS_SECRET=.../pc-webauthn-creds onto "
+                "installer once wrote PC_CREDS_SECRET=.../<credential store> onto "
                 "gate-exec and never created that secret.")
     named = ev.get("named_secrets", {}) or {}
     absent = sorted(k for k, v in named.items() if not v)
@@ -1306,17 +1308,19 @@ def judge(ev):
 
     f = Finding("F5.4.EXECUTOR_RP_ID_SET", "ASSERTED",
                 "gate-exec reads PC_RP_ID at exec_server.py:391 and :472 and "
-                "DEFAULTS IT TO 'example.invalid'. Unset means the executor "
-                "verifies passkey assertions against a relying party that is not "
-                "the gate -- a silent wrong default, not an error.")
+                "DEFAULTS IT TO 'example.invalid'. Unset means the executor's own "
+                "per-job assertion check is bound to a host that is not the "
+                "console -- a silent wrong default, not an error. The installer "
+                "writes the console host, which is also the host of PC_CONSOLE_URL "
+                "on the control plane.")
     rp = gxenv.get("PC_RP_ID", "")
-    cp_host = cpenv.get("WA_RP_ID", "")
+    cp_host = re.sub(r"^https?://", "", str(cpenv.get("PC_CONSOLE_URL", "") or "")).split("/")[0]
     if _starve(f, st, "gx"):
         pass
     elif not rp:
         f.bad("PC_RP_ID is UNSET on the executor; it will use 'example.invalid'")
     elif cp_host and rp != cp_host:
-        f.bad("executor PC_RP_ID=%r but the gate is served at %r" % (rp, cp_host))
+        f.bad("executor PC_RP_ID=%r but the console is served at %r" % (rp, cp_host))
     else:
         f.ok(rp)
     F.append(f)
@@ -1843,7 +1847,7 @@ def seeds():
 
     def s_secret(ev):
         ev["named_secrets"] = dict(ev.get("named_secrets") or {})
-        ev["named_secrets"]["pc-webauthn-creds"] = False
+        ev["named_secrets"]["pc-control-plane-secret-that-was-never-made"] = False
         return ev
 
     def s_idx_count(ev):
@@ -2036,7 +2040,7 @@ def seeds():
         "F2.6.MCP_METADATA_DOC_RFC9728":   ("the document is served but has no authorization_servers", s_meta_doc),
         "F3.1.CP_REQUIRED_ENV_SET":        ("a required env var unset", s_env_missing),
         "F3.2.NO_ENV_SET_THAT_CODE_IGNORES": ("a var set that no code reads", s_env_dead),
-        "F3.3.WEBAUTHN_CREDS_SECRET_EXISTS": ("a named secret does not exist", s_secret),
+        "F3.3.NAMED_SECRETS_EXIST": ("a named secret does not exist", s_secret),
         "F4.1.INDEX_INVOCATIONS_COUNTED":  ("zero pc_index() call sites", s_idx_count),
         "F4.2.INDEXES_ACTUALLY_EXIST":     ("no composite index exists", s_idx_absent),
         "F5.1.KMS_KEY_EXISTS":             ("wrong signing algorithm", s_kms_alg),
@@ -2521,11 +2525,11 @@ def conditional_skips():
                 "F2.4.GITVAULT_BUCKET_BACKED",
                 "F3.1.CP_REQUIRED_ENV_SET",
                 "F3.2.NO_ENV_SET_THAT_CODE_IGNORES",
-                "F3.3.WEBAUTHN_CREDS_SECRET_EXISTS",
+                "F3.3.NAMED_SECRETS_EXIST",
                 "F5.2.EXECUTOR_CANNOT_SIGN",
                 "F5.3.SIG_KEY_VERSION_PAIRED")),
         ("gx", ("F3.2.NO_ENV_SET_THAT_CODE_IGNORES",
-                "F3.3.WEBAUTHN_CREDS_SECRET_EXISTS",
+                "F3.3.NAMED_SECRETS_EXIST",
                 "F5.2.EXECUTOR_CANNOT_SIGN",
                 "F5.3.SIG_KEY_VERSION_PAIRED",
                 "F5.4.EXECUTOR_RP_ID_SET")),

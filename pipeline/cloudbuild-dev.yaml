@@ -335,7 +335,7 @@ steps:
   # asserts against; it never reaches the deploy line.
   #
   # --no-traffic is not negotiable. --update-env-vars, not --set-env-vars: it must
-  # not drop PC_REQUIRE_PASSKEY.
+  # not drop the variables the installer set on the revision.
   - id: deploy-notraffic
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash

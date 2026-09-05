@@ -311,15 +311,12 @@ The accepted cost is stated rather than hedged: a lockout-class change can take 
 console's own authentication out, and the recovery is Cloud Shell, which the operator
 holds. Breakage is the accepted cost and rolling forward is the accepted cure.
 
-**One asymmetry survives and it is worth naming rather than tidying away.**
-`POST /api/webauthn/preapprove` -- the route that authorises a job to be fired *later, while
-the human is away* -- still hard-refuses a destructive command, unconditionally, with no
-`PC_GUARDRAILS` in front of it. Its argument is narrower than the one the ruling addressed
-and still holds: an authorisation collected now cannot be re-demanded at fire time, so
-accepting one there would only buy a signature authorising an unattended destructive run up
-to twelve hours afterwards with nobody present to abort it. `pcAutoRun` fires in the same breath as the
-request, so there is no such window. The distinction is *unattended later* versus *now, at the
-operator's instruction*, and it is the reason these two look inconsistent and are not.
+**There is no run-later authorisation.** An earlier release carried a route that stamped a
+pre-approval for a job to be fired up to twelve hours afterwards, while the human was away,
+and it hard-refused a destructive command for exactly that reason -- an authorisation
+collected now cannot be re-demanded at fire time. That route is deleted. `pcAutoRun` fires
+in the same breath as the request, so there is no unattended window; the pre-approval it
+stamps expires after fifteen minutes and is consumed by the run it was minted for.
 
 There is one override that survives in both directions. `lockout_ack: true` rides **inside**
 `arguments`, which is covered by `asha`, field five of the approval canon -- so adding or
@@ -329,24 +326,23 @@ whoever could reach the endpoint. With `PC_GUARDRAILS=1` that ack is what lets a
 acknowledged lockout-class job through, journalled as `exec_lockout_acked` so a human saying
 yes can never be confused in the transcript with the checker finding nothing.
 
-### Staged jobs coexist, and expiry only runs when the console is open
+### Staged jobs coexist, and nothing retires them behind your back
 
 With `PC_AUTO_APPROVE=1` most jobs never sit in the queue at all -- they are stamped and
 fired inside the staging call. The queue is still real machinery, though, and everything
-below still applies to a job that does wait: an install running `PC_AUTO_APPROVE=0`, and any
-job whose auto-run leg failed before it fired.
+below still applies to a job that does wait: an install running `PC_AUTO_APPROVE=0`, a job
+that carried no command text, and any job whose auto-run leg failed before it fired.
 
-`GET /api/webauthn/pending` is where that queue is read. It survives the gate's deletion; the
-harness polls it to light its pending indicator. Read every sentence below that says "when
-the console is open" as meaning *that poll*, from a browser holding an unlocked session.
+`list_pending_confirm` is where that queue is read. It is a pure Firestore reader over
+`pending_confirms`; no console page polls the queue and no route lists it.
 
-**There is no automatic supersede.** There used to be: this endpoint retired every pending
-job that was not the newest of its `staged_by` + `|` + `command_type` key, on every load of
-the list, writing only `status` and `superseded_at` -- so the destroyed job reported
+**There is no automatic supersede.** There used to be: the listing route retired every
+pending job that was not the newest of its `staged_by` + `|` + `command_type` key, on every
+load of the list, writing only `status` and `superseded_at` -- so the destroyed job reported
 `reason: null` forever and two chats of one role sharing one `command_type` erased each
-other's work at the moment the operator opened the page to read it. It is gone. Every staged
-job stays listed until it is approved, denied, superseded on purpose, quarantined, or
-expires.
+other's work at the moment the operator opened the page to read it. It is gone, and so is
+the route. Every staged job stays listed until it is superseded on purpose through
+`POST /api/jobs/supersede`, which records who did it and why.
 
 What replaces it runs at STAGE time, refuses loudly, and destroys nothing:
 
@@ -359,20 +355,12 @@ What replaces it runs at STAGE time, refuses loudly, and destroys nothing:
 - A read failure while checking either of those **refuses the stage** rather than admitting
   it, because an unreadable queue and an empty queue look identical.
 
-Expiry lives on that same endpoint and runs only when it is polled. Nothing expires on a
-timer: if nobody opens the console, jobs sit pending past their TTL indefinitely, and the
-moment somebody does, a batch of them flips to `expired` at once. Expiry writes
-`expired_reason`, and a job whose expiry write FAILS is listed rather than hidden.
-
-- **A job with no creation timestamp never expires.** It still lists.
-- The query is capped at `PC_PENDING_LIST_MAX` (default 500) pending documents. Past that the
-  poll sees a subset and says so in the service log.
-
-The same pass quarantines any pending job whose `staged_by` is not an active provisioned
-strain, once, in a transaction. Delete a strain and its pending jobs become unapprovable
-at the next poll. If the strain registry read is empty or fails the filter is
-**skipped** for that request and nothing is quarantined -- the approve path refuses a
-non-provisioned identity independently, and a registry outage must not hide every job.
+**Nothing expires a pending job.** There is no time-to-live and no sweep. A job that
+stopped at `pending` stays there until it is superseded on purpose; `read_job_log` still
+projects `expired_reason` and `quarantine_reason` for records an earlier release wrote, so
+an old job's reason is not lost. A job can only ever run through the signed auto-run path
+or `POST /api/jobs/fire` against a token it minted, so a pending job that nothing fires is a
+record and nothing more.
 
 ### Two staging behaviours that surprise people
 
@@ -440,7 +428,7 @@ and it holds no Firestore client at all. A service that can edit its own audit t
 not have one; this one cannot.
 
 Getting those rows back into Firestore is a sweep in the control plane. It rides
-`GET /api/webauthn/pending` -- a path the console already polls -- at most once every
+`GET /api/dash/summary` -- a path the console already polls -- at most once every
 `PC_EXEC_INGEST_MIN_MS` (default 30,000) and never twice at once, and it is **fired, not
 awaited**, so a slow or failing bucket cannot delay the poll. There is deliberately no
 Cloud Scheduler behind it: that would be a new resource, a new service account, a new IAM
@@ -505,7 +493,7 @@ cannot burn a real approval.
 | 0 | **arming gate**: `PC_EXEC_BUCKET` set AND `APPROVAL_REQUIRE_SIGNED=1` | 503, naming which variable | no |
 | 1 | `job_id` present | 400 | no |
 | 2 | the body carries an `approval` object | 400 | no |
-| 3 | WebAuthn assertion, **only if** `PC_REQUIRE_ASSERTION=1` | 428 missing / 403 unbound / 403 no creds / 403 refused | no |
+| 3 | the executor's own per-job operator assertion, **only if** `PC_REQUIRE_ASSERTION=1`; the installer ships it `0` and the control plane forwards none | 428 missing / 403 unbound / 403 no creds / 403 refused | no |
 | 4 | sha256 of the presented script equals the approved command's | 400 bad base64 / 403 no approved command / 403 mismatch | no |
 | 5 | `approved_sha256`, stamped at approval time, matches the live command | 403 absent / 403 unreadable / 403 changed-after-approval | no |
 | 6 | KMS approval signature | 403 bad / 403 unverifiable / 403 unsigned-when-required / 403 V1 stamp on a non-local job | no |
@@ -559,17 +547,15 @@ There used to be a fallback there that allowed an absent pin, on the reasoning t
 enforcing it unconditionally would 403 every job predating the field, including the job
 that would undo the change. It is gone, and the reason it could go is that the missing
 half was found: the control plane had exactly **one** writer of `approved_sha256`, inside
-the legacy approve route, and the pre-approve to `POST /api/jobs/fire` path never passes
-through that route. **Every** pre-approved job therefore arrived with the field absent,
-permanently -- so the fallback's own stated exit condition, that the absence count reach
-zero on its own, could never be met. That was not a legacy-document problem. It was a live
-one.
+the human approve route of the time, and the run-later path never passed through that
+route. **Every** pre-approved job therefore arrived with the field absent, permanently --
+so the fallback's own stated exit condition, that the absence count reach zero on its own,
+could never be met. That was not a legacy-document problem. It was a live one.
 
-Three writers now exist. The legacy approve route stamps the pin whenever the job has a
-command to hash; the pre-approve route stamps it beside `cmd_sha` when it mints the
-single-use `run_token` that `POST /api/jobs/fire` later redeems; and `pcAutoRun` stamps it
-under the **same field names** when it pre-approves a job for immediate firing. A different
-shape in that third writer would have been a second approval format for the executor to
+One writer exists now, and it is the only approval path: `pcAutoRun` stamps the pin beside
+`cmd_sha` when it mints the single-use `run_token` and pre-approves a job for immediate
+firing, under the **same field names** `POST /api/jobs/fire` and the executor read. A
+different shape there would have been a second approval format for the executor to
 understand, and two formats is how a rung starts accepting the weaker one.
 
 **A job approved before that change and not yet executed will be refused** and must be
@@ -747,9 +733,9 @@ There are two independent locks on a console page and they belong to different s
 **IAP is the outer one and it is not this application's code.** Identity-Aware Proxy sits
 in front of the console service and authenticates a Google account at Google's front door;
 an unauthenticated request never reaches the container, so a bug in this application cannot
-be the thing that lets somebody in. Put a hardware key -- a Titan, or a passkey on the
-account -- behind that Google account and reaching the console costs a physical touch. There
-is no password to phish.
+be the thing that lets somebody in. Signing in to that Google account at IAP's prompt is
+the only sign-in there is. Put a hardware security key -- a Titan -- behind the account and
+reaching the console costs a physical touch. There is no password to phish.
 
 The third control there is the one people leave out, and it is worth being precise about
 what it does and does not do. With the project in a Google Cloud organization and
@@ -762,14 +748,17 @@ Turning it off, adding the account and turning it back on **does** work, which m
 exception you told yourself was temporary is permanent. If you need a second operator, add a
 second account **in your domain** with its own key.
 
-**The session check is the inner one and it is this application's.** A fresh install sets
-`PC_REQUIRE_PASSKEY=0`, so a verified IAP identity on `WA_APPROVER_EMAILS` satisfies it with
-nothing to enrol and nothing to unlock. A caller carrying no IAP identity at all still gets
-**401 with `control-plane/src/locked.html` served in place**, at the URL it asked for --
-unlock, first-time setup, device enrolment, nothing else. Three things about that shape are
-deliberate:
+**The session check is the inner one and it is this application's.** `waSessionOk` admits
+a verified IAP identity on `WA_APPROVER_EMAILS` -- it verifies the assertion IAP attaches
+against Google's published keys and its own audience, `PC_IAP_AUD`, on every request and
+trusts no bare header -- or a `gate_session` cookie it minted itself: an HMAC under
+`WA_SESSION_SECRET` over `{ user, expiry }`, honoured for `WA_SESSION_MIN` minutes. There is
+nothing to enrol and nothing to unlock. A caller carrying no IAP identity at all gets
+**401 with `control-plane/src/login.html` served in place**, at the URL it asked for -- a
+page that names the Google sign-in and polls `GET /api/auth/status` while the IAP key cache
+warms, nothing else. Three things about that shape are deliberate:
 
-1. **There is no `?next=` and no redirect.** The caller's URL never changed, so unlocking
+1. **There is no `?next=` and no redirect.** The caller's URL never changed, so signing in
    lands them where they already were by reloading. There is no target to carry, and with it
    goes the enumeration oracle the `/wiki` routes were written to avoid -- the anonymous
    response no longer varies with caller input at all, held by construction rather than by
@@ -778,11 +767,10 @@ deliberate:
    refused; the old redirect was indistinguishable from a working page that had moved, and
    the installer's own guard check read that 302 as proof the console was guarded. No
    `WWW-Authenticate` header is sent, so no browser credential dialog appears.
-3. **The WebAuthn path did not go away with the gate page.** It lost the larger of its two
-   documents and kept the small one, and all fifteen `webauthn` routes are still in the tree.
-   With `PC_REQUIRE_PASSKEY=1` this IS the working unlock page, and it is the way back in if
-   the identity provider in front of the console ever fails. **Operators guide** has that
-   switch.
+3. **The page is public by design and carries nothing.** `GET /api/auth/status` answers a
+   number and one boolean, and the boolean says only whether *this* request carried a
+   verified IAP identity -- which its caller already knows. It exists so the locked stage can
+   tell a cold key cache from a refusal, and for no other reason.
 
 The API middleware answers differently and says why. A console `/api/*` path with no session
 returns 403 JSON naming **both** possibilities: no console session, or you are calling the
@@ -793,46 +781,33 @@ is no IAP and never a session cookie.
 | Setting | In-code default | What `install.sh` writes |
 |---|---|---|
 | `WA_SESSION_MIN` | 10 | 240 |
-| `WA_ELEVATE_MIN` | 5 | not set |
-| `WA_JOB_TTL_MIN` | 60 | not set |
-| `PC_REQUIRE_PASSKEY` | on | 0 |
+| `PC_IAP_AUD` | — | the console service |
 | `WA_SESSION_SECRET` | — | from Secret Manager |
 | `WA_APPROVER_EMAILS` | — | your account |
 
-Two of those are fail-closed and are the ones to check first when the console will not
-unlock. A session secret shorter than 16 characters disables sessions entirely -- the
+Three of those are fail-closed and are the ones to check first when the console will not
+admit you. A session secret shorter than 16 characters disables sessions entirely -- the
 service refuses to *issue* one, not merely to accept one -- because an empty-key HMAC is
-forgeable and a forgeable session cookie is a forgeable approval. An empty approver
-allowlist denies the Google-identity approval path outright; an empty list used to
-short-circuit the check and accept any authenticated Google identity.
+forgeable. An empty approver allowlist denies the IAP-identity path outright; an empty list
+used to short-circuit the check and accept any authenticated Google identity. And an unset
+`PC_IAP_AUD` means no IAP admission at all, because an assertion minted for *any*
+IAP-protected application would otherwise satisfy the check.
 
-**When a human does approve a job, the approval is bound to that job.** This is the manual
-approval path. It is still present, no console page calls it on a stock install, and
-`PC_REQUIRE_PASSKEY=1` is what puts it back in front of a person. With that gate on, the
-approve route demands a fresh elevation bound to *that* job: the elevation cookie carries
-both the job id and the sha256 of the job's command as it stands now. A generic "this
-browser authenticated recently" cookie satisfies nothing, and an edited command
-is refused. The danger verdict is kept only for the wording of the prompt -- it never
-decides whether a tap is needed. Assertions are bound the same way: the last 32 bytes of the
-challenge must equal the sha256 of the job id, a pipe, and the action, which is what makes
-one usable for exactly one job and one action.
+**A session is not an approval.** A console session opens the pages; nothing in it approves
+a job. The approval is the KMS signature `pcAutoRun` produces, bound to one job id, one
+command digest and one argument digest, with `auto:lockout-check` in the signed approver
+field because there is no person in that path. There is no console route that approves,
+denies or fires a pending job.
 
-**Replay protection is two checks and you need both.** The first refuses a re-approve of a
-job already `executed`; the second refuses one still `executing` within 20 minutes of its
-start. Both return 409 carrying `preserved_exit_code`. Without the second, a second click
-on a still-running job walked past the first, the executor correctly refused the replay
-with 409, and the failure branch **overwrote the running job's record** with a null exit
-code and "DID NOT RUN" -- nothing double-executed, the operator was simply lied to. A
-missing or unreadable start time reads as zero, hence stale, hence allowed, so a control
-plane that dies mid-flight cannot jam a job forever.
+### The confirm routes there used to be
 
-### The confirm route there used to be two of
-
-There is now exactly one confirm endpoint, and it is the WebAuthn one. A second
-endpoint used to sit on the MCP surface guarded by a shared bearer secret in a header
-rather than by a credential, carrying none of the danger or elevation checks its
-twin has. It has been **removed**, along with the secret it read: nothing binds that
-secret to either service any more, and the installer no longer creates it.
+There is no confirm endpoint. The human one -- bound to one job id and one command digest,
+run under the approving human's own Google token, with replay protection against a job
+already `executed` or still `executing` -- was deleted with the credential it required.
+Before it, a second endpoint sat on the MCP surface guarded by a shared bearer secret in a
+header rather than by a credential, carrying none of the danger checks its twin had. That
+one was **removed** first, along with the secret it read: nothing binds that secret to
+either service any more, and the installer no longer creates it.
 
 It was removed rather than documented because it was never a working path in the first
 place. It set the job to `confirmed` and then fire-and-forgot a request to the executor
@@ -859,7 +834,7 @@ two-lane project resolved to the *other* lane's bucket -- and the lake path writ
 service redeployed without its lake variable wrote into the wrong lake and reported
 success. Resolution throws per call rather than at boot, on purpose: a module-level
 refusal turns a missing variable into a crash-looping revision and takes the console, the
-unlock page and every route that never touches the lake down with it.
+sign-in page and every route that never touches the lake down with it.
 
 ### The envelope
 
@@ -1142,11 +1117,10 @@ place. None of these is a bug report; each is a decision with its reason above.
   detection, plus a roll-forward. `PC_GUARDRAILS=1` restores both refusals. The recovery from
   a lockout-class mistake is Cloud Shell, and an adopter who does not have that should set
   the variable.
-- **Nothing expires, ingests or quarantines unless the console is polled.** Expiry, identity
-  quarantine and the executor-result sweep all ride `GET /api/webauthn/pending`. With nobody
-  logged in, pending jobs sit past their TTL indefinitely and executed jobs read back with
-  empty output. Nothing is lost -- the results are objects in a bucket -- but nothing is
-  timely either.
+- **Nothing ingests unless the console is polled.** The executor-result sweep rides
+  `GET /api/dash/summary`. With nobody logged in, executed jobs read back with empty output.
+  Nothing is lost -- the results are objects in a bucket -- but nothing is timely either.
+  Nothing expires or quarantines a pending job at all.
 - **The IAP domain constraint is enforced at write time, not retroactively.** Disabling it,
   granting an out-of-domain account, and re-enabling it works, and the exception it creates
   is permanent. Add a second in-domain account with its own key instead.

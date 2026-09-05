@@ -34,8 +34,8 @@ One container image, one route table (**93 routes**), deployed twice with differ
 |---|---|---|
 | Who reaches it | a human in a browser | an agent / MCP client |
 | IAP | **on** | **off** |
-| Routes registered | 70 | 28 |
-| Routes withheld | 23 | 65 |
+| Routes registered | 51 | 28 |
+| Routes withheld | 23 | 46 |
 
 A route that lands on neither surface **throws at boot** rather than shipping a silently
 broken install. The split exists because IAP consumes the `Authorization` header an MCP
@@ -44,23 +44,23 @@ the auth they require.
 
 ## 3. Access control that fails closed
 
-- **Google IAP** as the outer door. Put a hardware key or a passkey on the Google account
-  and reaching the console costs a physical touch.
-- **The approver allow-list as the inner door.** The install ships `PC_REQUIRE_PASSKEY=0`, so
-  a verified IAP identity on `WA_APPROVER_EMAILS` — seeded with the installing account — is
-  what satisfies the application's own session check. Two independent doors, no enrolment step.
-- **A weak `WA_SESSION_SECRET` means *no valid sessions at all***, because an empty-key HMAC
-  is forgeable. The session layer fails closed rather than degrading.
-- **The legacy WebAuthn gate is intact but unwired.** `locked.html` and all fifteen `webauthn`
-  routes stay in the tree, referenced by no console page. A session minted while that gate was
-  off does not survive turning it back on.
+- **Google IAP** as the outer door. Put a hardware security key on the Google account and
+  reaching the console costs a physical touch.
+- **The approver allow-list as the inner door.** A verified IAP identity on
+  `WA_APPROVER_EMAILS` — seeded with the installing account — is what satisfies the
+  application's own session check, on every request. Two independent doors, no enrolment step,
+  no credential of the console's own to register.
+- **A session cookie with a TTL.** `gate_session` is an HMAC over `{ user, expiry }` under
+  `WA_SESSION_SECRET` and is honoured for `WA_SESSION_MIN` minutes. **A weak
+  `WA_SESSION_SECRET` means *no valid sessions at all***, because an empty-key HMAC is
+  forgeable. The session layer fails closed rather than degrading.
 - **Org policy** (`allowedPolicyMemberDomains`) makes out-of-domain access *impossible to
   grant*, not merely discouraged — enforced when the binding is written.
 - **401 served in place**, at the URL you asked for. No `?next=` redirect, so no enumeration
   oracle and no browser credential dialog.
-- **Elevation is separate from session** and is bound to *one job id and one command digest*
-  — an edited command is refused. A generic "this browser authenticated recently" has never
-  been enough to authorise a command.
+- **An approval is bound to *one job id and one command digest*** — the KMS signature covers
+  both, and an edited command is refused by the executor. A generic "this browser
+  authenticated recently" has never been enough to authorise a command.
 
 ## 4. Agent identity — strains
 
