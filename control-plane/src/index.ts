@@ -8784,9 +8784,27 @@ app.post('/api/strains/provision', waSafe(async (req: express.Request, res: expr
     if (badtc.length) { res.status(400).json({ error: 'unknown tool class ' + JSON.stringify(badtc).slice(0, 120) + '; known: ' + PC_ALL_CLASSES.join(',') }); return; }
     stcl = rawtc.map((x: any) => String(x));
   }
-  await db.collection('strains').doc(role).set({ role, display_name: display || role, status: 'active', created_by: 'operator:' + WA_USER, created_at: FieldValue.serverTimestamp(), ...(stcl === null ? {} : { tool_classes: stcl }) }, { merge: true });
-  await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_provisioned', message: 'provisioned strain ' + role + ' (' + (display || role) + ') — active on next control-plane deploy' + (stcl === null ? '' : ' — tool_classes RESTRICTED to [' + stcl.join(',') + ']'), timestamp: FieldValue.serverTimestamp() });
-  res.json({ ok: true, role, status: 'active', tool_classes: stcl, note: stcl === null ? 'unrestricted: this strain holds every tool class' : 'pcToolClasses caches for up to ' + PC_CLASS_TTL_MS + 'ms, so this takes effect within a minute' });
+  // [STRAIN-OIDC-IDENTITY-V128] Optional sa_email binds this strain to ONE Google service
+  // account, so a reasoning-engine agent running as that SA resolves to this strain over its
+  // attested ID token with no session-key paste (see oaStrainFromOidc / pcResolveIdentity).
+  // It is the writer for the field oaStrainFromOidc has always read; before this, the query
+  // strains.where('sa_email','==',email) could never match because nothing wrote it. Shape-
+  // guarded to a service-account address so a typo cannot bind a strain to an arbitrary email,
+  // stored lower-cased to match the tokeninfo lookup, and '' clears the binding. It is NOT a
+  // credential -- a caller must still present a token GOOGLE signed for that exact SA; naming
+  // an SA here grants nothing to anyone who cannot make Google attest they are it.
+  const rawsa = (req.body || {}).sa_email;
+  let saEmail: string | null | undefined = undefined;
+  if (typeof rawsa !== 'undefined') {
+    const s = String(rawsa || '').trim().toLowerCase();
+    if (s === '') { saEmail = null; }
+    else if (s.indexOf('.iam.gserviceaccount.com') < 0 || s.indexOf('@') < 0) {
+      res.status(400).json({ error: 'sa_email must be a Google service-account address ending .iam.gserviceaccount.com, or "" to clear the binding' }); return;
+    } else { saEmail = s; }
+  }
+  await db.collection('strains').doc(role).set({ role, display_name: display || role, status: 'active', created_by: 'operator:' + WA_USER, created_at: FieldValue.serverTimestamp(), ...(stcl === null ? {} : { tool_classes: stcl }), ...(typeof saEmail === 'undefined' ? {} : { sa_email: saEmail }) }, { merge: true });
+  await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_provisioned', message: 'provisioned strain ' + role + ' (' + (display || role) + ') — active on next control-plane deploy' + (stcl === null ? '' : ' — tool_classes RESTRICTED to [' + stcl.join(',') + ']') + (typeof saEmail === 'undefined' ? '' : (saEmail === null ? ' — sa_email CLEARED' : ' — sa_email BOUND to ' + saEmail)), timestamp: FieldValue.serverTimestamp() });
+  res.json({ ok: true, role, status: 'active', tool_classes: stcl, sa_email: (typeof saEmail === 'undefined' ? undefined : saEmail), note: stcl === null ? 'unrestricted: this strain holds every tool class' : 'pcToolClasses caches for up to ' + PC_CLASS_TTL_MS + 'ms, so this takes effect within a minute' });
 }));
 app.post('/api/strains/retire', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
@@ -9764,6 +9782,20 @@ app.post('/git/blob', pcBlobBody, async (req: any, res: any) => {
   }
 });
 async function oaBearerRole(req: any): Promise<string | null> {
+  const id: any = await oaBearerIdentity(req);
+  return id ? id.role : null;
+}
+// [STRAIN-OIDC-IDENTITY-V128] The role AND how it was proven, because the two bearer kinds
+// must be treated differently one layer up. An OAuth CONNECTOR token (oauth_tokens hit)
+// resolves to a role, but that role is the account-level default -- the PC-SESSION-IDENTITY
+// design exists precisely because one such bearer serves every chat, so a tools/call on it
+// still MUST present a session key or be denied. A Google-attested SERVICE-ACCOUNT token,
+// by contrast, is a per-agent machine credential Google signed for one reasoning engine, so
+// its mapped strain (strains.sa_email) IS a sufficient identity with nothing pasted. Same
+// bearer header, opposite paste requirement, so the resolver has to say which path answered.
+// `oidc:true` is set ONLY on the Google-attested branch; the connector branch never sets it,
+// so a stale or forged connector token can never masquerade as a machine strain.
+async function oaBearerIdentity(req: any): Promise<{ role: string; oidc: boolean } | null> {
   const h = String((req.headers && req.headers['authorization']) || '');
   const m = h.match(/^Bearer\s+(.+)$/i); if (!m) return null;
   // [SEC-OAUTH-HASH] hash the presented token before the get; the raw token is never an ID.
@@ -9772,9 +9804,10 @@ async function oaBearerRole(req: any): Promise<string | null> {
   // [OA-REVOKE-V1] revoked === true, not !== false: `revoked` is absent on every record
   // written before this shipped, and absent must keep meaning live.
   if (rec && rec.revoked === true) return null;
-  if (rec && rec.exp && rec.exp >= Date.now()) return rec.role || OAUTH_ROLE;
+  if (rec && rec.exp && rec.exp >= Date.now()) return { role: rec.role || OAUTH_ROLE, oidc: false };
   // [STRAIN OIDC] our own token store missed; try the Google-attested service-account path.
-  return await oaStrainFromOidc(m[1], req);
+  const sa = await oaStrainFromOidc(m[1], req);
+  return sa ? { role: sa, oidc: true } : null;
 }
 // [SEC-OAUTH-DEFAULT-ROLE-AUDIT] fleet-security 2026-07-30, after a live outage.
 // OAUTH_DEFAULT_ROLE names the strain that every OAuth connector inherits when consent binds no
@@ -10075,8 +10108,9 @@ function pcExtract(req: any): any {
 }
 
 async function pcResolveIdentity(req: any): Promise<any> {
-  const bearer = await oaBearerRole(req);
-  if (!bearer) return null;                       // unchanged: oaChallenge path
+  const bid: any = await oaBearerIdentity(req);
+  if (!bid) return null;                          // unchanged: oaChallenge path
+  const bearer = bid.role;
   const x: any = pcExtract(req);
   if (!x.call) return { role: bearer };           // carve-out 1: handshake / enumeration
   // ---- [FAIL-CLOSED-ON-BAD-KEY] ----
@@ -10096,6 +10130,17 @@ async function pcResolveIdentity(req: any): Promise<any> {
     if (s && s.role) return { role: s.role, tc: s.tc };
     return { deny: true, reason: 'unknown-or-revoked', id: x.id };
   }
+  // [STRAIN-OIDC-IDENTITY-V128] NO KEY WAS PRESENTED. A Google-attested service-account bearer
+  // needs none: Google signed the token for one reasoning engine, oaStrainFromOidc pinned the
+  // audience and mapped sa_email -> an ACTIVE strain, and that strain is the identity. This is
+  // the machine twin of the human paste -- the paste proves possession of a minted key, the
+  // attested SA token proves possession of a Google-signed identity IAM already vouches for --
+  // and it grants nothing new: the resolved strain is admitted through the SAME
+  // buildMcpServerAdmitted path as any pasted key, tool_classes and all. It fires ONLY on
+  // bid.oidc, so an ordinary OAuth CONNECTOR bearer (bid.oidc false) still falls through to the
+  // paste requirement below exactly as before -- an account-level connector token is shared
+  // across every chat and must never resolve a keyless tools/call to a live toolset.
+  if (bid.oidc) return { role: bearer };
   return PC_ENFORCE ? { deny: true, reason: 'no-identity', id: x.id } : { role: bearer };
 }
 
