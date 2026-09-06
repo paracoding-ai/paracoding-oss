@@ -6,7 +6,7 @@ status: live
 audience: public
 owner: unassigned
 generated_by: starter-edition
-verified_at: "2026-08-10"
+verified_at: "2026-09-05"
 verified_by: starter-edition
 watch:
   - "lake:shared/wiki/_release.txt@71b8aebd9209c5b60ca8ccc1ef4bb906ec2a7a5e39d77743e915866794b5d323"
@@ -16,7 +16,7 @@ watch:
 
 ## The default, and why it is that
 
-Console chat defaults to **`gemini-3.7-flash` over Vertex AI, at location `global`,
+Console chat defaults to **`gemini-3.8-flash` over Vertex AI, at location `global`,
 with no API key required.** Claude is a one-click escalation from the same page.
 
 Vertex means the request is authenticated by the control plane's own Google service
@@ -53,12 +53,32 @@ used. The badge is not allowed to claim a setting the request did not carry. The
 Gemini path does not send an effort field at all, which is why no effort appears on
 a Gemini reply's stamp.
 
+**Thinking level is the Gemini twin of effort.** Gemini 3.x models think before every
+answer and bill the thinking as output tokens, and they cannot be told not to. The
+knob is `CHAT_GEMINI_THINKING`, values `low`, `medium` or `high`; when it is unset --
+the shipped state -- no thinking field is sent and each model uses its own default
+(`medium` on 3.7 and 3.8 Flash, `high` on 3.1 Pro). Set it to `low` when the console
+is doing many-round tool work and speed and cost matter more than depth. `minimal` is
+refused by 3.7 and 3.8 Flash and is therefore refused by the console before any
+request is made; an unrecognised value is logged and ignored, never guessed at.
+
+Two things you do not have to configure. **Implicit caching is on** for every 3.x
+model on Vertex: when a request's prefix (system instruction, then tool declarations)
+repeats -- which it does on every round of a tool loop -- the cached part bills at a
+90% discount, no storage fee, minimum 4,096 tokens. The console keeps that prefix
+byte-stable and reports the hits as `cache_read` in `/api/usage`. **Thought
+signatures are handled**: Gemini 3.x attaches a signature to its function calls and
+refuses the next round if it is not returned; the console returns the model's parts
+verbatim, which is what satisfies that.
+
 The model catalog offered in the UI is built from the environment, and **the order
 is the default** -- there is no separate "default model" field. Gemini lists
-`gemini-3.7-flash` first with `gemini-3.1-pro-preview` as a second button; Claude
+`gemini-3.8-flash` first with `gemini-3.1-pro-preview` as a second button; Claude
 lists `claude-opus-5` first with `claude-sonnet-5` second. On a fresh install with
 nothing configured you get all four, and the two the default paths pick are the
-first of each list.
+first of each list. `CHAT_API_GFLASH` and `CHAT_API_GPRO` override either Gemini
+slot without a rebuild, which is how the Pro button moves the day Google publishes a
+Pro newer than 3.1 on its model list.
 
 ## What you need for the default to work
 
@@ -154,7 +174,7 @@ view for both providers. Behind the gate session, like everything else on the co
 
 Confirm a change landed by making one chat request per provider and then reading that
 endpoint. On a stock install the Gemini entry says `transport: vertex`,
-`region: global` and `model: gemini-3.7-flash`; the Claude entry says
+`region: global` and `model: gemini-3.8-flash`; the Claude entry says
 `transport: vertex` and `model: claude-opus-5`.
 
 ## Cost
@@ -165,6 +185,14 @@ bill -- there is no intermediary metering you.
 
 Chat is per-turn and interactive, and it is the only thing here that can spend. Nothing
 in this product runs queued work on its own, so there is no unattended spend to turn on.
+
+Prices are not built in. `/api/usage` computes cost from the token counts it records
+and a price table you write at Firestore `config/models`, field `prices`, in dollars
+per million tokens: `{ "gemini-3.8-flash": { "in": 0.75, "out": 3.75, "cache_write": 0,
+"cache_read": 0.075 } }`. Until a model has a price there, its cost shows as
+unconfigured rather than as zero. Thinking tokens are counted in `out`. Check Google's
+pricing page when you fill it in: 3.8, 3.7 and 3.6 Flash carry an introductory rate
+through 2026-12-31 that doubles on 2027-01-01.
 
 ## If a change seems to do nothing
 

@@ -69,6 +69,9 @@ export type Mcp2026Tool = {
   name: string;
   description: string;
   inputSchema: any;
+  // [TOOL-ANNOTATIONS-V127] optional MCP ToolAnnotations (readOnlyHint / destructiveHint /
+  // openWorldHint), stamped by the registerTool shadow in index.ts and published on tools/list.
+  annotations?: any;
   call: (args: any) => Promise<any>;
 };
 export type Mcp2026Identity =
@@ -480,7 +483,7 @@ export async function mcp2026Handle(input: Mcp2026Input, deps: Mcp2026Deps): Pro
     // without this sort the order is map-iteration order and every client tool-list
     // cache and LLM prompt cache misses.
     const listed = tools.slice().sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-      .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+      .map((t) => (t.annotations ? { name: t.name, description: t.description, inputSchema: t.inputSchema, annotations: t.annotations } : { name: t.name, description: t.description, inputSchema: t.inputSchema }));
     return {
       status: 200,
       headers: { ...JSON_HEADERS },

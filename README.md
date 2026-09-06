@@ -1,4 +1,4 @@
-# Paracoding — v12.6
+# Paracoding — v12.7
 
 **An MCP connector that gives a chat hands on your own Google Cloud project.**
 
@@ -205,7 +205,7 @@ that has been running for a while — the release ships three strains and you gr
 [![The console chat asking Fleet GCP to build and deploy a hello-world app to Cloud Run, with the build and deployment summary and a 200 OK verification](docs/screenshots/01-build-and-deploy.png)](docs/screenshots/01-build-and-deploy.png)
 
 Everything configurable lives on one panel: theme, the model substrate (Claude or Gemini,
-3.7 Flash or 3.1 Pro), key rotation, the per-strain session pastes that give a chat its
+3.8 Flash or 3.1 Pro), key rotation, the per-strain session pastes that give a chat its
 identity, and the Google accounts allowed to authorise an MCP connector.
 
 [![The settings panel showing appearance, model substrate selection, API key rotation, per-strain session pastes and allowed Google accounts](docs/screenshots/02-strain-settings.png)](docs/screenshots/02-strain-settings.png)

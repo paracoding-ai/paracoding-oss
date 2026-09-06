@@ -856,6 +856,27 @@ const PC_TOOL_CLASS: any = {
   gcp_api: 'infra',
   run_roll: 'infra',
 };
+// [TOOL-ANNOTATIONS-V127] MCP tool annotations, DERIVED FROM THE ONE TABLE ABOVE so they cannot
+// drift from it. MEASURED 2026-09-05 on Gemini Enterprise: with no annotations GE puts a
+// Send/Cancel review card in front of EVERY call, whoami and get_time included, and its own
+// guidance says readOnlyHint:true is what lets a non-destructive tool run without one while
+// destructiveHint:true keeps the card. Cowork and Grok ignore the field; GE reads it. So:
+//   read           -> readOnlyHint true, destructiveHint false
+//   write          -> readOnlyHint false; destructiveHint true ONLY for the names that remove
+//                     or cancel something (delete_*, cancel_work_item) -- append/post/create
+//                     are additive and get false
+//   stage / infra  -> destructiveHint true, openWorldHint true: they reach the executor and
+//                     GCP, and a card in front of them is the right default in every harness
+// A name absent from PC_TOOL_CLASS gets NO annotations (undefined), the same fail-closed
+// posture 'other' already has: nothing here can mark an unclassified tool read-only.
+const PC_TOOL_DESTRUCTIVE_WRITES = ['delete_entities', 'delete_observations', 'delete_relations', 'cancel_work_item'];
+function pcToolAnnotations(name: string): any {
+  const klass = PC_TOOL_CLASS[name];
+  if (klass === 'read') return { readOnlyHint: true, destructiveHint: false };
+  if (klass === 'write') return { readOnlyHint: false, destructiveHint: PC_TOOL_DESTRUCTIVE_WRITES.indexOf(name) >= 0 };
+  if (klass === 'stage' || klass === 'infra') return { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
+  return undefined;
+}
 const pcClassCache: Map<string, any> = new Map();
 const PC_CLASS_TTL_MS = 60000;
 async function pcToolClasses(role: string): Promise<string[]> {
@@ -1607,8 +1628,14 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
   // nothing below reads __pcTools.
   const _pcTools: any[] = [];
   (server as any).__pcTools = _pcTools;
-  (server as any).registerTool = (name: string, spec: any, handler: any) => {
+  (server as any).registerTool = (name: string, spec0: any, handler: any) => {
     const klass = PC_TOOL_CLASS[name] || 'other';
+    // [TOOL-ANNOTATIONS-V127] stamped HERE, the one place every tool of every file passes
+    // through, so the legacy SDK (which emits spec.annotations on tools/list itself) and the
+    // 2026-07-28 branch (which reads t.spec out of __pcTools) publish the same field. A spec
+    // that already carries annotations keeps them.
+    const _pcAnn = pcToolAnnotations(name);
+    const spec: any = (_pcAnn && !(spec0 && spec0.annotations)) ? Object.assign({}, spec0, { annotations: _pcAnn }) : spec0;
     // whoami is the floor: a role that cannot say what it is cannot be debugged, and the
     // denied-server path already treats it that way.
     //
@@ -4774,11 +4801,19 @@ function harModelList(apis: string[], floor: string): any[] {
 // meet the product on, not because Pro was demoted -- Pro is one click away and one env var from
 // being first again. m[0] is still what harApiFor() returns for an unknown id and what
 // harness.html loadModels() preselects; only which entry sits there has changed.
-// gemini-3.7-flash is VERIFIED, not inferred from the announcement: Model Garden
-// (GET publishers/google/models/gemini-3.7-flash) answers 200 launchStage=GA, while
-// -preview / -001 / -latest / gemini-flash-3.7 all answer 404 NOT_FOUND. It is a GA id and carries
-// no '-preview' suffix; harGeminiGlobalOnly()'s /^gemini-3/ still pins it to the global endpoint,
-// which is where the sibling 3.x publisher model is served.
+// [CHAT-GFLASH38-V127] gemini-3.8-flash is VERIFIED THE SAME WAY 3.7 WAS, not inferred from the
+// announcement: Model Garden (GET publishers/google/models/gemini-3.8-flash) answers 200
+// launchStage=GA on 2026-09-05 (released 2026-09-02), while gemini-3.8-flash-preview and
+// gemini-3.8-flash-lite answer 404 NOT_FOUND. Google's own model list marks it 'New, Stable'.
+// harGeminiGlobalOnly()'s /^gemini-3/ still pins it to the global endpoint. PRICE NOTE, because the
+// operator asked: 3.8 Flash carries an introductory $0.75/$3.75 per 1M through 2026-12-31 and
+// doubles to $1.50/$7.50 on 2027-01-01 (thinking tokens bill as output). Same for 3.7 and 3.6.
+// THE PRO SLOT DID NOT MOVE, AND THIS IS WHY. Model Garden ALSO answers 200 launchStage=GA for
+// gemini-3.5-pro on the same day -- and Google's published model list, pricing page and model
+// cards carry no Pro newer than gemini-3.1-pro-preview. A 200 from one endpoint that the rest of
+// the vendor's surface contradicts is a registration, not a launch; the 3.7 rule was 'verified,
+// not inferred' and a lone probe is not verification. The day a newer Pro is on the model list,
+// CHAT_API_GPRO moves it without a rebuild, or the literal below moves in one line.
 // [CHAT-ROUNDS-16-V74] ONE NUMBER FOR BOTH LOOPS. It was written as a bare 8 in two places, so
 // raising it meant finding both -- exactly the two-registries shape this codebase keeps paying
 // for. Named once, used twice, and reported in the cut-off message so a user who hits it is told
@@ -4789,10 +4824,10 @@ const HAR_MODELS_DEFAULT = {
   // [GCP-FLOWHOOD-DEFAULT-V70] FLASH IS FIRST, AND THE ORDER IS THE DEFAULT -- there is no
   // separate "default model" field anywhere. harness.html seeds MODEL.gemini from MODELS.gemini[0]
   // (loadModels), so whichever entry is listed first is what a fresh Flowhood opens on. The
-  // operator asked for Gemini 3.7 by default; swapping these two is the whole of that change, and
+  // operator asked for the current Flash by default (3.7 in 12.x, 3.8 from 12.7); swapping these two is the whole of that change, and
   // reordering here without also changing setProvider() in harness.html leaves the page on Claude.
   // Pro is NOT removed -- it is one click away in the MODEL block, same as it was.
-  gemini: harModelList([process.env.CHAT_API_GFLASH || 'gemini-3.7-flash', process.env.CHAT_API_GPRO || 'gemini-3.1-pro-preview'], 'gemini-3.7-flash'),
+  gemini: harModelList([process.env.CHAT_API_GFLASH || 'gemini-3.8-flash', process.env.CHAT_API_GPRO || 'gemini-3.1-pro-preview'], 'gemini-3.8-flash'),
 };
 function harModels(): any { try { return process.env.CHAT_MODELS ? JSON.parse(process.env.CHAT_MODELS) : HAR_MODELS_DEFAULT; } catch (e) { return HAR_MODELS_DEFAULT; } }
 function harApiFor(provider: string, id: string): string {
@@ -5034,10 +5069,50 @@ const HAR_CHAT_MAX_TOKENS = Number(process.env.CHAT_MAX_TOKENS || 4096);
 // Was 'xhigh'. Only 'high' is special-cased below -- it means "send no output_config at all",
 // because high IS the API default. Every other value, including this one, is sent explicitly.
 const HAR_CHAT_EFFORT = String(process.env.CHAT_EFFORT || 'medium');
+// [CHAT-GEMINI-THINKING-V127] THE GEMINI TWIN OF CHAT_EFFORT, AND WHY IT IS UNSET BY DEFAULT.
+// Gemini 3.x models think before every answer and bill the thinking as OUTPUT tokens ($3.75/1M on
+// 3.8 Flash today, $7.50 from 2027). The knob is generationConfig.thinkingConfig.thinkingLevel,
+// values low | medium | high on 3.7/3.8 Flash ('minimal' is REFUSED by those two with a 400, so it
+// is refused here too, before any spend). It cannot be turned off. Unset means the field is NOT
+// SENT and the model uses its own default, which is what every 12.x install has been doing --
+// this release adds the ability to choose, not a new default: 3.1 Pro's own default is high and
+// this file has never measured 'medium' against it, so forcing a value here would be a sampling
+// change riding in on a version bump. Same shape as CHAT_EFFORT: one env var, both Gemini paths,
+// a config revision to change, no rebuild. The runner-era Firestore field
+// config/models.gemini_thinking_level is DEAD -- nothing reads it since 12.0 deleted the runners.
+const HAR_GEMINI_THINKING_LEVELS = ['low', 'medium', 'high'];
+const HAR_GEMINI_THINKING = (function () {
+  const raw = String(process.env.CHAT_GEMINI_THINKING || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (HAR_GEMINI_THINKING_LEVELS.indexOf(raw) >= 0) return raw;
+  console.error('[chat/gemini] CHAT_GEMINI_THINKING=' + raw + ' is not one of ' + HAR_GEMINI_THINKING_LEVELS.join('|') + '; sending no thinkingConfig (model default)');
+  return '';
+})();
+// ONE generationConfig FOR BOTH GEMINI PATHS. It used to be written twice as a literal, so a field
+// added to one path would be missing from the other -- the two-registries shape again.
+// maxOutputTokens is [CHAT-GEMINI-MAXTOK-V1]; thinkingConfig is sent only when configured.
+function harGeminiGenConfig(): any {
+  const g: any = { maxOutputTokens: HAR_CHAT_MAX_TOKENS };
+  if (HAR_GEMINI_THINKING) g.thinkingConfig = { thinkingLevel: HAR_GEMINI_THINKING };
+  return g;
+}
+// [CHAT-GEMINI-USAGE-THOUGHTS-V127] usageMetadata.thoughtsTokenCount IS BILLED AS OUTPUT and was
+// not being added, so /api/usage under-reported every Gemini 3.x turn by exactly its thinking.
+// Both paths sum through here. cachedContentTokenCount is the IMPLICIT cache hit count: Vertex
+// caches the request prefix by default for 3.x (min 4,096 tokens, 90% off the cached part), and
+// this console's prefix -- systemInstruction, then the tool declarations in fixed order -- is
+// byte-stable across a chat, so hits are expected on every round after the first. A cache_read of
+// zero across a whole turn is therefore a MEASUREMENT that something in the prefix moved.
+function harGeminiUsageAdd(sum: any, um: any): void {
+  if (!um) return;
+  sum.input_tokens += Number(um.promptTokenCount || 0) || 0;
+  sum.output_tokens += (Number(um.candidatesTokenCount || 0) || 0) + (Number(um.thoughtsTokenCount || 0) || 0);
+  sum.cache_read_input_tokens += Number(um.cachedContentTokenCount || 0) || 0;
+}
 // [CHAT-GEMINI-DEFAULT-V1] WHICH SUBSTRATE A REQUEST THAT NAMES NONE LANDS ON, AND WHY IT IS AN
 // ENV AND NOT A LITERAL. This release ships GEMINI as the floor and Claude as the escalation.
 // THE OPERATIONAL REASON, and it is not a preference: this deployment CANNOT OBTAIN VERTEX QUOTA
-// FOR CLAUDE. HAR_MODELS_DEFAULT above already puts gemini-3.7-flash first, harChatGemini and
+// FOR CLAUDE. HAR_MODELS_DEFAULT above already puts the current Gemini Flash first, harChatGemini and
 // harGeminiPost already default to the Vertex transport (see [CHAT-VERTEX-DEFAULT-V2]), and
 // harVertexGeminiRegion pins the 3.x publisher models to the global endpoint -- so a fresh
 // install with no key of any kind, landing here, chats. Landing on Claude instead, it depends on
@@ -5842,7 +5917,7 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
   // NOTHING ELSE GOES IN generationConfig. No temperature, no topP, no candidateCount -- this
   // block exists to make ONE setting mean the same thing on both substrates, and every other
   // field would be a sampling change riding in on a consistency fix.
-  const payload = { systemInstruction: { parts: [{ text: system }] }, contents, generationConfig: { maxOutputTokens: HAR_CHAT_MAX_TOKENS } };
+  const payload = { systemInstruction: { parts: [{ text: system }] }, contents, generationConfig: harGeminiGenConfig() };
   let url = 'https://generativelanguage.googleapis.com/v1beta/models/' + apiModel + ':generateContent?key=' + encodeURIComponent(key);
   let headers: any = { 'Content-Type': 'application/json' };
   let hostDesc = 'host=generativelanguage.googleapis.com transport=studio';
@@ -5885,16 +5960,15 @@ async function harChatGemini(apiModel: string, key: string, system: string, msgs
       harChatRemedy(harChatResolved('gemini', key), r.status)));
   }
   const c = j.candidates && j.candidates[0];
-  const text = (c && c.content && c.content.parts && c.content.parts[0] && c.content.parts[0].text) || '(no text)';
+  // [CHAT-GEMINI-ALLTEXT-V127] was parts[0].text: a 3.x answer can arrive as several text parts,
+  // and the first one is not the answer. Every text part, in order, exactly as the tool path does.
+  const tparts: any[] = (c && c.content && Array.isArray(c.content.parts)) ? c.content.parts : [];
+  const text = tparts.filter((p: any) => p && typeof p.text === 'string').map((p: any) => p.text).join('').trim() || '(no text)';
   // Gemini REST (BOTH generativelanguage v1beta and the Vertex v1 path above) returns camelCase
   // `usageMetadata`. Map it onto the SAME four canonical field names the token_usage journal rows use.
   const um: any = (j && j.usageMetadata) || null;
-  const usage = um ? {
-    input_tokens: Number(um.promptTokenCount || 0) || 0,
-    output_tokens: Number(um.candidatesTokenCount || 0) || 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: Number(um.cachedContentTokenCount || 0) || 0,
-  } : null;
+  let usage: any = null;
+  if (um) { usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }; harGeminiUsageAdd(usage, um); }
   return { text: text, usage: usage };
 }
 
@@ -7270,7 +7344,7 @@ async function harChatGeminiOps(apiModel: string, key: string, system: string, m
     // the loop, not the sum across HAR_CHAT_MAX_ROUNDS rounds. A round cut short here still
     // reports itself -- see harChatNoTextReport, which is what the operator reads when a turn
     // ends without text.
-    const payload: any = { systemInstruction: { parts: [{ text: system }] }, contents: contents, generationConfig: { maxOutputTokens: HAR_CHAT_MAX_TOKENS } };
+    const payload: any = { systemInstruction: { parts: [{ text: system }] }, contents: contents, generationConfig: harGeminiGenConfig() };
     if (tools.length) payload.tools = tools;
     const { r, j, hostDesc } = await harGeminiPost(apiModel, key, payload);
     if (!r.ok) {
@@ -7281,12 +7355,7 @@ async function harChatGeminiOps(apiModel: string, key: string, system: string, m
         + ' HTTP ' + r.status + ': ' + um0 + harChatRemedy(harChatResolved('gemini', key), r.status)));
     }
     const um: any = (j && j.usageMetadata) || null;
-    if (um) {
-      measured = true;
-      sum.input_tokens += Number(um.promptTokenCount || 0) || 0;
-      sum.output_tokens += Number(um.candidatesTokenCount || 0) || 0;
-      sum.cache_read_input_tokens += Number(um.cachedContentTokenCount || 0) || 0;
-    }
+    if (um) { measured = true; harGeminiUsageAdd(sum, um); }
     const c: any = (j && j.candidates && j.candidates[0]) || null;
     if (c && c.finishReason) stopReason = String(c.finishReason);
     const parts: any[] = (c && c.content && Array.isArray(c.content.parts)) ? c.content.parts : [];
@@ -7294,6 +7363,14 @@ async function harChatGeminiOps(apiModel: string, key: string, system: string, m
     if (txt) finalText = txt;
     const calls = parts.filter((p: any) => p && p.functionCall && p.functionCall.name);
     if (!calls.length) break;
+    // [CHAT-GEMINI-THOUGHTSIG-V127] THE MODEL'S PARTS GO BACK VERBATIM, AND THAT IS A REQUIREMENT,
+    // NOT A CONVENIENCE. Gemini 3.x attaches a `thoughtSignature` to the first functionCall part of
+    // a round (parallel calls: the first only) and REFUSES the next request of the same turn with a
+    // 400 if that part comes back without it. This line has always pushed `parts` whole, so the
+    // signature has always ridden along -- stated here so nobody 'tidies' it into
+    // {functionCall} and strands every Gemini tool loop at round two. The transcript the CLIENT
+    // holds is text-only and does not carry signatures for earlier turns; that is permitted (the
+    // API enforces only the current turn), which is why the history rebuild at the top is fine.
     contents.push({ role: 'model', parts: parts });
     const answers: any[] = [];
     for (const p of calls) {
@@ -7301,7 +7378,11 @@ async function harChatGeminiOps(apiModel: string, key: string, system: string, m
       let out = '';
       try { out = await exec(nm, p.functionCall.args || {}); }
       catch (e: any) { out = 'tool error: ' + String((e && e.message) || e); }
-      answers.push({ functionResponse: { name: nm, response: { result: String(out).slice(0, 12000) } } });
+      // functionCall.id is present on some Gemini surfaces (parallel calls); echoed when it exists
+      // so the response binds to its call, absent otherwise -- the REST shape that has always worked.
+      const fr: any = { name: nm, response: { result: String(out).slice(0, 12000) } };
+      if (p.functionCall.id) fr.id = String(p.functionCall.id);
+      answers.push({ functionResponse: fr });
       trace.push(nm + ' -> ' + String(out).replace(/\s+/g, ' ').trim().slice(0, 500));
     }
     contents.push({ role: 'user', parts: answers });
@@ -10123,6 +10204,7 @@ async function mcpServeModern(req: any, res: any): Promise<void> {
         name: t.name,
         description: String((t.spec && t.spec.description) || ''),
         inputSchema: mcp2026SchemaOf(t.name, t.spec && t.spec.inputSchema),
+        annotations: (t.spec && t.spec.annotations) || undefined,
         // who() is closed over the ALREADY-RESOLVED role inside buildMcpServer. Calling the
         // recorded handler preserves that exactly: the modern branch cannot name a principal.
         call: async (args: any) => await t.handler(args)
