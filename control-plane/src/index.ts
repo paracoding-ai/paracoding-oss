@@ -215,7 +215,15 @@ async function fleetMode(): Promise<string> {
     // recognise, and an unrecognised value is REFUSED rather than repaired: repairing it
     // means guessing an intent, and the thing being guessed at is what gets billed.
     mode = (typeof raw === 'string' && FLEET_MODES.indexOf(raw) >= 0) ? raw : FLEET_MODE_FALLBACK;
-  } catch (e) {
+  } catch (e: any) {
+    // [SEC-LOUD-FALLBACK-V140] SAY WHY. Falling back to FLEET_MODE_FALLBACK on a Firestore
+    // failure is the CORRECT behaviour and is not changed here -- fail-closed is the whole
+    // point, and 'home' refuses every paid transport. What was wrong was doing it in SILENCE.
+    // A PERMISSION_DENIED on config/models and a genuine 'no such document' produced the
+    // identical observable: the fleet quietly stops spending and nobody can tell whether that
+    // was policy or an outage. This returns the same value and prints the reason.
+    console.error('[fleetMode] READ FAILED, falling back to ' + FLEET_MODE_FALLBACK
+      + ' -- this is fail-closed, NOT a configured mode. reason=' + String((e && e.message) || e));
     return FLEET_MODE_FALLBACK;
   }
   fleetModeCache.mode = mode; fleetModeCache.at = now;
@@ -459,6 +467,7 @@ const PC_SURFACE_MAP: { [k: string]: string } = {
   'GET /flowhood': 'console',
   'GET /git/archive': 'mcp',
   'POST /git/blob': 'mcp',
+  'POST /git/release-tree': 'mcp',
   'GET /wiki': 'console',
   'GET /wiki/:slug': 'console',
   'GET /wiki/assets/:name': 'console',
@@ -791,6 +800,14 @@ const PC_TOOL_CLASS: any = {
   // this exact class, so classifying it any other way would let one path serve what the other
   // withholds. An unclassified tool falls to 'other' and would be withheld from every role.
   git_archive: 'read',
+  // [CLAUDE-PLANNER-V135] 'read', AND THE CLASS IS LOAD-BEARING RATHER THAN COSMETIC.
+  // pcToolAnnotations() below turns 'read' into readOnlyHint:true, and MEASURED 2026-09-07 on
+  // Gemini Enterprise a readOnly tool runs with no Send/Cancel card while a 'write' or 'stage'
+  // tool STOPS THE TURN until a human clicks. A planner the executor must ask permission to
+  // consult is a planner nobody consults. 'read' is also the honest class: both tools take text
+  // and return text, and neither touches the lake, the repository, the queue or the executor.
+  claude_planner: 'read',
+  claude_review: 'read',
   git_propose: 'write',
   git_propose_patch: 'write',
   git_push: 'write',
@@ -870,11 +887,145 @@ const PC_TOOL_CLASS: any = {
 // A name absent from PC_TOOL_CLASS gets NO annotations (undefined), the same fail-closed
 // posture 'other' already has: nothing here can mark an unclassified tool read-only.
 const PC_TOOL_DESTRUCTIVE_WRITES = ['delete_entities', 'delete_observations', 'delete_relations', 'cancel_work_item'];
+// [GE-NOCARD-WRITES-V139] THE FOUR NAMES BELOW PUBLISH readOnlyHint:true AND THEY DO WRITE.
+// THAT IS A DELIBERATE, OPERATOR-AUTHORISED INACCURACY, RECORDED HERE BECAUSE IT WILL OTHERWISE
+// READ AS A BUG AND BE 'FIXED' BY THE NEXT PERSON THROUGH.
+// MEASURED 2026-09-07 on Gemini Enterprise: readOnlyHint:true is THE ONLY thing that suppresses
+// the blocking Send/Cancel card. destructiveHint:false is NOT enough -- post_work_item already
+// set it and still stopped the turn. GE offers no per-action confirmation setting either: the
+// connector's Actions page has Enable/Disable and nothing else, and a row click only selects.
+// So the real choice was a harness that can record NOTHING unattended, or an annotation that
+// overstates on the writes that cannot hurt you. The operator chose the latter, 2026-09-07.
+// THE MEMBERSHIP RULE, so this list cannot rot into 'whatever was annoying that week': a name
+// belongs here ONLY IF an existing tool can undo it AND it touches nothing outside Firestore.
+// post_work_item -> cancel_work_item. complete_work_item -> reopenable bookkeeping.
+// append_journal and add_observations are append-only rows. NOTHING that reaches the lake
+// (write_file, put_file -- THERE IS NO DELETE), the repository (git_propose*, git_push), the
+// executor (stage_privileged_job, run_command) or GCP (gcp_api, run_roll) may EVER be added,
+// and no delete_* may be added. Those keep the card: it is the last human gate on this surface,
+// and it earned that keep on 2026-09-07 by stopping a work item whose entire body was the same
+// three integers twice.
+// THIS DOES NOT TOUCH PC_TOOL_CLASS. These tools stay class 'write' there, so pcToolClasses()
+// role grants and session-key narrowing are UNCHANGED -- a principal that may not write still
+// cannot call them, and the tool does not even register. Only the ADVERTISED HINT moves.
+// THAT MEMBERSHIP RULE GOVERNS THE LIST ON THE NEXT LINE AND NOTHING ELSE. It still forbids
+// adding an executor, GCP, lake or repository tool to PC_TOOL_NOCARD_WRITES, and nothing below
+// adds one. [GE-NOCARD-EXEC-V145] is a SEPARATE, OFF-BY-DEFAULT operator switch with its own
+// record, so this rule can go on being read exactly as it is written.
+const PC_TOOL_NOCARD_WRITES = ['post_work_item', 'complete_work_item', 'append_journal', 'add_observations'];
+// [GE-NOCARD-EXEC-V145] WHEN PC_NOCARD_EXEC=1, THE EXECUTOR AND GCP TOOLS ADVERTISE
+// readOnlyHint:true. THEY ARE NOT READ-ONLY. That is a deliberate untruth in the
+// advertisement, authorised by the operator on 2026-09-07, and it is written down here in full
+// because the next person through will otherwise read it as a bug and quietly "fix" it.
+//
+// WHICH TOOLS: every name classed 'stage' or 'infra' -- stage_privileged_job, run_command,
+// gcp_api, run_roll. They reach a shell on the executor and the GCP REST surface.
+//
+// WHY: MEASURED on Gemini Enterprise 2026-09-05 and again 2026-09-07 -- readOnlyHint:true is
+// the ONLY thing that suppresses the blocking Send/Cancel card, destructiveHint:false is not
+// enough, and GE offers no per-action confirmation setting anywhere (the connector's Actions
+// page has Enable/Disable and nothing else). So a harness that is otherwise the fastest of the
+// three the operator drives stopped dead in front of every call, and the overwhelming majority
+// of those calls are `gcloud logging read` and GET-shaped gcp_api reads. The operator was
+// hand-approving investigation, one card at a time, and the throughput cost is the whole
+// reason this switch exists.
+//
+// WHAT IT COSTS, STATED WITHOUT SOFTENING. install.sh ships PC_GUARDRAILS=0 and fleet prod runs
+// it: the control plane's destructive-command refusal (pcAutoRun) and the executor's
+// lockout-class refusal (exec_server.py) are BOTH advisory -- they classify, they journal, and
+// the body runs. PC_AUTO_APPROVE=1 means a staged job is signed and executed in the same call.
+// So on that posture the GE card was not a duplicate of a server-side control. It WAS the
+// control: the only thing standing between a destructive command and execution. Setting
+// PC_NOCARD_EXEC=1 removes it, and then there is NO gate on destructive executor work -- not a
+// rule, not a click. The operator was told exactly this and chose it on 2026-09-07, for speed,
+// with eyes open. Do not describe this deployment as gated; it is journalled, which is a
+// different and weaker thing.
+//
+// THE PAIRING THAT KEEPS A GATE, named here so it is findable rather than rediscovered:
+// PC_GUARDRAILS=1 restores both server-side refusals, and a destructive body then comes back
+// as TEXT for a yes/no in chat ("NEEDS YOUR OK -- NOT RUN, NOT QUEUED") instead of a card in
+// front of every call. That buys the same quiet on the safe majority and still stops the
+// dangerous minority with a rule rather than a tired human at 1am. It is one env var away.
+//
+// DEFAULTS TO 0, and must: an adopter running install.sh inherits the card, because a fresh
+// install should not silently ship a surface whose only brake has been removed. Read at module
+// load, so it takes effect on the next revision (an env update makes one); Gemini Enterprise
+// may also need "Reload custom actions" on the connector before it re-reads the annotations.
+// Undo: gcloud run services update <svc> --update-env-vars=PC_NOCARD_EXEC=0
+//
+// PC_TOOL_CLASS IS UNTOUCHED. These tools stay 'stage'/'infra' there, so pcToolClasses() role
+// grants and session-key narrowing are exactly as before: a principal that may not reach the
+// executor still cannot, and the tool does not even register for it. Only the ADVERTISED HINT
+// moves -- this switch changes what a harness is told, never what a caller is allowed.
+const PC_NOCARD_EXEC = String(process.env.PC_NOCARD_EXEC || '0') === '1';
+// [GE-NOCARD-ALL-V147] PC_NOCARD_ALL=1 MAKES EVERY CLASSIFIED TOOL ADVERTISE readOnlyHint:true,
+// INCLUDING write_file AND put_file, WHICH WRITE TO A STORE THAT HAS NO DELETE.
+//
+// THE OPERATOR'S RULING, 2026-09-07, IN HIS WORDS: "I want all cards gone ... to accelerate
+// secure agent engineering not slow it down like the cards do, we build gates not speed bumps."
+// That sentence is the design, not a preference, and it is right about the mechanism: a card
+// INTERRUPTS, it does not REFUSE. It is answered by a human who has already decided to do the
+// thing, at the end of a turn, dozens of times an hour. MEASURED on this install 2026-09-07: a
+// single Gemini Enterprise turn made 189 tool calls. A control that must be clicked 189 times is
+// not a control, it is a tax on the correct path -- and it is weakest exactly when attention is
+// lowest, which is precisely when it would have had to catch something.
+//
+// SO THE CARDS ARE GONE, AND THIS COMMENT EXISTS TO SAY WHAT IS AND IS NOT LEFT.
+//
+// STILL GATES, UNAFFECTED BY THIS SWITCH, AND THEY REFUSE RATHER THAN ASK:
+//   * strains.tool_classes with PC_TOOLS_ENFORCE=1. A principal that may not write CANNOT CALL
+//     THE TOOL -- it is not registered for that session at all, so there is nothing to click
+//     through. This is the strongest control on this surface and it is enforced server-side.
+//   * The KMS-signed command pin. The executor refuses any script whose sha256 does not match
+//     the hash that was signed, so a staged body cannot change between approval and execution.
+//   * IAM. fleet-gate-exec-sa cannot read or redeploy fleet-gate-exec, so NO staged job can take
+//     out the executor whatever its body says (deploy/LOCKOUT-CLASS.md, "THE SECOND ARM").
+//   * git compare-and-swap plus history. git_push moves a branch only from the oid the caller
+//     proved it held, there is no force push, and the previous oid is always recoverable.
+//
+// NOT A GATE ANY MORE, AND NOTHING REPLACED IT. SAY THIS PLAINLY OR THE RECORD IS WORTHLESS:
+//   * THE LAKE. write_file and put_file have NO delete, NO history and NO compare-and-swap on a
+//     blind write. A wrong path is permanent, for everyone, forever. The card was the only thing
+//     standing in front of that and it is now off. THE REAL CONTROL FOR THE LAKE IS tool_classes:
+//     a strain granted 'read' cannot reach write_file at all. That is a gate. Use it. It is also
+//     still unset on the connector-bound chat strain -- the SEC-REVIEW-4 work item is open
+//     against exactly this. A NOTE FOR WHOEVER ADDS THE NEXT REFERENCE HERE: cite work by NAME,
+//     never by its queue id. This file is emitted verbatim into the public release tree and
+//     gen.py's leak ratchet counts a raw id as contamination -- it refused this very commit once.
+//   * DESTRUCTIVE EXECUTOR BODIES while PC_GUARDRAILS=0, which is the shipped default and what
+//     this install runs: the control plane and the executor both classify the body, journal it,
+//     and run it anyway. PC_GUARDRAILS=1 turns both into refusals that come back as TEXT for a
+//     yes/no in chat -- a gate rather than a speed bump, and the right pairing with this switch.
+//
+// DEFAULTS TO 0. An adopter running install.sh inherits every card. A fresh install must not
+// silently ship a surface whose last client-side check was removed by someone else's ruling.
+// Read at module load, so it takes effect on the next revision; Gemini Enterprise also needs
+// "Reload custom actions" on the connector before it re-reads annotations.
+// Undo: gcloud run services update <svc> --update-env-vars=PC_NOCARD_ALL=0
+//
+// PC_TOOL_CLASS IS UNTOUCHED, and that is what keeps the paragraph above true: this switch moves
+// only what a harness is TOLD, never what a caller is ALLOWED. pcToolClasses() decides who may
+// call what, and it never reads this flag.
+const PC_NOCARD_ALL = String(process.env.PC_NOCARD_ALL || '0') === '1';
 function pcToolAnnotations(name: string): any {
   const klass = PC_TOOL_CLASS[name];
+  // [GE-NOCARD-ALL-V147] FAIL-CLOSED FIRST, AND THE ORDER HERE IS LOAD-BEARING. An unclassified
+  // name used to get `undefined` by falling all the way through every branch below. It now
+  // returns EARLY and explicitly, so that the blanket return on the next line can never mark a
+  // tool NOBODY CLASSIFIED as read-only. This line must stay ABOVE the flag. Moving it below is
+  // how an unclassified tool -- the same 'other' class PC_TOOLS_ENFORCE withholds from every
+  // role -- would start advertising itself as safe.
+  if (!klass) return undefined;
+  if (PC_NOCARD_ALL) return { readOnlyHint: true, destructiveHint: false };
   if (klass === 'read') return { readOnlyHint: true, destructiveHint: false };
-  if (klass === 'write') return { readOnlyHint: false, destructiveHint: PC_TOOL_DESTRUCTIVE_WRITES.indexOf(name) >= 0 };
-  if (klass === 'stage' || klass === 'infra') return { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
+  if (klass === 'write') {
+    if (PC_TOOL_NOCARD_WRITES.indexOf(name) >= 0) return { readOnlyHint: true, destructiveHint: false };
+    return { readOnlyHint: false, destructiveHint: PC_TOOL_DESTRUCTIVE_WRITES.indexOf(name) >= 0 };
+  }
+  if (klass === 'stage' || klass === 'infra') {
+    if (PC_NOCARD_EXEC) return { readOnlyHint: true, destructiveHint: false };
+    return { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
+  }
   return undefined;
 }
 const pcClassCache: Map<string, any> = new Map();
@@ -2434,11 +2585,27 @@ const ctxBuild = async () => {
     });
 
   server.registerTool('post_work_item',
-    { description: 'Create a work item for a role.',
-      inputSchema: { title: z.string(), assigned_role: z.string(), payload: z.record(z.string(), z.any()).optional(), ...AG } },
+    { description: 'Create a work item for a role. `summary` IS the work item: one paragraph a human can act on without opening anything else. Every fact you assert goes in `evidence`, one entry per finding, each citing the tool result it came from -- a path, a line number, the quoted line, the verdict and why. Do NOT put findings in `payload`: it is an unshaped bag kept only for older callers.',
+      inputSchema: { title: z.string(), assigned_role: z.string(),
+        summary: z.string().optional(),
+        evidence: z.array(z.object({ path: z.string().optional(), line: z.number().optional(), quote: z.string().optional(), verdict: z.string().optional(), reason: z.string().optional() })).optional(),
+        payload: z.record(z.string(), z.any()).optional(), ...AG } },
     async (a: any) => {
+      // [WORKITEM-SHAPE-V139] payload WAS z.record(z.string(), z.any()) AND NOTHING ELSE, WHICH IS
+      // AN UNSHAPED BAG: no field required, no field even named, so every caller invented its own
+      // keys and no reader could rely on any of them. MEASURED 2026-09-07 -- the Gemini executor,
+      // asked in plain words for 'every hit with its line number, matched line and verdict', filled
+      // the only shape it was given (an object) with {Hits:[1983,6130,7527], Verdicts:[1983,6130,
+      // 7527]}: the same three integers twice, no paths, no quoted lines, no verdicts at all. It
+      // was not being careless. It was satisfying this schema exactly as written. A model fills
+      // the shape you give it, so THE SHAPE IS THE INSTRUCTION, and the prose in the description
+      // is the only part of it a model actually reads.
+      // BOTH NEW FIELDS ARE OPTIONAL ON PURPOSE: every existing caller keeps working and nothing
+      // already queued breaks. They are stored as FIRST-CLASS fields rather than folded into
+      // payload so a reader can rely on them being empty, instead of hunting for the same content
+      // under whatever key the last writer invented.
       const ref = db.collection('work_items').doc();
-      await ref.set({ id: ref.id, title: a.title, assigned_role: a.assigned_role, status: 'pending', payload: a.payload || {}, created_by: who(a), created_at: FieldValue.serverTimestamp() });
+      await ref.set({ id: ref.id, title: a.title, assigned_role: a.assigned_role, status: 'pending', summary: String(a.summary || ''), evidence: Array.isArray(a.evidence) ? a.evidence : [], payload: a.payload || {}, created_by: who(a), created_at: FieldValue.serverTimestamp() });
       return { content: [{ type: 'text', text: `created work item ${ref.id}` }] };
     });
 
@@ -2840,6 +3007,29 @@ const ctxBuild = async () => {
     { description: "Ask another fleet role a question with no human relay. Writes to the shared inbox; the target's next session answers. Returns a message id to check_answer.",
       inputSchema: { to: z.string(), question: z.string(), context: z.string().optional(), urgency: z.string().optional(), ...AG } },
     async (a: any) => {
+      // [CLAUDE-PLANNER-ASKAGENT-V136] REACHABLE THROUGH A TOOL THE HARNESS ALREADY KNOWS.
+      // MEASURED 2026-09-07, and it is the constraint that shapes this whole surface: Gemini
+      // Enterprise materialises an MCP server's tools as APP-LEVEL skills at connector-sync time
+      // -- they arrive named 1p-skill-custom-mcp-<id>-<tool> -- so claude_planner and
+      // claude_review, though registered, bundled and verified live on the wire, are INVISIBLE to
+      // every GE chat until that connector is re-synced. Re-authenticating does not do it, and the
+      // auth panel cannot be submitted at all because GE registered its client dynamically and
+      // leaves the Client ID field empty. A NEW TOOL NAME needs a re-sync; A NEW PARAMETER VALUE
+      // DOES NOT. ask_agent is already synced and its `to` is a free string, so the planner rides
+      // in on it and works in an unmodified GE chat today.
+      // THE DEDICATED TOOLS ARE NOT REMOVED: clients that CAN see new tools (Cowork, Grok) should
+      // call claude_planner directly, and this branch is the compatibility door for GE.
+      const _pcTo = String(a.to || '').trim().toLowerCase().replace(/-/g, '_');
+      if (_pcTo === 'claude_planner' || _pcTo === 'planner') {
+        const _q = 'REQUEST:\n' + String(a.question || '')
+          + (a.context ? ('\n\nCONTEXT THE EXECUTOR HAS ALREADY GATHERED:\n' + String(a.context)) : '');
+        return { content: [{ type: 'text', text: await pcClaudeAsk(PC_PLANNER_SYSTEM, _q, 'claude_planner') }] };
+      }
+      if (_pcTo === 'claude_review' || _pcTo === 'reviewer' || _pcTo === 'review') {
+        const _q = 'PLAN:\n' + String(a.question || '')
+          + '\n\nWHAT WAS ACTUALLY DONE AND WHAT THE TOOLS RETURNED:\n' + String(a.context || '');
+        return { content: [{ type: 'text', text: await pcClaudeAsk(PC_REVIEW_SYSTEM, _q, 'claude_review') }] };
+      }
       const ref = db.collection('agent_messages').doc();
       await ref.set({ id: ref.id, from: who(a), to: a.to, question: a.question, context: a.context || '', urgency: a.urgency || 'normal', status: 'open', answer: '', created_at: FieldValue.serverTimestamp() });
       return { content: [{ type: 'text', text: `asked ${a.to} (msg ${ref.id})` }] };
@@ -2879,6 +3069,136 @@ const ctxBuild = async () => {
     async () => {
       const now = new Date();
       return { content: [{ type: 'text', text: now.toISOString() + " / " + now.toLocaleString("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) }] };
+    });
+
+  // ============== [CLAUDE-PLANNER-V135] THE PLANNER AND THE REVIEWER, AS TOOLS ==============
+  // WHY THESE EXIST. MEASURED 2026-09-07 driving the Gemini Enterprise flat-rate chat: the
+  // executor is good at running a plan and bad at writing one. Told to anchor a patch with
+  // git_grep it anchored correctly and SAID 9712 -- then wrote a hunk header of @@ -9709,7 and
+  // git_propose_patch refused with "1 hunk(s) did not apply". Twice. It is not weak at finding
+  // the anchor; it cannot reliably do the arithmetic FROM the anchor, and it is equally
+  // confident either way. Until now the planning was done by a human-driven Claude outside the
+  // loop and pasted in, which proves the human can plan and says nothing about whether this
+  // fleet can. These tools put Claude inside the loop, reachable by whatever chat holds the
+  // connector.
+  //
+  // SPEND. READ THIS BEFORE CHANGING ANYTHING BELOW.
+  // [SEC-FLEETMODE-CONSOLE-V1] took the fleet_mode check OFF harClaudePost() on one specific
+  // recorded argument: every caller was reached from POST /api/chat, so every call happened
+  // because a signed-in human pressed send, and there was no unattended caller left to stop.
+  // THESE TOOLS BREAK THAT PREMISE -- an MCP tool is reachable by any client holding a bound
+  // connector, attended or not. That same comment predicted this exact failure: "a check
+  // written per caller is a list, and a list drifts -- the next caller somebody adds is covered
+  // by nobody." So this caller covers ITSELF, here, and it does so by calling
+  // fleetTransportAllowed() -- THE policy function -- rather than restating the truth table.
+  // A second copy of that table is what [FLEET-NO-SCHEDULED-RUNNERS-V125] deleted, and it is
+  // not being reintroduced. Under fleet_mode=home NO CALL IS MADE and the refusal says so.
+  //
+  // SCOPE, so the safety claim stays checkable: this hoists nothing and reaches nothing new.
+  // harKey, harChatResolved, harApiFor, harChatClaude, fleetMode, fleetTransportAllowed and
+  // fleetRefusalText are all `function`/`async function` declarations at module scope, and
+  // buildMcpServer runs only from a REQUEST handler, never during module evaluation -- the same
+  // argument [STRAIN-TDZ-V1] already makes for OAUTH_ROLE being read in this builder.
+  //
+  // COST IS REPORTED IN THE ANSWER, ON PURPOSE. Every result carries the model, the effort, the
+  // transport and the four token counts, so "is the reviewer worth what it costs" is settled
+  // from measured numbers rather than anybody's estimate. If it is not worth it, delete
+  // claude_review and its PC_TOOL_CLASS entry: the planner does not depend on it.
+  const PC_PLANNER_SYSTEM = [
+    'You are the planner for a Gemini agent that holds the Paracoding fleet control-plane tools.',
+    'You receive a person\'s request. Turn it into a plan that agent can execute LITERALLY.',
+    'Output a NUMBERED PLAN and nothing else. No preamble, no questions back.',
+    'Each step names EXACTLY ONE fleet tool and its arguments. Never invent a tool.',
+    'NEVER include an `agent` argument: identity is resolved server-side from the connector.',
+    'ISSUE ONE TOOL CALL AT A TIME. Never two in one step.',
+    'LINE NUMBERS: pin every line number with git_grep, which returns authoritative 1-based',
+    'numbers per match. NEVER derive a line number by counting the lines of a git_read result,',
+    'and NEVER hand-assemble a unified-diff @@ header -- that arithmetic is where this fails.',
+    'If a patch is needed, say so and ask for the finished diff to be placed in the lake, then',
+    'plan read_file + git_propose_patch passing those bytes UNCHANGED. Prefer git_propose (whole',
+    'file) when the file is small enough to rewrite safely.',
+    'WRITES STOP THE TURN: write_file, put_file, git_propose*, git_push, post_work_item and',
+    'stage_privileged_job each raise a human review card in this harness. Put every read first,',
+    'batch a privileged sequence into ONE job, and finish with as few writes as possible.',
+    'EVIDENCE: anything the agent will WRITE must cite the tool result it came from -- an id, a',
+    'path, a line number, an oid, an exit code. A verdict such as "fixed" or "verified" needs a',
+    'step that actually looks BEFORE the step that writes it.',
+    'THE STATUS FIELD IS NOT THE RESULT: after stage_privileged_job always read_job_log.',
+    'Anything irreversible or expensive gets its own step beginning "CONFIRM WITH THE USER, then:".',
+    'End with one step: "REPORT: <what to tell the user, citing ids/oids/exit codes verbatim>".',
+    'If the request is impossible with these tools, say so in one line and name what is missing.',
+    'Be terse. A plan is usually 4-9 steps.',
+  ].join('\n');
+  const PC_REVIEW_SYSTEM = [
+    'You review work already done by a Gemini agent holding the Paracoding fleet tools.',
+    'You are given the plan, the tool calls made with their key results, and the text of',
+    'anything written. Judge ONLY against what the tool results actually show.',
+    'IF NOTHING IS WRONG, output EXACTLY this and STOP: VERDICT: OK',
+    'Two words. No praise, no summary, no restatement of what was done.',
+    'Otherwise output VERDICT: FIX followed by a numbered list of the specific corrections, each',
+    'citing the tool result that contradicts the claim. Be terse; every line costs money.',
+    'Treat an unsupported claim as a defect: "measured", "verified" or "fixed" with no tool',
+    'result behind it is exactly what you are here to catch.',
+  ].join('\n');
+  const pcClaudeAsk = async (system: string, user: string, what: string): Promise<string> => {
+    const key = await harKey('claude');
+    const rv: any = harChatResolved('claude', key);
+    // harChatResolved names the Claude transports 'vertex' and 'anthropic'; the spend table
+    // names them 'vertex' and 'key'. Map, do not re-decide.
+    const wire = rv.transport === 'vertex' ? 'vertex' : 'key';
+    const mode = await fleetMode();
+    if (!fleetTransportAllowed(mode, wire)) return fleetRefusalText(mode, what, wire);
+    const apiModel = harApiFor('claude', '');
+    // [CLAUDE-PLANNER-NOTEXT-V137] harChatClaude() IS THE ONE CLAUDE PATH THAT FAILS SILENTLY.
+    // MEASURED on prod 2026-09-07: this planner reached api.anthropic.com and billed real output
+    // (in=749 out=1002 at effort high; in=743 out=587 at medium) and returned an EMPTY body both
+    // times. That path filters content for type==='text', returns '' when there is none, and is
+    // the only Claude path that never calls harChatNoTextReport -- so a refusal, a truncation and
+    // a thinking-only turn all arrive as the same empty string with no stop reason to read.
+    // harChatClaudeOps is what the console's agent chat already uses. With an EMPTY toolset it
+    // posts exactly once (the loop breaks when there are no tool_use blocks) and, when the turn
+    // carries no text, returns harChatNoTextReport(trace, stopReason, ...) which NAMES the stop
+    // reason. Same request shape, same model, same spend -- strictly more information back.
+    const out: any = await harChatClaudeOps(apiModel, key, system, [{ role: 'me', text: user }], [], 'fleet-curator');
+    // [PLANNER-SPEND-VISIBLE-V145] THE PLANNER AND THE REVIEWER WERE THE ONLY MODEL CALLS THIS
+    // SERVICE MAKES THAT RECORDED THEIR SPEND NOWHERE. MEASURED 2026-09-07 on prod: no
+    // token_usage row, no token_usage_gaps row, no journal entry, and no log line -- 14 hours
+    // of prod logs contained not one mention of the planner on a day it demonstrably ran. The
+    // footer this function appends to the answer was the only trace, and a footer lives in a
+    // chat transcript, which no query can reach.
+    // THE CONSEQUENCE WAS NOT THEORETICAL. "Did the agent actually consult the planner?" was
+    // asked twice, answered from the ABSENCE of a log line, and answered WRONG both times --
+    // absence of a record that was never written proves nothing at all. And /api/dash/usage and
+    // /api/usage, the two surfaces that answer "what is this costing", could not see a single
+    // planner call.
+    // harRecordUsage is the EXISTING recorder and the one place that decides measured-vs-gap;
+    // it never throws, so a telemetry failure cannot break a planner answer. `what` is the tool
+    // name, so claude_planner and claude_review separate in by_source rather than merging.
+    await harRecordUsage('fleet-curator', String(out.model || apiModel), what, out.usage);
+    const u: any = out.usage || {};
+    return String(out.text || '').trim() + '\n\n---\n[' + what
+      + ' model=' + String(out.model || apiModel)
+      + ' effort=' + String(out.effort || '')
+      + ' transport=' + wire
+      + ' in=' + Number(u.input_tokens || 0)
+      + ' out=' + Number(u.output_tokens || 0)
+      + ' cache_write=' + Number(u.cache_creation_input_tokens || 0)
+      + ' cache_read=' + Number(u.cache_read_input_tokens || 0) + ']';
+  };
+  server.registerTool('claude_planner',
+    { description: "Ask Claude for a numbered, literally-executable plan before doing multi-step work. Call this FIRST for anything involving more than two tool calls. Changes no fleet state. The answer ends with the token counts it cost.",
+      inputSchema: { request: z.string(), context: z.string().optional(), ...AG } },
+    async (a: any) => {
+      const user = 'REQUEST:\n' + String(a.request || '')
+        + (a.context ? ('\n\nCONTEXT THE EXECUTOR HAS ALREADY GATHERED:\n' + String(a.context)) : '');
+      return { content: [{ type: 'text', text: await pcClaudeAsk(PC_PLANNER_SYSTEM, user, 'claude_planner') }] };
+    });
+  server.registerTool('claude_review',
+    { description: "Ask Claude to check finished work against the tool results that back it. Pass the plan, every tool call and its key result, and the text of anything written. Answers 'VERDICT: OK' when nothing is wrong. Changes no fleet state. The answer ends with the token counts it cost.",
+      inputSchema: { plan: z.string(), evidence: z.string(), ...AG } },
+    async (a: any) => {
+      const user = 'PLAN:\n' + String(a.plan || '') + '\n\nWHAT WAS ACTUALLY DONE AND WHAT THE TOOLS RETURNED:\n' + String(a.evidence || '');
+      return { content: [{ type: 'text', text: await pcClaudeAsk(PC_REVIEW_SYSTEM, user, 'claude_review') }] };
     });
 
   // VERIFY-GREP: F13-JOBLOG-OWNERSHIP-V1
@@ -3284,12 +3604,16 @@ function waSessionOk(req: express.Request): boolean {
 //   'audience'     a valid token, but minted for a DIFFERENT OAuth client
 //   'unverified'   a valid token carrying no verified email address
 //   'transport'    tokeninfo could not be reached, so we do not know and must not guess
-async function waGoogleIdentity(token: string): Promise<{ email: string | null; why: string }> {
+// [GE-USER-IDENTITY-V130] Optional `wantAud`: the OAuth client the token must have been minted
+// for. Defaults to the console's WA_GOOGLE_CLIENT_ID (unchanged for every existing caller);
+// the delegated-user path passes the Gemini Enterprise authorization's client id instead.
+async function waGoogleIdentity(token: string, wantAud?: string): Promise<{ email: string | null; why: string }> {
   // HFC5 fail-closed: an access token is only evidence of identity TO THE CLIENT IT WAS
   // ISSUED TO. /oauth2/v3/userinfo happily resolves a token minted for any other OAuth
   // client, so trusting it alone lets any relying party the approver has signed into mint
   // a token that passes this gate. Verify the AUDIENCE first, then the address.
-  if (!WA_GOOGLE_CLIENT_ID) {
+  const WANT_AUD = String(wantAud || WA_GOOGLE_CLIENT_ID || '');
+  if (!WANT_AUD) {
     console.error('[gate] SECURITY: WA_GOOGLE_CLIENT_ID is unset — cannot bind a Google token to this app, god-mode identity DENIED (fail-closed).');
     return { email: null, why: 'unconfigured' };
   }
@@ -3309,7 +3633,7 @@ async function waGoogleIdentity(token: string): Promise<{ email: string | null; 
     const t: any = await ti.json();
     // aud must be OUR client id. Google returns aud as a string; compare in constant time.
     const aud = String((t && (t.aud || t.audience)) || '');
-    if (!aud || !waEq(aud, WA_GOOGLE_CLIENT_ID)) {
+    if (!aud || !waEq(aud, WANT_AUD)) {
       console.error('[gate] SECURITY: god-mode token audience mismatch (aud=' + aud.slice(0, 24) + '...) — DENIED.');
       return { email: null, why: 'audience' };
     }
@@ -3981,12 +4305,31 @@ async function waRunGodmode(res: express.Response, jobId: string, command: strin
     const _pcWhy = _pcInflight
       ? 'this job is still running from an earlier approval; its record is preserved and was not overwritten'
       : 'this job already ran; its record is preserved and was not overwritten';
-    await _pcRef.update({ refire_refused: FieldValue.arrayUnion({ by: email, at: new Date().toISOString(), stage: _pcStage }) }).catch(() => {});
+    // [SEC-LOUD-FALLBACK-V141] The refusal itself is already journalled on the next line and the
+    // caller already gets a 409, so losing this breadcrumb does not change what happened -- but a
+    // silent loss means the AUDIT TRAIL of who tried to replay a finished job is quietly shorter
+    // than the truth, and that is the one field anybody would later go looking for.
+    await _pcRef.update({ refire_refused: FieldValue.arrayUnion({ by: email, at: new Date().toISOString(), stage: _pcStage }) })
+      .catch((e: any) => console.error('[gate] job ' + jobId + ': refire_refused breadcrumb NOT recorded ('
+        + String((e && e.message) || e) + '). The refusal still stands and is journalled below.'));
     await db.collection('journal').add({ agent_id: 'human_operator', action: 'godmode_refire_refused', message: 'replay approve refused for job ' + jobId + ' by ' + email + ': ' + _pcWhy, timestamp: FieldValue.serverTimestamp() });
     res.status(409).json({ ok: false, jobId, action: 'approve', mode: 'godmode', status: String(_pcPrev.status || ''), inflight: _pcInflight, error: _pcWhy, preserved_exit_code: (typeof _pcPrev.exit_code === 'number') ? _pcPrev.exit_code : null });
     return;
   }
-  await _pcRef.update({ status: 'executing', started_by: email, started_at: FieldValue.serverTimestamp() }).catch(() => {});
+  // [SEC-LOUD-FALLBACK-V141] THIS ONE IS NOT MERELY OBSERVABILITY, AND THAT IS WHY IT IS FIRST.
+  // The re-fire guard fifteen lines above this reads EXACTLY the two fields this line writes:
+  //   const _pcInflight = _pcPrev.status === 'executing' && _pcMs > 0 && (Date.now() - _pcMs) < 20m
+  // So if this update fails and says nothing, the job runs while its record still reads
+  // 'approved', the guard sees no in-flight job, and a SECOND approval of the same job is
+  // admitted and executed concurrently. A swallowed write here does not lose a log line; it
+  // silently disarms a safety check. The failure is still not fatal -- refusing to execute an
+  // already-approved job because a status write failed would jam the escape hatch, which the
+  // comment above this block explicitly forbids -- so the behaviour is unchanged and the
+  // consequence is now stated at the top of the log where the next person will find it.
+  await _pcRef.update({ status: 'executing', started_by: email, started_at: FieldValue.serverTimestamp() })
+    .catch((e: any) => console.error('[gate] job ' + jobId + ': FAILED to mark executing ('
+      + String((e && e.message) || e) + '). THE JOB IS RUNNING ANYWAY and its record does NOT say so,'
+      + ' so the in-flight re-fire guard is blind to it until this job finishes. Do not approve it twice.'));
   let exec: any; let exit: number;
   try { const _r = await waExecuteApproved(jobId, command, gtoken, assertion); exec = _r.exec; exit = _r.exit; }
   catch (e: any) { res.status(502).json((console.error('[gate] error detail withheld from client:', e), { error: 'request failed' })); return; }
@@ -4863,9 +5206,34 @@ function waGate(fn: (req: express.Request, res: express.Response) => Promise<voi
 async function harSecretGet(name: string): Promise<string | null> {
   const tok = await waAccessToken();
   const r = await waFetch('https://secretmanager.googleapis.com/v1/projects/' + HAR_PROJECT + '/secrets/' + name + '/versions/latest:access', { headers: { Authorization: 'Bearer ' + tok } });
-  if (!r || !r.ok) return null;
+  // [SEC-LOUD-FALLBACK-V140] THIS null USED TO BE INDISTINGUISHABLE FROM 'THE SECRET IS NOT
+  // THERE', AND THAT COST A NIGHT. MEASURED 2026-09-07: an operator principal without
+  // Secret Manager permission ran a lookup, got 403 PERMISSION_DENIED, saw a bare null, and
+  // reported to the human that NO KEY WAS STORED. The key was stored and in use at that
+  // moment; the human had to correct it from memory of his own billing. A 403 and a 404 mean
+  // opposite things -- 'you may not look' versus 'there is nothing there' -- and collapsing
+  // both to null throws away the only bit that distinguishes a permissions bug from a
+  // provisioning gap.
+  // THE RETURN TYPE DOES NOT CHANGE. Callers branch on null and stay correct; the status goes
+  // to the log, where the next person looking at an empty result can see which of the two
+  // they are holding. Only the STATUS and the secret NAME are printed -- never the body,
+  // never the token: 'never echo, log, or write the key' is not relaxed by this.
+  if (!r || !r.ok) {
+    const _st = Number((r && r.status) || 0);
+    console.error('[harSecretGet] ' + name + ' -> null, http=' + (_st || 'no-response')
+      + (_st === 403 ? ' PERMISSION_DENIED: this principal may not read the secret. THE SECRET MAY WELL EXIST -- do not report it as missing.'
+        : (_st === 404 ? ' NOT_FOUND: no such secret or no enabled version.'
+          : ' unexpected status; treat as unknown, not as absent.')));
+    return null;
+  }
   const j: any = await r.json();
-  try { return Buffer.from(j.payload.data, 'base64').toString('utf8'); } catch (e) { return null; }
+  try { return Buffer.from(j.payload.data, 'base64').toString('utf8'); } catch (e: any) {
+    // A 200 whose payload will not decode is a MALFORMED SECRET, not an absent one, and it is
+    // the one case here that should never happen quietly.
+    console.error('[harSecretGet] ' + name + ' -> null: HTTP 200 but the payload did not decode.'
+      + ' reason=' + String((e && e.message) || e));
+    return null;
+  }
 }
 // [SEC-SECRETWRITE-ALLOWLIST-V1] A POSITIVE ALLOWLIST OF WHAT THIS FUNCTION MAY WRITE, ENFORCED
 // BEFORE ANY REQUEST LEAVES THE PROCESS. Operator's requirement, and he is right to have raised
@@ -5880,7 +6248,25 @@ async function harChatClaude(apiModel: string, key: string, system: string, msgs
     throw new Error(harRedact('claude ' + rv.transport + ' ' + harClaudeHostDesc(rv) + ' model=' + apiModel +
       ' HTTP ' + r.status + ': ' + JSON.stringify(j).slice(0, 400) + harChatRemedy(rv, r.status)));
   }
-  return { text: (j.content && j.content[0] && j.content[0].text) || '(no text)', usage: (j && j.usage) || null,
+  // [CHAT-CLAUDE-FIRSTBLOCK-V138] THIS LINE READ content[0].text AND NOTHING ELSE, AND ON A
+  // THINKING MODEL content[0] IS NOT THE ANSWER. Claude Opus 5 returns a `thinking` block first
+  // and the reply in a LATER text block; a thinking block carries `.thinking`, not `.text`, so
+  // `j.content[0].text` was undefined and this returned the literal string '(no text)' while the
+  // real answer sat untouched in content[1]. MEASURED on prod 2026-09-07 through the new
+  // claude_planner: in=749 out=1002 at effort high and in=743 out=587 at medium, both billed,
+  // both answered, both reported to the operator as empty. harChatClaudeOps has always filtered
+  // ALL text blocks; this path was the odd one out and it is the path a plain console chat with
+  // no agent selected takes, so that chat has been silently empty on Opus 5.
+  // AND IT NOW SAYS WHY WHEN THERE REALLY IS NO TEXT. '(no text)' was a bare literal here -- the
+  // only Claude or Gemini path in this file that did not call harChatNoTextReport -- so a
+  // refusal, a truncation and a thinking-only turn were indistinguishable and carried no stop
+  // reason. Same report the other three paths give, from the same function, so they cannot drift.
+  const _pcClaudeTxt = (((j && j.content) || []) as any[])
+    .filter((b: any) => b && b.type === 'text')
+    .map((b: any) => String(b.text || ''))
+    .join('')
+    .trim();
+  return { text: _pcClaudeTxt || harChatNoTextReport([], String((j && j.stop_reason) || ''), false, 0), usage: (j && j.usage) || null,
     model: (j && j.model) ? String(j.model) : apiModel,
     effort: (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high' };
 }
@@ -8802,9 +9188,73 @@ app.post('/api/strains/provision', waSafe(async (req: express.Request, res: expr
       res.status(400).json({ error: 'sa_email must be a Google service-account address ending .iam.gserviceaccount.com, or "" to clear the binding' }); return;
     } else { saEmail = s; }
   }
-  await db.collection('strains').doc(role).set({ role, display_name: display || role, status: 'active', created_by: 'operator:' + WA_USER, created_at: FieldValue.serverTimestamp(), ...(stcl === null ? {} : { tool_classes: stcl }), ...(typeof saEmail === 'undefined' ? {} : { sa_email: saEmail }) }, { merge: true });
-  await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_provisioned', message: 'provisioned strain ' + role + ' (' + (display || role) + ') — active on next control-plane deploy' + (stcl === null ? '' : ' — tool_classes RESTRICTED to [' + stcl.join(',') + ']') + (typeof saEmail === 'undefined' ? '' : (saEmail === null ? ' — sa_email CLEARED' : ' — sa_email BOUND to ' + saEmail)), timestamp: FieldValue.serverTimestamp() });
-  res.json({ ok: true, role, status: 'active', tool_classes: stcl, sa_email: (typeof saEmail === 'undefined' ? undefined : saEmail), note: stcl === null ? 'unrestricted: this strain holds every tool class' : 'pcToolClasses caches for up to ' + PC_CLASS_TTL_MS + 'ms, so this takes effect within a minute' });
+  // [CONNECTED-IDENTITY-V1291] A connector binding is a PAIR: the connector's OAuth client_id
+  // AND the Google account that consented (oauth_tokens.email). 12.9 matched client_id alone,
+  // so any account IAP admitted to the authorize page could consent under a bound client and
+  // inherit the strain. Both halves must be set for oaBearerIdentity to honour the binding;
+  // '' clears either half, and clearing either half disables the binding. BIND DELIBERATELY:
+  // every keyless chat of that connector+account resolves to this strain -- including a chat
+  // that has lost its pasted key -- so bind only a strain you mean to be that connector's
+  // default lane, never one of several strains driven from the same account.
+  const rawcid = (req.body || {}).oauth_client_id;
+  let oauthClientId: string | null | undefined = undefined;
+  if (typeof rawcid !== 'undefined') {
+    const sc = String(rawcid || '').trim();
+    oauthClientId = sc === '' ? null : sc;
+  }
+  const rawoem = (req.body || {}).oauth_email;
+  let oauthEmail: string | null | undefined = undefined;
+  if (typeof rawoem !== 'undefined') {
+    const se = String(rawoem || '').trim().toLowerCase();
+    if (se === '') { oauthEmail = null; }
+    else if (se.indexOf('@') < 1 || se.indexOf('.iam.gserviceaccount.com') >= 0) {
+      res.status(400).json({ error: 'oauth_email must be the Google account address that consented to the connector (a person, not a service account), or "" to clear the binding' }); return;
+    } else { oauthEmail = se; }
+  }
+  // [GE-USER-IDENTITY-V130] Three more operator-written fields, for the one-agent-many-users
+  // shape (see pcDelegatedUser):
+  //   delegating: true      this strain is an AGENT strain (sa_email-bound) that carries a
+  //                         Gemini Enterprise user's token on each call and asks to be admitted
+  //                         AS THAT USER'S STRAIN, never as itself. false/absent = the agent is
+  //                         its own identity (12.8 behaviour).
+  //   user_token_aud        the OAuth client id of the Gemini Enterprise authorization; a user
+  //                         token minted for any other client is refused ('' clears).
+  //   user_email            on a USER strain: the Google account (a person) this strain IS.
+  //                         A delegating agent's verified user email must match exactly one
+  //                         active strain's user_email or the call is denied ('' clears).
+  const rawdl = (req.body || {}).delegating;
+  let delegating: boolean | undefined = undefined;
+  if (typeof rawdl !== 'undefined') {
+    if (typeof rawdl !== 'boolean') { res.status(400).json({ error: 'delegating must be true or false' }); return; }
+    delegating = rawdl;
+  }
+  const rawaud = (req.body || {}).user_token_aud;
+  let userTokenAud: string | null | undefined = undefined;
+  if (typeof rawaud !== 'undefined') {
+    const sa2 = String(rawaud || '').trim();
+    userTokenAud = sa2 === '' ? null : sa2;
+  }
+  const rawuem = (req.body || {}).user_email;
+  let userEmail: string | null | undefined = undefined;
+  if (typeof rawuem !== 'undefined') {
+    const ue = String(rawuem || '').trim().toLowerCase();
+    if (ue === '') { userEmail = null; }
+    else if (ue.indexOf('@') < 1 || ue.indexOf('.iam.gserviceaccount.com') >= 0) {
+      res.status(400).json({ error: 'user_email must be the Google account address of a person, or "" to clear it' }); return;
+    } else {
+      // ONE strain per person. A second strain claiming the same address would make the
+      // delegated lookup ambiguous, and ambiguity here is an identity bug, so refuse it.
+      try {
+        const dup = await db.collection('strains').where('user_email', '==', ue).where('status', '==', 'active').limit(2).get();
+        const other = dup.docs.map((d: any) => d.id).filter((id: string) => id !== role);
+        if (other.length) { res.status(409).json({ error: 'user_email ' + ue + ' is already bound to active strain ' + other[0] + '; clear it there first' }); return; }
+      } catch (e) { res.status(503).json({ error: 'could not check user_email uniqueness; nothing written' }); return; }
+      userEmail = ue;
+    }
+  }
+  await db.collection('strains').doc(role).set({ role, display_name: display || role, status: 'active', created_by: 'operator:' + WA_USER, created_at: FieldValue.serverTimestamp(), ...(stcl === null ? {} : { tool_classes: stcl }), ...(typeof saEmail === 'undefined' ? {} : { sa_email: saEmail }), ...(typeof oauthClientId === 'undefined' ? {} : { oauth_client_id: oauthClientId }), ...(typeof oauthEmail === 'undefined' ? {} : { oauth_email: oauthEmail }), ...(typeof delegating === 'undefined' ? {} : { delegating }), ...(typeof userTokenAud === 'undefined' ? {} : { user_token_aud: userTokenAud }), ...(typeof userEmail === 'undefined' ? {} : { user_email: userEmail }) }, { merge: true });
+  await db.collection('journal').add({ agent_id: 'human_operator', action: 'strain_provisioned', message: 'provisioned strain ' + role + ' (' + (display || role) + ') — active on next control-plane deploy' + (stcl === null ? '' : ' — tool_classes RESTRICTED to [' + stcl.join(',') + ']') + (typeof saEmail === 'undefined' ? '' : (saEmail === null ? ' — sa_email CLEARED' : ' — sa_email BOUND to ' + saEmail)) + (typeof oauthClientId === 'undefined' ? '' : (oauthClientId === null ? ' — oauth_client_id CLEARED' : ' — oauth_client_id BOUND to ' + oauthClientId)) + (typeof oauthEmail === 'undefined' ? '' : (oauthEmail === null ? ' — oauth_email CLEARED' : ' — oauth_email BOUND to ' + oauthEmail)) + (typeof delegating === 'undefined' ? '' : ' — delegating=' + String(delegating)) + (typeof userTokenAud === 'undefined' ? '' : (userTokenAud === null ? ' — user_token_aud CLEARED' : ' — user_token_aud SET')) + (typeof userEmail === 'undefined' ? '' : (userEmail === null ? ' — user_email CLEARED' : ' — user_email BOUND to ' + userEmail)), timestamp: FieldValue.serverTimestamp() });
+  res.json({ ok: true, role, status: 'active', tool_classes: stcl, sa_email: (typeof saEmail === 'undefined' ? undefined : saEmail), oauth_client_id: (typeof oauthClientId === 'undefined' ? undefined : oauthClientId), oauth_email: (typeof oauthEmail === 'undefined' ? undefined : oauthEmail), delegating, user_token_aud: (typeof userTokenAud === 'undefined' ? undefined : userTokenAud), user_email: (typeof userEmail === 'undefined' ? undefined : userEmail), note: stcl === null ? 'unrestricted: this strain holds every tool class' : 'pcToolClasses caches for up to ' + PC_CLASS_TTL_MS + 'ms, so this takes effect within a minute' });
 }));
 app.post('/api/strains/retire', waSafe(async (req: express.Request, res: express.Response) => {
   if (!waSessionOk(req)) { res.status(401).json({ error: 'unlock first' }); return; }
@@ -9465,10 +9915,11 @@ app.post('/oauth/token', async (req: any, res: any) => {
 // [STRAIN OIDC] resolve a Google-signed service-account ID token -> an active provisioned strain.
 // Google attests the token (tokeninfo verifies signature+expiry); we pin audience + map SA email -> strain.
 async function oaStrainFromOidc(token: string, req: any): Promise<string | null> {
+  const inst = `inst:${process.env.K_REVISION || process.env.HOSTNAME}, up:${Math.floor(process.uptime())}s`;
   try {
     // FAIL CLOSED: require a pinned public URL so the audience check can't be spoofed via the Host header.
     const wantAud = String(process.env.MCP_PUBLIC_URL || '').replace(/\/+$/, '');
-    if (!wantAud) return null;
+    if (!wantAud) { console.error(`[sec-review-5] OIDC auth denied: wantAud unset (${inst})`); return null; }
     // [LEAK-GUARD] Only forward something SHAPED like a Google ID token. This function is
     // reached whenever a bearer is PRESENT but missed oauth_tokens, which includes every
     // stale or opaque connector token -- and it forwards the presented value to a THIRD
@@ -9479,20 +9930,20 @@ async function oaStrainFromOidc(token: string, req: any): Promise<string | null>
     // opaque secret to Google at all, which no transport change can fix.)
     // No regex on purpose: this string is re-emitted through a non-raw Python literal.
     const _seg = String(token).split('.');
-    if (_seg.length !== 3 || !_seg[0] || !_seg[1] || !_seg[2]) return null;
+    if (_seg.length !== 3 || !_seg[0] || !_seg[1] || !_seg[2]) { console.error(`[sec-review-5] OIDC auth denied: not a JWT (${inst})`); return null; }
     // [SEC-TOKENINFO-POST] id_token in the body, not the query string. See waGoogleEmail().
     const r = await waFetch('https://oauth2.googleapis.com/tokeninfo', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id_token=' + encodeURIComponent(token) });
-    if (!r || !r.ok) return null;
+    if (!r || !r.ok) { console.error(`[sec-review-5] OIDC auth denied: Google verification failed with status ${r ? r.status : 'timeout'} (${inst})`); return null; }
     const j: any = await r.json();
     const email = String((j && j.email) || '').toLowerCase();
-    if (!email || email.indexOf('.iam.gserviceaccount.com') < 0) return null;   // GCP service accounts only
+    if (!email || email.indexOf('.iam.gserviceaccount.com') < 0) { console.error(`[sec-review-5] OIDC auth denied: email no match or not SA (${inst})`); return null; }   // GCP service accounts only
     const gotAud = String((j && j.aud) || '').replace(/\/+$/, '');
-    if (gotAud !== wantAud && gotAud !== (wantAud + '/mcp')) return null;        // audience replay guard
+    if (gotAud !== wantAud && gotAud !== (wantAud + '/mcp')) { console.error(`[sec-review-5] OIDC auth denied: aud mismatch got=${gotAud} (${inst})`); return null; }        // audience replay guard
     const snap = await db.collection('strains').where('sa_email', '==', email).where('status', '==', 'active').limit(1).get();
-    if (snap.empty) return null;
+    if (snap.empty) { console.error(`[sec-review-5] OIDC auth denied: strain inactive or missing for ${email} (${inst})`); return null; }
     const d: any = snap.docs[0].data();
     return String((d && d.role) || snap.docs[0].id);
-  } catch (e) { return null; }
+  } catch (e) { console.error(`[sec-review-5] OIDC auth denied: caught exception ${String(e)} (${inst})`); return null; }
 }
 // ---------------------------------------------------------------------------
 // [PCGIT-ARCHIVE-V1] GET /git/archive -- the repository, to a machine, over IAM.
@@ -9605,7 +10056,7 @@ app.get('/git/archive', async (req: any, res: any) => {
     // [PCGIT-ARCHIVE-401-V1] A 401 THAT NAMES THE SCHEME, BECAUSE THE COMMONEST CAUSE IS
     // NOT A BAD KEY. Every other fleet tool takes its credential as ?agent= / ?key= /
     // ?session_key= on the query string; this route reads ONLY the Authorization header.
-    // A perfectly valid key passed the fleet-curator way therefore failed here with the
+    // A perfectly valid key passed the fleet-drafter way therefore failed here with the
     // identical opaque body a revoked key produced, and callers concluded their credential
     // had been revoked and went looking for the wrong fault. The body now separates the two.
     const _hdr = String((req.get && req.get('authorization')) || '');
@@ -9642,6 +10093,70 @@ app.get('/git/archive', async (req: any, res: any) => {
     const gt = require('./gittools.js');
     if (typeof gt.gitArchiveTarGz !== 'function') throw new Error('gittools.js does not export gitArchiveTarGz');
     const out: any = await gt.gitArchiveTarGz(ref, sub);
+    // [PCGIT-ARCHIVE-413-V134] THE 32 MiB CEILING IS GOOGLE'S, AND IT USED TO ARRIVE AS AN
+    // EMPTY-BODY 500. Google Frontend caps a NON-STREAMED Cloud Run response at 32 MiB, so
+    // res.send() of a larger buffer is cut at the frontend: Express emitted a 200 and the caller
+    // received a 500 carrying ZERO BYTES and read it as a server fault. The catch block below
+    // would have produced {"error":"archive failed"}; an empty body is the proof it never ran.
+    // MEASURED by fleet-publisher on site-seaside/assets/audio (~55MB of audio, which does not
+    // compress, so the gzip is no smaller than the tree).
+    // THE TEST IS ON tgz.length. The COMPRESSED length is what goes on the wire; out.bytes is the
+    // UNCOMPRESSED tar payload (gittools.ts, `bytes += body.length` inside the entry loop, before
+    // zlib.gzipSync) and testing it would both reject trees that would have served and admit
+    // trees that cannot.
+    // narrow_to NAMES THE SUBTREES THAT WOULD FIT, because "too large" with no next step is the
+    // same dead end as the 500 it replaces. out.paths are FULL repo-relative paths (pcCollect
+    // recurses on e.path), so the requested prefix is stripped before the first segment is taken.
+    // A path with no separator left is a FILE sitting at the requested level, not a subtree: it
+    // is counted in root_files rather than invented as a directory, so a caller whose subtree is
+    // one enormous file gets an empty narrow_to AND the reason it is empty.
+    // [PCGIT-ARCHIVE-413-TESTABLE-V142] THE CEILING IS OVERRIDABLE SO THE 413 PATH CAN BE
+    // EXERCISED WITHOUT A 31.5 MiB SUBTREE. Recorded as a known gap when V134 shipped: the
+    // constant was compile-time, so the ONLY way to reach this branch was to push a tree bigger
+    // than the frontend cap, which nobody was going to do on purpose. An untestable branch is a
+    // branch that rots, and this one produces the narrow_to guidance a caller depends on to
+    // recover -- so it is exactly the branch that must not rot.
+    // THE DEFAULT IS UNCHANGED AND THE ENV VAR CAN ONLY LOWER IT, NEVER RAISE IT. Google Frontend
+    // caps a non-streamed Cloud Run response at 32 MiB and cuts a larger one AT THE FRONTEND --
+    // Express emits 200 and the caller receives an empty-body 500 -- so a value above the real
+    // ceiling would re-open the exact fault V134 closed. A misconfigured env var can make this
+    // route stricter and waste a round trip; it cannot make it lie.
+    const _pcWireEnv = Number(process.env.PC_ARCHIVE_WIRE_MAX || 0);
+    const PC_ARCHIVE_WIRE_MAX = (Number.isFinite(_pcWireEnv) && _pcWireEnv > 0 && _pcWireEnv < (31 * 1024 * 1024 + 512 * 1024))
+      ? _pcWireEnv
+      : (31 * 1024 * 1024 + 512 * 1024);   // 31.5 MiB, headroom for headers and framing
+    if (out.tgz && out.tgz.length > PC_ARCHIVE_WIRE_MAX) {
+      const _pfx = sub ? (String(sub).replace(/^\/+/, '').replace(/\/+$/, '') + '/') : '';
+      const _dirs: any = {};
+      let _rootFiles = 0;
+      const _paths: any[] = (out.paths || []);
+      for (let i = 0; i < _paths.length; i++) {
+        const _p = String(_paths[i]);
+        const _rel = (_pfx && _p.indexOf(_pfx) === 0) ? _p.slice(_pfx.length) : _p;
+        const _cut = _rel.indexOf('/');
+        if (_cut < 0) { _rootFiles++; continue; }
+        const _d = _rel.slice(0, _cut);
+        _dirs[_d] = (_dirs[_d] || 0) + 1;
+      }
+      const _narrow = Object.keys(_dirs).sort().map((d: string) => ({ path: _pfx + d, files: _dirs[d] }));
+      console.error('[git-archive] 413 ' + who + ' ref=' + ref + (sub ? (' path=' + sub) : '')
+        + ' compressed=' + out.tgz.length + ' uncompressed=' + out.bytes + ' files=' + out.files
+        + ' ceiling=' + PC_ARCHIVE_WIRE_MAX);
+      res.status(413).json({
+        error: 'archive too large to serve in one response',
+        detail: 'Google Frontend caps a non-streamed Cloud Run response at 32 MiB and cuts a larger '
+          + 'one at the frontend, which is why this used to arrive as an empty-body 500. Re-request a '
+          + 'subtree with ?path=, using narrow_to below.',
+        compressed_bytes: out.tgz.length,
+        uncompressed_bytes: out.bytes,
+        ceiling_bytes: PC_ARCHIVE_WIRE_MAX,
+        files: out.files,
+        commit: out.commit,
+        root_files: _rootFiles,
+        narrow_to: _narrow,
+      });
+      return;
+    }
     // THE MANIFEST RIDES IN HEADERS SO A BUILD CAN ASSERT COVERAGE RATHER THAN TRUST A
     // BYTE COUNT. A build step comparing x-pcgit-files against what it extracted turns a
     // silently short archive into a red build instead of a mystery three deploys later.
@@ -9727,8 +10242,25 @@ async function pcUploadCaller(req: any): Promise<string | null> {
     const raw = String((req.headers && req.headers['authorization']) || '');
     const m = raw.match(/^Bearer\s+(.+)$/i);
     if (!m) return null;
-    const v: any = await pcSessionLookup(String(m[1]).trim());
-    return v && v.role ? String(v.role) : null;
+    const _tok = String(m[1]).trim();
+    const v: any = await pcSessionLookup(_tok);
+    if (v && v.role) return String(v.role);
+    // [PCGIT-UPLOAD-SA-V144] AND, FAILING THAT, THE GOOGLE-ATTESTED SERVICE-ACCOUNT TOKEN THE
+    // MCP SURFACE ALREADY TRUSTS -- oaStrainFromOidc, THE SAME FUNCTION, NOT A SECOND COPY OF
+    // IT. The comment above /git/blob says a second kind of key is a second thing to leak and
+    // rotate, and that reasoning is why this reuses the existing verifier instead of growing a
+    // private one: oaStrainFromOidc fails closed without MCP_PUBLIC_URL, refuses anything that
+    // is not shaped like a JWT before forwarding it to Google, pins the audience, requires a
+    // .iam.gserviceaccount.com subject, and maps it through strains.sa_email to an ACTIVE
+    // strain. An operator binding is therefore the allowlist; an unbound service account
+    // resolves to nothing and is refused exactly as it was before.
+    // IT RETURNS A ROLE, IN THE SAME NAMESPACE A SESSION KEY RESOLVES TO, AND THAT IS THE
+    // WHOLE POINT. gitUploadBlobForRoute records this string as the upload's owner, and
+    // git_propose's `uploaded` admits an entry only when the proposer resolves to the SAME
+    // string -- so a build that uploads as its bound strain can also commit as that strain,
+    // and can still claim nobody else's bytes.
+    const _sa = await oaStrainFromOidc(_tok, req);
+    return _sa ? String(_sa) : null;
   } catch (e) { return null; }
 }
 app.post('/git/blob', pcBlobBody, async (req: any, res: any) => {
@@ -9781,6 +10313,114 @@ app.post('/git/blob', pcBlobBody, async (req: any, res: any) => {
     res.status(500).json({ error: 'upload failed', detail: msg.slice(0, 300) });
   }
 });
+// ---------------------------------------------------------------------------
+// [PCGIT-RELEASE-TREE-V144] POST /git/release-tree -- the ONLY HTTP path that can move a
+// branch, and it is off unless an operator deliberately turns it on.
+//
+// THE PROBLEM. oss/release/ is GENERATED by oss/gen.py. The prod pipeline's emit-diff step
+// has regenerated it on EVERY build for months -- `rm -rf oss/release; cp -a _c1 oss/release;
+// git add -A; git diff --cached > cut.diff` -- then uploaded the diff to a bucket and stopped.
+// Nothing committed it. MEASURED 2026-09-07: the committed tree declared v12.8 from commit
+// c48c6193 while main was at v13.4, and the GitHub mirror of it was byte-identical, so the
+// public repository was five minor versions stale. The fix was produced and thrown away on
+// every build in between.
+//
+// WHY IT COULD NOT BE CLOSED BEFORE. There were exactly two HTTP git routes: /git/archive
+// (read) and /git/blob (upload). A build could fetch the tree and park bytes, and had no way
+// to commit them -- git_propose is an MCP tool and a build holds no session key. So the last
+// step always needed a human-driven agent, and therefore never happened on its own.
+//
+// WHAT THIS IS NOT. It is not a general write path and must not become one:
+//   * DISABLED unless PC_RELEASE_TREE_PREFIX is set. Unset is not a permissive default, it is
+//     a 503 -- a new write surface that ships ON by default is how one arrives unnoticed.
+//   * EVERY path must sit under that prefix, checked BEFORE anything is written, with the
+//     whole request refused if any single entry fails. Partial application of a scoped write
+//     is the failure mode that makes scoping worthless.
+//   * `content` and `copy_from` are REFUSED. Only `uploaded` and `delete`. Bytes therefore
+//     still arrive through POST /git/blob, still owned by whoever uploaded them, so this route
+//     grants no new way to introduce bytes -- only a way to reference ones already attributed.
+//   * The branch is PC_RELEASE_TREE_BRANCH (default main) and nothing else.
+//
+// THE BLAST RADIUS, STATED PLAINLY. An allowlisted build can overwrite the generated release
+// tree and nothing else. That tree is regenerable from any commit by re-running gen.py under
+// the determinism gate, so the worst case is a bad generated tree that the next build
+// replaces -- which is the same exposure the pipeline already had when it chose what to emit.
+// It cannot touch control-plane/, pipeline/, oss/gen.py or any other path.
+const PC_RELEASE_TREE_PREFIX = String(process.env.PC_RELEASE_TREE_PREFIX || '').trim();
+const PC_RELEASE_TREE_BRANCH = String(process.env.PC_RELEASE_TREE_BRANCH || 'main').trim();
+app.post('/git/release-tree', async (req: any, res: any) => {
+  if (!PC_RELEASE_TREE_PREFIX) {
+    res.status(503).json({
+      error: 'disabled',
+      detail: 'PC_RELEASE_TREE_PREFIX is unset, so this route writes nothing. It is off by '
+        + 'default deliberately: it is the only HTTP path that can move a branch. Set it to '
+        + 'the single path prefix a build may rewrite, e.g. oss/release/.',
+    });
+    return;
+  }
+  const who = await pcUploadCaller(req);
+  if (!who) {
+    res.status(401).json({
+      error: 'unauthorized',
+      accepted: 'Authorization: Bearer <Google-signed service-account ID token whose email is '
+        + 'bound to an active strain via strains.sa_email, or a session key>',
+      detail: 'The credential is read ONLY from the Authorization header, never from the query '
+        + 'string or the body.',
+    });
+    return;
+  }
+  const body: any = (req && req.body) || {};
+  const files: any[] = Array.isArray(body.files) ? body.files : [];
+  const message = String(body.message || '').trim();
+  if (!files.length || !message) {
+    res.status(400).json({ error: 'bad request', detail: 'files[] and message are both required. Nothing was written.' });
+    return;
+  }
+  // EVERY entry is checked before ANY of them is applied, and one bad entry refuses all of it.
+  const refused: any[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const f: any = files[i] || {};
+    const p = String(f.path || '');
+    if (!p) { refused.push({ index: i, why: 'no path' }); continue; }
+    if (p.indexOf(PC_RELEASE_TREE_PREFIX) !== 0) { refused.push({ path: p, why: 'outside ' + PC_RELEASE_TREE_PREFIX }); continue; }
+    // Belt and braces against a prefix-passing path that climbs back out.
+    if (p.indexOf('..') >= 0 || p.charAt(0) === '/') { refused.push({ path: p, why: 'path traversal' }); continue; }
+    if (typeof f.content === 'string') { refused.push({ path: p, why: 'content is not accepted here -- upload via POST /git/blob and reference it with uploaded{blob_oid}' }); continue; }
+    if (f.copy_from) { refused.push({ path: p, why: 'copy_from is not accepted here' }); continue; }
+    if (!f.delete && !(f.uploaded && f.uploaded.blob_oid)) { refused.push({ path: p, why: 'each entry needs uploaded{blob_oid} or delete:true' }); continue; }
+  }
+  if (refused.length) {
+    console.error('[git-release-tree] REFUSED for ' + who + ': ' + refused.length + ' of ' + files.length + ' entries out of scope');
+    res.status(400).json({
+      error: 'out of scope',
+      prefix: PC_RELEASE_TREE_PREFIX,
+      refused: refused.slice(0, 25),
+      detail: 'NOTHING was written. This route rewrites exactly one prefix and refuses the whole '
+        + 'request if any entry falls outside it.',
+    });
+    return;
+  }
+  try {
+    const gt = require('./gittools.js');
+    if (typeof gt.gitReleaseTreeForRoute !== 'function') throw new Error('gittools.js does not export gitReleaseTreeForRoute');
+    const out: any = await gt.gitReleaseTreeForRoute(PC_RELEASE_TREE_BRANCH, files, message, who);
+    console.error('[git-release-tree] ' + who + ' branch=' + PC_RELEASE_TREE_BRANCH
+      + ' files=' + files.length + ' applied=' + String(!!(out && out.applied))
+      + ' commit=' + String((out && out.commit) || '(none)'));
+    db.collection('journal').add({
+      agent_id: 'git_release_tree',
+      action: out && out.applied ? 'release_tree_pushed' : 'release_tree_refused',
+      message: who + ' rewrote ' + files.length + ' file(s) under ' + PC_RELEASE_TREE_PREFIX
+        + ' on ' + PC_RELEASE_TREE_BRANCH + ': ' + String((out && out.commit) || '(no commit)'),
+      timestamp: FieldValue.serverTimestamp(),
+    }).catch((e: any) => console.error('[git-release-tree] journal write failed: ' + String((e && e.message) || e)));
+    res.status(out && out.applied ? 200 : 409).json(out);
+  } catch (e: any) {
+    const msg = String((e && e.message) || e);
+    console.error('[git-release-tree] FAILED for ' + who + ': ' + msg);
+    res.status(500).json({ error: 'release-tree write failed', detail: msg.slice(0, 400) });
+  }
+});
 async function oaBearerRole(req: any): Promise<string | null> {
   const id: any = await oaBearerIdentity(req);
   return id ? id.role : null;
@@ -9793,20 +10433,70 @@ async function oaBearerRole(req: any): Promise<string | null> {
 // by contrast, is a per-agent machine credential Google signed for one reasoning engine, so
 // its mapped strain (strains.sa_email) IS a sufficient identity with nothing pasted. Same
 // bearer header, opposite paste requirement, so the resolver has to say which path answered.
-// `oidc:true` is set ONLY on the Google-attested branch; the connector branch never sets it,
-// so a stale or forged connector token can never masquerade as a machine strain.
+//
+// [CONNECTED-IDENTITY-V129 / V1291] There is now ONE way a connector bearer earns
+// `oidc:true`: the operator has BOUND a strain to this exact connector (strains.oauth_client_id
+// == the token's client_id) AND to this exact consenting Google account (strains.oauth_email
+// == the token's email). Both halves are operator-written through /api/strains/provision on a
+// console session; nothing a caller presents can create the binding. 12.9 matched client_id
+// alone and also honoured a `strain` field or a non-default `role` on the token record --
+// neither was ever written by consent, and the role branch would have turned every older
+// token into a keyless identity the day OAUTH_ROLE changed. 12.9.1 removes both: a token
+// record's own fields are never a designation. A bound resolve is journalled once per token
+// per process (connector_bound_identity) so a keyless chat running as the bound strain is
+// visible in the journal, not silent.
+const oaBoundSeen: Set<string> = new Set();
 async function oaBearerIdentity(req: any): Promise<{ role: string; oidc: boolean } | null> {
+  const inst = `inst:${process.env.K_REVISION || process.env.HOSTNAME}, up:${Math.floor(process.uptime())}s`;
   const h = String((req.headers && req.headers['authorization']) || '');
-  const m = h.match(/^Bearer\s+(.+)$/i); if (!m) return null;
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  if (!m) { return null; }
   // [SEC-OAUTH-HASH] hash the presented token before the get; the raw token is never an ID.
   const rec = await oaTokGet('oauth_tokens', m[1]);
   // [SEC-OAUTH-RT-EXP] a record with no exp used to mean never-expires. Fail closed instead.
   // [OA-REVOKE-V1] revoked === true, not !== false: `revoked` is absent on every record
   // written before this shipped, and absent must keep meaning live.
-  if (rec && rec.revoked === true) return null;
-  if (rec && rec.exp && rec.exp >= Date.now()) return { role: rec.role || OAUTH_ROLE, oidc: false };
+  if (rec && rec.revoked === true) { console.error(`[sec-review-5] Auth denied: token revoked (${inst})`); return null; }
+  if (rec && rec.exp && rec.exp >= Date.now()) {
+    let designated: string | null = null;
+    const cid = String(rec.client_id || '').trim();
+    const em = String(rec.email || '').trim().toLowerCase();
+    if (cid && em) {
+      try {
+        const cSnap = await db.collection('strains').where('oauth_client_id', '==', cid).where('status', '==', 'active').limit(5).get();
+        if (cSnap.empty) {
+          console.error(`[sec-review-5] Auth info: client_id no match or strain inactive for cid=${cid} (${inst})`);
+        }
+        for (const d of cSnap.docs) {
+          const cd: any = d.data() || {};
+          const bound = String(cd.oauth_email || '').trim().toLowerCase();
+          if (bound && bound === em) { designated = String(cd.role || d.id); break; }
+        }
+        if (!cSnap.empty && !designated) {
+          console.error(`[sec-review-5] Auth info: email no match for cid=${cid} (${inst})`);
+        }
+      } catch (e) {}
+    }
+    if (designated) {
+      try {
+        const th = oaTokHash(m[1]);
+        if (!oaBoundSeen.has(th)) {
+          oaBoundSeen.add(th);
+          db.collection('journal').add({ agent_id: designated, action: 'connector_bound_identity', message: 'keyless connector bearer (client ' + cid + ', ' + em + ') resolved to strain ' + designated + ' via the operator binding strains.oauth_client_id + oauth_email', timestamp: FieldValue.serverTimestamp() }).catch(() => {});
+        }
+      } catch (e) {}
+    }
+    return { role: designated || rec.role || OAUTH_ROLE, oidc: !!designated };
+  }
   // [STRAIN OIDC] our own token store missed; try the Google-attested service-account path.
   const sa = await oaStrainFromOidc(m[1], req);
+  if (!sa) {
+    if (!rec) {
+      console.error(`[sec-review-5] Auth denied: OIDC fallback failed, and token was not in DB (cache miss) (${inst})`);
+    } else {
+      console.error(`[sec-review-5] Auth denied: OIDC fallback failed, and token was expired (${inst})`);
+    }
+  }
   return sa ? { role: sa, oidc: true } : null;
 }
 // [SEC-OAUTH-DEFAULT-ROLE-AUDIT] fleet-security 2026-07-30, after a live outage.
@@ -10107,6 +10797,95 @@ function pcExtract(req: any): any {
   return { call: sawCall, key: only, mixed: (n > 1), id: id };
 }
 
+// [GE-USER-IDENTITY-V130] ONE AGENT, MANY PEOPLE, EACH IN THEIR OWN STRAIN.
+// A reasoning-engine agent proves WHAT it is with its attested SA token (12.8). When the
+// operator marks that agent strain `delegating`, the agent is never admitted as itself: it
+// must also carry the Gemini Enterprise user's Google OAuth access token in the header
+// X-Paracoding-User-Token, and the call is admitted AS THAT PERSON'S STRAIN. Gemini Enterprise
+// mints that token for the user after their consent to the app's authorization (a Google OAuth
+// client the operator created), hands it to the agent on every request, and the agent forwards
+// it -- so the proof chain is Google -> user consent -> GE -> agent -> here, verified at this
+// end with tokeninfo: signature and expiry (Google), audience == the strain's user_token_aud
+// (so a token minted for any other client is refused), email_verified, and then
+// strains.where(user_email == email, status == active), exactly one. Nothing the agent SAYS
+// is trusted: GE also sends the user's email as user_id, and that is deliberately NOT read
+// here -- it is an assertion, the token is a proof.
+// FAIL CLOSED, BY DEFAULT DENY: a person with no strain assigned gets 'no-strain-for-user',
+// not a shared fallback lane. The operator assigns; nobody self-provisions. Each new
+// (email -> strain) resolution is journalled once per process (user_delegated_identity).
+const pcDelegCache: Map<string, { v: any; at: number }> = new Map();
+const pcDelegSeen: Set<string> = new Set();
+// [GE-USER-SESSION-V131] A USER SESSION, NOT A TOKEN CACHE. Measured 2026-09-06 16:52Z: Gemini
+// Enterprise forwards only the raw Google access token (~60 min life) and does not reliably
+// refresh it (google/adk-python #5556, open); 65 minutes after consent every call, in a NEW
+// chat too, arrived with a token Google's tokeninfo rejected as expired, and the person was
+// locked out with no re-consent path short of rotating the authorization. So this follows
+// the operator's ruling for the console -- sign in once, then a session with a TTL -- rather
+// than Google's token life: the FIRST time a token is seen it must pass tokeninfo (signature,
+// expiry, audience, email_verified); the (token hash -> email) that verification produced is
+// then a session in Firestore user_sessions/<hash> for PC_USER_SESSION_TTL_MS (default 7 days,
+// the same TTL as a pasted key), honoured across instances and cold starts, so a
+// previously-verified token keeps identifying the same person after Google's expiry exactly
+// as a session cookie does. NOTHING NEW IS TRUSTED: a token Google has never verified still
+// has to pass tokeninfo; the hash is the only key and the token bytes are never stored; the
+// session names the audience and the agent strain it was verified through, and is honoured
+// only for that same agent strain. Revocation on Google's side is not seen until the session
+// expires -- the same trade a session cookie makes, and the reason the TTL is a knob.
+const PC_USER_SESSION_TTL_MS = Math.max(60000, Number(process.env.PC_USER_SESSION_TTL_MS || (7 * 24 * 3600 * 1000)));
+const pcUserTokCache: Map<string, { email: string; at: number }> = new Map();
+async function pcStrainRow(role: string): Promise<any> {
+  const now = Date.now();
+  const c = pcDelegCache.get(role);
+  if (c && (now - c.at) < 60000) return c.v;
+  let v: any = null;
+  try { const s = await db.collection('strains').doc(role).get(); v = s.exists ? (s.data() || {}) : null; } catch (e) { v = null; }
+  pcDelegCache.set(role, { v, at: now });
+  return v;
+}
+async function pcDelegatedUser(req: any, agentRole: string, id: any): Promise<any> {
+  const row: any = await pcStrainRow(agentRole);
+  if (!row || row.delegating !== true) return { role: agentRole };   // not delegating: the agent IS the identity (12.8)
+  const aud = String(row.user_token_aud || '').trim();
+  if (!aud) return { deny: true, reason: 'user-unconfigured', id };
+  const hv = req.headers && (req.headers['x-paracoding-user-token'] as any);
+  const ut = String(Array.isArray(hv) ? hv[0] : (hv || '')).trim();
+  if (!ut) return { deny: true, reason: 'user-missing', id };
+  const th = oaTokHash(ut);
+  const now = Date.now();
+  const cc = pcUserTokCache.get(th);
+  let email: string | null = (cc && (now - cc.at) < 300000) ? cc.email : null;
+  if (!email) {
+    // in-process miss: the durable session (survives cold starts and other instances)
+    try {
+      const sd = await db.collection('user_sessions').doc(th).get();
+      const sv: any = sd.exists ? (sd.data() || {}) : null;
+      if (sv && sv.email && Number(sv.exp || 0) > now && String(sv.agent || '') === agentRole && String(sv.aud || '') === aud) {
+        email = String(sv.email).toLowerCase();
+      }
+    } catch (e) { email = null; }
+  }
+  if (!email) {
+    const gi = await waGoogleIdentity(ut, aud);
+    if (!gi.email) return { deny: true, reason: 'user-' + gi.why, id };
+    email = gi.email;
+    db.collection('user_sessions').doc(th).set({ email, aud, agent: agentRole, verified_at: now, exp: now + PC_USER_SESSION_TTL_MS, expireAt: new Date(now + PC_USER_SESSION_TTL_MS + 86400000) }).catch(() => {});
+  }
+  if (pcUserTokCache.size > 5000) pcUserTokCache.clear();
+  pcUserTokCache.set(th, { email, at: now });
+  let userRole: string | null = null;
+  try {
+    const us = await db.collection('strains').where('user_email', '==', email).where('status', '==', 'active').limit(2).get();
+    if (us.size === 1) { const d: any = us.docs[0]; userRole = String((d.data() || {}).role || d.id); }
+    else if (us.size > 1) return { deny: true, reason: 'user-ambiguous', id };
+  } catch (e) { return { deny: true, reason: 'user-transport', id }; }
+  if (!userRole) return { deny: true, reason: 'no-strain-for-user', id };
+  const k = email + '>' + userRole;
+  if (!pcDelegSeen.has(k)) {
+    pcDelegSeen.add(k);
+    db.collection('journal').add({ agent_id: userRole, action: 'user_delegated_identity', message: 'Gemini Enterprise user ' + email + ' admitted as strain ' + userRole + ' via delegating agent strain ' + agentRole + ' (Google-verified token, aud pinned)', timestamp: FieldValue.serverTimestamp() }).catch(() => {});
+  }
+  return { role: userRole, user: email, via: agentRole };
+}
 async function pcResolveIdentity(req: any): Promise<any> {
   const bid: any = await oaBearerIdentity(req);
   if (!bid) return null;                          // unchanged: oaChallenge path
@@ -10140,7 +10919,16 @@ async function pcResolveIdentity(req: any): Promise<any> {
   // bid.oidc, so an ordinary OAuth CONNECTOR bearer (bid.oidc false) still falls through to the
   // paste requirement below exactly as before -- an account-level connector token is shared
   // across every chat and must never resolve a keyless tools/call to a live toolset.
-  if (bid.oidc) return { role: bearer };
+  // [CONNECTED-IDENTITY-V129 / V1291] The one exception: a connector bearer whose client_id AND
+  // consenting email the operator has bound to a strain (strains.oauth_client_id + oauth_email)
+  // also arrives with bid.oidc true and is admitted as that strain with no paste. A pasted key
+  // still wins (the x.key branch above runs first), so the binding is the connector's DEFAULT
+  // lane for keyless chats, not an override. Note the consequence: a chat that LOSES its key
+  // (compaction) continues as the bound strain, which is why the binding is a deliberate
+  // operator act per connector+account and is journalled on first use.
+  // [GE-USER-IDENTITY-V130] and, for a DELEGATING agent strain, the identity is the verified
+  // Gemini Enterprise user's strain, or a denial -- never the agent's own (see pcDelegatedUser).
+  if (bid.oidc) return await pcDelegatedUser(req, bearer, x.id);
   return PC_ENFORCE ? { deny: true, reason: 'no-identity', id: x.id } : { role: bearer };
 }
 
@@ -10148,12 +10936,49 @@ async function pcResolveIdentity(req: any): Promise<any> {
 // return the same words in a modern-shaped result. A pure extraction: pcSendDenied below
 // composes exactly the string it composed before, and no caller of it changed.
 function pcDeniedText(reason: string): string {
+  // [GE-USER-IDENTITY-V130] A person behind a delegating agent is not in a Cowork chat and has
+  // no key to paste; the paste instructions below would send them somewhere that cannot help.
+  if (reason === 'no-strain-for-user' || reason === 'user-ambiguous') {
+    return 'DENIED: your Google account is signed in, but it has no Paracoding strain assigned' + (reason === 'user-ambiguous' ? ' unambiguously' : '') + '. Ask the operator to assign one (a strain with your address as user_email). Nothing was run.';
+  }
+  if (reason.indexOf('user-') === 0) {
+    const w = reason.slice(5);
+    return 'DENIED: this agent is configured to act as the signed-in person, and that identity could not be verified (' + w + '). '
+      + (w === 'missing' ? 'No user token reached the control plane: the agent needs an authorization attached in Gemini Enterprise and the person must have consented to it. '
+        : (w === 'unconfigured' ? 'The agent strain has no user_token_aud; the operator must set it to the authorization\'s OAuth client id. '
+          : (w === 'audience' ? 'The token was minted for a different OAuth client than the one this agent is bound to. '
+            : (w === 'rejected' ? 'Google would not resolve the token (expired or revoked); sign in to the agent again. '
+              : 'Try again shortly; if it persists, tell the operator. '))))
+      + 'Nothing was run.';
+  }
   const why = (reason === 'unknown-or-revoked')
     ? 'The session key in this chat is not recognised, has EXPIRED, or has been revoked. Session keys last ' + PC_KEY_TTL_DAYS + ' days -- mint a fresh paste at the Autoclave and replace the PC-SESSION-KEY line.'
     : ((reason === 'mixed')
       ? 'This request carried more than one session key.'
       : 'This chat has not established an identity yet.');
-  const txt = 'DENIED: ' + why + '\n\n'
+  // [SEC-DENIED-RETRY-V143] THIS REFUSAL USED TO RECOMMEND THE ONE ACTION THAT MUST NEVER HAPPEN
+  // ON A CONNECTOR-BOUND SURFACE: pasting a session key into the chat. Everything below the
+  // blank line is correct for a client that authenticates WITH a key -- Cowork, Grok -- and
+  // exactly wrong for a Gemini Enterprise chat, which resolves keyless from the connector
+  // bearer and needs none. Measured 2026-09-07, twice: a GE chat was refused mid-turn while
+  // other calls on the SAME bearer succeeded seconds either side (six git_grep admitted, the
+  // next git_read refused 420ms later), read this text, and offered to ask the operator for a
+  // key. It had to be told no by hand, both times. A refusal that recommends the wrong recovery
+  // is worse than one that says nothing, because the model complies with it.
+  // THE RETRY ADVICE IS NOT A GUESS ABOUT THE CAUSE. Whether the underlying fault is a cold
+  // instance (suspected, n=2, both within ten minutes of a traffic shift) or something else,
+  // the OBSERVED fact is that a plain retry succeeded immediately on both occasions. Retrying
+  // is free, cannot leak anything, and is strictly safer than soliciting a credential.
+  // It is offered ONLY for the no-identity case: 'unknown-or-revoked' means a key WAS presented
+  // and did not resolve, and 'mixed' means two were presented -- retrying either of those just
+  // repeats the same bad key, so they keep the original text unchanged.
+  const _pcRetryFirst = (reason !== 'unknown-or-revoked' && reason !== 'mixed')
+    ? 'IF ANY TOOL CALL HAS ALREADY SUCCEEDED IN THIS SESSION, THIS IS TRANSIENT -- RETRY ONCE BEFORE ANYTHING ELSE. '
+      + 'A chat bound to a connector resolves its identity on the server and needs NO session key. Do not ask a human for one, '
+      + 'and do not accept one if it is offered: it is not needed here and a chat is not a place a credential belongs. '
+      + 'Only if a retry ALSO fails does the rest of this message apply to you.' + '\n\n'
+    : '';
+  const txt = 'DENIED: ' + why + '\n\n' + _pcRetryFirst
     + 'This MCP connector is account-level and serves every Cowork chat, so a chat must prove which strain it is before it can use any tool. '
     + 'Pass your session key as the "agent" argument on EVERY tool call. It is the line beginning PC-SESSION-KEY in this chat bootstrap paste. '
     + 'If there is no such line, ask the operator: they mint one at the Flow Hood (Autoclave, New strain session) and paste it here. '
@@ -10749,6 +11574,8 @@ const PORT = process.env.PORT || 8080;
 // and listens regardless. If the fill did not finish, that is said on stderr rather than being
 // discovered later from 401s -- the service still fails CLOSED, exactly as before this change.
 function pcListen(): void {
+  const untruths = Object.keys(PC_TOOL_CLASS).filter(n => PC_TOOL_CLASS[n] !== 'read' && pcToolAnnotations(n)?.readOnlyHint);
+  if (untruths.length > 0) console.log('[sec-review-1] WARNING: tools advertising readOnlyHint:true that are NOT class read: ' + untruths.join(', '));
   app.listen(PORT, () => {
     console.log(`Paracoding Control Plane & MCP SSE Server online on port ${PORT}`);
   });

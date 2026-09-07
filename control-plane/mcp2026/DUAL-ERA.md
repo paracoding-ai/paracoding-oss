@@ -190,7 +190,7 @@ which is what `-32000` is.
 
 **Rule: the legacy branch's error code is protocol surface. It is covered by the same review
 gate as any wire format. It does not change without a client-compatibility argument written
-down next to it.**
+ndown next to it.**
 
 ---
 
@@ -198,10 +198,10 @@ down next to it.**
 
 `[VER]` Compatibility Matrix, quoted for the two rows this design exists to satisfy:
 
-> | Client | Server | Outcome |
-> | --- | --- | --- |
-> | Dual-era | Legacy | Works. […] HTTP: the modern request returns a `4xx` without a recognized modern error body, and the client falls back to `initialize` (and possibly further to the deprecated HTTP+SSE transport). |
-> | Legacy | Dual-era | Works. The server answers `initialize` and serves the client according to the negotiated legacy revision. |
+| Client | Server | Outcome |
+| --- | --- | --- |
+| Dual-era | Legacy | Works. […] HTTP: the modern request returns a `4xx` without a recognized modern error body, and the client falls back to `initialize` (and possibly further to the deprecated HTTP+SSE transport). |
+| Legacy | Dual-era | Works. The server answers `initialize` and serves the client according to the negotiated legacy revision. |
 
 Our endpoint is the **Dual-era server** column. Concretely:
 
@@ -215,7 +215,7 @@ Our endpoint is the **Dual-era server** column. Concretely:
 
 And the row that explains why a modern-only deployment is not an option here:
 
-> | Legacy | Modern | Fails. […] HTTP: the request is missing the required headers and is rejected per server validation with `400 Bad Request`. Legacy clients have no fall-forward mechanism. |
+| Legacy | Modern | Fails. […] HTTP: the request is missing the required headers and is rejected per server validation with `400 Bad Request`. Legacy clients have no fall-forward mechanism. |
 
 Deleting the legacy branch does not degrade legacy clients. It ends them.
 
@@ -352,7 +352,191 @@ possible shape.
 
 A `500` is not in the fallback trigger set (`400`, `404`, `405`) and is not a recognized
 modern error either, so a dual-era client neither falls back nor retries — it just fails, and
-may or may not cache that as "modern". Every path in the modern branch must terminate in a
+may or may not cache that as \"modern\". Every path in the modern branch must terminate in a
+described response: an unrepresentable tool schema publishes an untyped property list and
+logs loudly, a throwing tool becomes an `isError` result (CONFORMANCE.md R41), and the router
+wraps the whole modern call in a try/catch of last resort. **Losing one type annotation
+loudly beats a stack trace.**
+
+### B9 — Change the legacy branch's HTTP status from 400
+
+`[SHTTP]`'s rule is "On `400 Bad Request`, the client **SHOULD** inspect the response body
+before falling back." A `200` carrying a JSON-RPC error is not a fallback trigger at all —
+the client never looks at the body, sees a successful HTTP exchange, and hangs waiting for a
+result it will not get. A `503` or `502` is read as a transport problem and retried forever.
+The status and the body are a pair: `400` + a non-modern error code. Change neither alone.
+
+### B10 — Change the legacy `-32000` for tidiness
+
+The whole of §2. `-32000` is implementation-defined, therefore not a recognized modern
+error, therefore the thing that makes a dual-era client fall back to `initialize`. Renumber
+nit into `-32020..-32099` and every dual-era client stops falling back; renumber it to
+`-32601` and clients that treat \"any code the modern schema defines\" as modern stop too.
+It looks like a code smell and it is load-bearing. **If a linter, a schema check, or a
+future SDK migration proposes changing it, that is a protocol change and needs this
+document quoted in the review.**
+
+---
+
+## 3. The compatibility matrix, and which rows we are
+
+`[VER]` Compatibility Matrix, quoted for the two rows this design exists to satisfy:
+
+| Client | Server | Outcome |
+| --- | --- | --- |
+| Dual-era | Legacy | Works. […] HTTP: the modern request returns a `4xx` without a recognized modern error body, and the client falls back to `initialize` (and possibly further to the deprecated HTTP+SSE transport). |
+| Legacy | Dual-era | Works. The server answers `initialize` and serves the client according to the negotiated legacy revision. |
+
+Our endpoint is the **Dual-era server** column. Concretely:
+
+* **Modern client → us.** Rows 4 and 5. Served by `mcp2026.ts`, statelessly.
+* **Dual-era client → us.** Its probe carries a modern claim, so row 4 or 5 answers it
+  modernly and it stays modern. If its probe carries no claim, rows 6–8 answer it with
+  `-32000`, it falls back to `initialize`, and row 1 serves it. **Both outcomes are
+  correct.** That is the whole point: the client picks, per its own probe, and we answer
+  consistently either way.
+* **Legacy client → us.** Rows 1, 6, 7, 8. Never touches `mcp2026.ts`.
+
+And the row that explains why a modern-only deployment is not an option here:
+
+| Legacy | Modern | Fails. […] HTTP: the request is missing the required headers and is rejected per server validation with `400 Bad Request`. Legacy clients have no fall-forward mechanism. |
+
+Deleting the legacy branch does not degrade legacy clients. It ends them.
+
+---
+
+## 4. The era determination is cached by the client, per origin
+
+`[VER]`:
+
+> "The era determination is a property of the server, not of an individual request. Clients
+> **SHOULD** cache the result for the lifetime of the server process (stdio) or origin
+> (HTTP), and **MAY** persist it across restarts of the same server configuration,
+> re-probing if the cached assumption later fails."
+
+This is why **routing must be a pure function of one request's bytes**: no connection state,
+no cache, no clock, no per-instance flag, no sticky load balancing. Two byte-identical
+requests that landed on different eras — because they hit different instances, or the same
+instance at different times — would make a client pin the wrong era **for its whole
+process**. A 1-in-N routing flake becomes a permanently broken connector. That is B7.
+
+It is also why `[VER]`'s modern-only-server advice is recorded but not yet binding on us
+(CONFORMANCE.md S11): we answer `initialize`, so we never return an error to it. The day the
+legacy branch is removed, that error must name our supported versions, because it will be
+the only diagnostic a legacy client can show a human.
+
+---
+
+## 5. The review invariant, as a file boundary
+
+**Everything in `control-plane/src/mcp2026.ts` is the modern branch. Nothing in it may be
+reached by a legacy request, and `index.ts` must never call any of it above the era router.**
+
+Stated as something a reviewer can grep for rather than reason about:
+
+> **`-32020`, `-32021`, `-32022`, and HTTP `404` / `405` / `406` appear ONLY in
+> `control-plane/src/mcp2026.ts` (and, for `405` on row 0, in the two `index.ts` route
+> handlers that own GET and DELETE on `/mcp`).**
+
+Why those six tokens specifically:
+
+* `-32020`, `-32021`, `-32022` are the three codes `[BASE]` defines, and they are precisely
+  the set a dual-era client reads as "this server is modern, stop falling back".
+* `404` and `405` are two of the three statuses `[SHTTP]`'s HTTP+SSE fallback ladder keys
+  off ("If it fails with HTTP status code `400 Bad Request`, `404 Not Found`, or
+  `405 Method Not Allowed` **and** the response body is not a recognized modern JSON-RPC
+  error"). Emitting them from a legacy-classified path sends a client down that ladder.
+* `406` is not used at all; it is in the invariant so that adding Accept-header negotiation
+  above the router is a visible event rather than a quiet one.
+
+Corollary, and it is the one that gets violated by well-meaning refactors: **all modern
+header validation lives inside `mcp2026Handle`, below the router.** Not in middleware, not
+in a shared `validateHeaders()` helper called from both branches, not in an Express
+`app.use`. Hoisting any of it is B1.
+
+---
+
+## 6. The ten ways to break fallback
+
+Each of these is a change that looks like an improvement, compiles, passes a naive test
+suite, and breaks a client that cannot tell you it broke.
+
+### B1 — Hoist modern header validation above the era router
+
+Move the `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` checks into middleware "so both
+branches get them". Today's envelope-less legacy traffic then collects a `-32020` **before**
+anything looks at its era. A dual-era client reads `-32020` as a recognized modern error,
+stops falling back, "corrects" a request that is already correct, and deadlocks. A pure
+legacy client, with no fall-forward mechanism, dies outright. This is the single most likely
+break, because "validate early, validate once" is normally right.
+
+### B2 — Answer a legacy-classified request with 404, 405 or 406
+
+Including by accident: an unmatched route, a stricter `Accept` check, a proxy rule. `[SHTTP]`
+tells a client that a `404`/`405` with no modern error body means "no modern MCP endpoint
+lives here — go probe the deprecated HTTP+SSE `GET` transport". A legacy client that was
+about to succeed at `initialize` gets sent to a transport we do not host. This is why
+`index.ts` registers `DELETE /mcp` explicitly (row 0) instead of letting Express answer a
+bare 404.
+
+### B3 — Read the header before the body
+
+Then a request with a **malformed** modern claim (`_meta` present, version wrong type,
+capabilities missing) and no usable header is demoted to legacy and answered `-32000`. The
+client is told the server is legacy on the strength of its own typo, and pins that for the
+lifetime of the origin (§4). The body is the source of truth; read it first, and answer a
+broken modern envelope with `-32602` (CONFORMANCE.md R20, Ambiguity 3).
+
+### B4 — Put a legacy revision in `MCP2026_MODERN_VERSIONS`, or widen the era test past the date
+
+The array is what makes a bare `MCP-Protocol-Version` header select the modern era (row 5).
+Adding `2025-11-25` to it "for completeness" turns row 8 into row 5: every `2025-06-18` …
+`2025-11-25` client — all of which send that header — is routed to the modern branch and
+rejected for an envelope its revision does not define. The `[VER]` matrix row
+`Legacy → Dual-era: Works` becomes `Fails`. **Membership in that array is a promise to serve
+the revision modernly, not a list of revisions we have heard of.**
+
+`mcp2026IsModernRevision` now admits a second class — a revision-shaped value at or after
+`2026-07-28` (row 7b) — and that is the same hazard with a different handle. The two
+conditions in it are not belt-and-braces:
+
+* drop `MCP_REVISION_RE` and any garbage header value outranks the threshold and is served
+  modernly;
+* drop `>= MCP2026_VERSION` and every 2025-era revision is revision-shaped too, so row 8
+  belongs to row 7b and the connector that works today stops working.
+
+Neither failure is visible in a `--host` run that only sends well-formed modern traffic.
+C53 and C54 are the two controls, and they must both stay green together.
+
+### B5 — Make `Mcp-Session-Id` (or any connection state) an era input
+
+"If it has a session id, it's a 2025-era client" is tempting and wrong twice over: the
+modern revision removed sessions entirely, and `[SHTTP]` says to *ignore* the header, never
+to mint or echo it. Worse, it makes routing depend on state, which is B7. Any input that is
+not in the bytes of the current request is disqualified.
+
+### B6 — Decide an array body by its headers instead of its elements
+
+A legacy batch with a stray modern header would be routed modern and rejected `-32600`; a
+modern batch with no header would be routed legacy and half-processed by the sdk. Rows 2 and
+3 exist because the elements are the only honest signal — and because a batch that *did*
+claim to be modern must reach the modern branch to be told, in modern terms, that batching
+was removed.
+
+### B7 — Let anything other than this request's bytes influence the decision
+
+A per-instance "we've seen modern traffic" flag, a cache keyed by client IP, a clock ("after
+the cutover date, default modern"), sticky sessions at the load balancer. Because clients
+cache the era **per origin, for the lifetime of the process** (§4), a decision that varies
+across two byte-identical requests will pin some fraction of clients to the wrong era
+permanently. The failure is intermittent at first and total afterwards, which is the worst
+possible shape.
+
+### B8 — Let the modern branch return HTTP 500
+
+A `500` is not in the fallback trigger set (`400`, `404`, `405`) and is not a recognized
+modern error either, so a dual-era client neither falls back nor retries — it just fails, and
+may or may not cache that as \"modern\". Every path in the modern branch must terminate in a
 described response: an unrepresentable tool schema publishes an untyped property list and
 logs loudly, a throwing tool becomes an `isError` result (CONFORMANCE.md R41), and the router
 wraps the whole modern call in a try/catch of last resort. **Losing one type annotation
@@ -371,7 +555,7 @@ The status and the body are a pair: `400` + a non-modern error code. Change neit
 The whole of §2. `-32000` is implementation-defined, therefore not a recognized modern
 error, therefore the thing that makes a dual-era client fall back to `initialize`. Renumber
 it into `-32020..-32099` and every dual-era client stops falling back; renumber it to
-`-32601` and clients that treat "any code the modern schema defines" as modern stop too.
+`-32601` and clients that treat \"any code the modern schema defines\" as modern stop too.
 It looks like a code smell and it is load-bearing. **If a linter, a schema check, or a
 future SDK migration proposes changing it, that is a protocol change and needs this
 document quoted in the review.**
@@ -394,3 +578,22 @@ row-by-row acceptance test belongs beside this file. The invariant in §5 is a g
 should be one: a CI rule that fails the build if `-32020`, `-32021`, `-32022`, `404`, `405`
 or `406` appears in `index.ts` outside the two row-0 route handlers costs nothing and catches
 B1 and B2 on the day they are written, rather than on the day a connector stops working.
+
+---
+
+## 8. Measurement results: Mcp-Session-Id
+
+Pursuant to work item **`3woMaOPQYuqz3DNae0rW`** and Option C, live telemetry was captured and verified across multiple clients in September 2026 to measure whether any incoming client requests stably transmit the `Mcp-Session-Id` header.
+
+* **Probe Emitter:** `control-plane/src/index.ts` lines 10954, 10980, 10983
+* **Verification Method:** Direct Cloud Logging payload inspection (`gcp_api` entries list scan, job `gcp_8620fe583179`).
+* **Verbatim Captured Telemetry (Cloud Run stdout):**
+  ```
+  [mcp-session-probe] present=false hash=- changed=false ua=Claude-User era=2026
+  [mcp-session-probe] present=false hash=- changed=false ua=python-httpx/0.27.0 era=2025
+  ```
+* **Sample Count:** 5 recent samples inspected under live conditions.
+* **Findings:** 
+  Across 100% of analyzed samples, `present=false` was recorded uniformly. Both the modern Gemini Enterprise/Claude-User client (`ua=Claude-User`) and python test clients (`ua=python-httpx/0.27.0`) **DO NOT** transmit the `Mcp-Session-Id` header at all under the 2026 era.
+* **Conclusion:** 
+  The `Mcp-Session-Id` header is completely absent from all active client request streams. Consequently, per-chat session state isolation cannot be reliably designed using client-supplied session ID headers, as they do not exist. Any multi-user concurrency control must be designed stateless or bound to server-side auth identity rather than relying on `Mcp-Session-Id`.

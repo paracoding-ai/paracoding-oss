@@ -88,6 +88,7 @@
     "POST /api/strains/provision",
     "POST /api/strains/retire",
     "POST /git/blob",
+    "POST /git/release-tree",
     "POST /mcp",
     "POST /mcp/:token",
     "POST /oauth/authorize/complete",

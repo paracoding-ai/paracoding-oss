@@ -47,8 +47,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PC_RELEASE="c48c6193531e54fefc20a4c987257ded431260fe"
-PC_VERSION="12.8"
+PC_RELEASE="210de8aacbb90a68a55461676a68ec88c077b3ce"
+PC_VERSION="13.4"
 
 die() { echo; echo "UPGRADE REFUSED: $*" >&2; exit 30; }
 command -v gcloud >/dev/null || die "gcloud not found. This script only talks to Google Cloud."
