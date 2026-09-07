@@ -6,7 +6,7 @@
 b053cdbcd3cfecaf     17311  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 78cc7525c53ed734      4150  NOTICE
-31b81309d4e72823     26435  README.md
+ef9d050bcaf00bf0     23961  README.md
 85415e5a80250934     16811  SECURITY.md
 52ad9e8b0d4fe12d    412307  install.sh
 a9692055a950925d     45532  uninstall.sh

@@ -130,13 +130,6 @@ Built the way it runs: Claude Max plans through Cowork, subagents fanned out acr
 engineering work in parallel, moving between plans when one ran hot — and never losing the
 thread, because the state was never in the chat.
 
-[![Launch day. On the left the Paracoding console, with the publisher strain listing the 48 MCP tools available to it and the full strain collection down the side. On the right Claude Max in Cowork, working through three open defects in this release and recording them to fleet memory for the next cut](docs/screenshots/04-built-with-claude.png)](docs/screenshots/04-built-with-claude.png)
-
-Launch day, unretouched. Left is this fleet's own console; right is Claude Max in Cowork — and
-the strains listed in one are the strains doing the work in the other. What Claude is working
-through on the right is three open defects in the release you are reading about, filed against
-the next cut. Publishing the screenshot with them still in it is deliberate.
-
 A thing that builds the things.
 
 ---
@@ -181,14 +174,6 @@ The Flow Hood is the control panel for that. It is where strains are created and
 where the per-strain session paste is generated for each chat harness -- so getting a second
 model onto the same fleet is a paste, not an integration.
 
-[![The full hybrid setup on one desktop: Claude Cowork on the left running the architect session, the Paracoding Flow Hood open in Cowork built-in browser in the middle showing the strain collection and the advisor strain status, and Grok on the right reporting release state back after being handed the engineering work](docs/screenshots/05-hybrid-claude-grok.png)](docs/screenshots/05-hybrid-claude-grok.png)
-
-Left to right: Claude Max in Cowork running the architect session; the Flow Hood open in
-Cowork's built-in browser, where the strains are created and the session pastes come from;
-and Grok in Chrome, driven by Claude in Chrome, reporting the release state it just measured.
-Three panes, two vendors, one GCP project, one git store. Unretouched, on the day 12.x was
-cut.
-
 ---
 
 ## It builds and deploys, end to end
@@ -197,18 +182,9 @@ Ask a strain in the console chat for a service, and it builds the container and 
 to Cloud Run in your project — then verifies the result anonymously and reports the HTTP
 code back.
 
-[![The console chat on the left, where Fleet GCP has built and deployed a calculator app to Cloud Run and reported a 200 OK; on the right, the deployed calculator running in a browser window](docs/screenshots/03-build-a-calculator.png)](docs/screenshots/03-build-a-calculator.png)
-
-Left is the chat, right is the app it just deployed. The strain list down the side is a fleet
-that has been running for a while — the release ships three strains and you grow the rest.
-
-[![The console chat asking Fleet GCP to build and deploy a hello-world app to Cloud Run, with the build and deployment summary and a 200 OK verification](docs/screenshots/01-build-and-deploy.png)](docs/screenshots/01-build-and-deploy.png)
-
 Everything configurable lives on one panel: theme, the model substrate (Claude or Gemini,
 3.8 Flash or 3.1 Pro), key rotation, the per-strain session pastes that give a chat its
 identity, and the Google accounts allowed to authorise an MCP connector.
-
-[![The settings panel showing appearance, model substrate selection, API key rotation, per-strain session pastes and allowed Google accounts](docs/screenshots/02-strain-settings.png)](docs/screenshots/02-strain-settings.png)
 
 ---
 
