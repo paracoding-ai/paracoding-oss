@@ -1891,7 +1891,7 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
   // nothing. An unrecognised key is REFUSED outright -- it is never downgraded to a weaker
   // role and never silently upgraded to a stronger one. That last direction is not
   // hypothetical: the first cut of this fell back to fleet-advisor, the one role permitted
-  // to stage gated jobs, so a single mistyped character PROMOTED a chat. fleet-courier found
+  // to stage gated jobs, so a single mistyped character PROMOTED a chat. fleet-curator found
   // it by mutating one character of its own key.
   // Impersonation is bounded by the key being unguessable and server-minted, NOT by any
   // claim in this file.
@@ -3159,7 +3159,7 @@ const ctxBuild = async () => {
     // posts exactly once (the loop breaks when there are no tool_use blocks) and, when the turn
     // carries no text, returns harChatNoTextReport(trace, stopReason, ...) which NAMES the stop
     // reason. Same request shape, same model, same spend -- strictly more information back.
-    const out: any = await harChatClaudeOps(apiModel, key, system, [{ role: 'me', text: user }], [], 'fleet-curator');
+    const out: any = await harChatClaudeOps(apiModel, key, system, [{ role: 'me', text: user }], [], 'fleet-drafter');
     // [PLANNER-SPEND-VISIBLE-V145] THE PLANNER AND THE REVIEWER WERE THE ONLY MODEL CALLS THIS
     // SERVICE MAKES THAT RECORDED THEIR SPEND NOWHERE. MEASURED 2026-09-07 on prod: no
     // token_usage row, no token_usage_gaps row, no journal entry, and no log line -- 14 hours
@@ -3174,7 +3174,7 @@ const ctxBuild = async () => {
     // harRecordUsage is the EXISTING recorder and the one place that decides measured-vs-gap;
     // it never throws, so a telemetry failure cannot break a planner answer. `what` is the tool
     // name, so claude_planner and claude_review separate in by_source rather than merging.
-    await harRecordUsage('fleet-curator', String(out.model || apiModel), what, out.usage);
+    await harRecordUsage('fleet-drafter', String(out.model || apiModel), what, out.usage);
     const u: any = out.usage || {};
     return String(out.text || '').trim() + '\n\n---\n[' + what
       + ' model=' + String(out.model || apiModel)
@@ -10056,7 +10056,7 @@ app.get('/git/archive', async (req: any, res: any) => {
     // [PCGIT-ARCHIVE-401-V1] A 401 THAT NAMES THE SCHEME, BECAUSE THE COMMONEST CAUSE IS
     // NOT A BAD KEY. Every other fleet tool takes its credential as ?agent= / ?key= /
     // ?session_key= on the query string; this route reads ONLY the Authorization header.
-    // A perfectly valid key passed the fleet-drafter way therefore failed here with the
+    // A perfectly valid key passed the fleet-editor way therefore failed here with the
     // identical opaque body a revoked key produced, and callers concluded their credential
     // had been revoked and went looking for the wrong fault. The body now separates the two.
     const _hdr = String((req.get && req.get('authorization')) || '');
@@ -10898,7 +10898,7 @@ async function pcResolveIdentity(req: any): Promise<any> {
   // character in a pasted key did not degrade a chat to a weaker role -- it SILENTLY
   // PROMOTED it to fleet-advisor, the one role permitted to stage gated jobs and supersede
   // every other chat's pending work. Fail-open, on the identity check itself.
-  // fleet-courier found it by mutating one character of its own key, which is the test that
+  // fleet-curator found it by mutating one character of its own key, which is the test that
   // should have existed before this shipped.
   // PC_ENFORCE governs the NO-KEY case ONLY -- letting chats that predate the mechanism
   // keep working through the cutover is the entire reason that flag exists. It is not a

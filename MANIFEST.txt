@@ -2,12 +2,12 @@
 # generated from source commit 210de8aacbb90a68a55461676a68ec88c077b3ce
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
-f17d2f2a61162eab        13  CONTRIBUTING.md
-af26371636073031         9  FEATURES.md
-bead537895379e59         8  LICENSE
-025ec39822ffd96b         7  NOTICE
+ba83c2938f3921ba      6182  CONTRIBUTING.md
+ec8a69e131708bde     17317  FEATURES.md
+8034721f4d468411     11353  LICENSE
+795b3361bea6a1df      4166  NOTICE
 31b81309d4e72823     26435  README.md
-2a801d12ec98ff2a        25  SECURITY.md
+85415e5a80250934     16811  SECURITY.md
 0f0fc34566260096    412307  install.sh
 a9692055a950925d     45532  uninstall.sh
 de92acfe68e0d981     14689  upgrade.sh
@@ -29,7 +29,7 @@ a945184f44c56f9f     38888  control-plane/src/ghtools.ts
 63f522f4fa290214    132358  control-plane/src/gittools.ts
 67596eadcc4423bb     28968  control-plane/src/gppatch.ts
 caa5f22bcc7d2227    176812  control-plane/src/harness.html
-17214e515cbc5d30    839141  control-plane/src/index.ts
+5aa021e6c561d7a1    839140  control-plane/src/index.ts
 22db75f0e21c8e3d      9314  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
 3788869547c9b7ce     33245  control-plane/src/mcp2026.ts
