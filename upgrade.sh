@@ -47,7 +47,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PC_RELEASE="210de8aacbb90a68a55461676a68ec88c077b3ce"
+PC_RELEASE="d8d73977596145165fd28eb9c661f74821341d2d"
 PC_VERSION="13.4"
 
 die() { echo; echo "UPGRADE REFUSED: $*" >&2; exit 30; }

@@ -56,7 +56,7 @@ the auth they require.
   forgeable. The session layer fails closed rather than degrading.
 - **Org policy** (`allowedPolicyMemberDomains`) makes out-of-domain access *impossible to
   grant*, not merely discouraged — enforced when the binding is written.
-- **401 served in place**, at the URL you asked for. No `?next=` redirect, so no omission
+- **401 served in place**, at the URL you asked for. No `?next=` redirect, so no enumeration
   oracle and no browser credential dialog.
 - **An approval is bound to *one job id and one command digest*** — the KMS signature covers
   both, and an edited command is refused by the executor. A generic "this browser
@@ -122,7 +122,8 @@ either generation connects to one URL and gets the protocol it speaks.
 - **The two branches cannot leak into each other.** The modern error codes `-32020` /
   `-32021` / `-32022` and the HTTP `404` / `405` / `406` answers exist in the modern file and
   nowhere else, so a legacy request can never be answered in a dialect it does not know.
-- **The v2 SDK is asserted at boot, not at first use.** A dedicated module checks that the\n  dependency resolves *and* exposes `createMcpHandler`, and throws — deliberately uncaught —
+- **The v2 SDK is asserted at boot, not at first use.** A dedicated module checks that the
+  dependency resolves *and* exposes `createMcpHandler`, and throws — deliberately uncaught —
   if it does not. A broken dependency fails the boot, so Cloud Run keeps serving the previous
   good revision instead of routing traffic to a green container missing a capability.
 - **`DELETE /mcp` is registered on purpose.** The modern transport mints no session, so
@@ -188,7 +189,7 @@ so agent clients other than this project's own console can reach the control pla
 - **Guardrails are one switch** (`PC_GUARDRAILS`), off by default per the operator's ruling,
   on for anyone who wants the brakes.
 - **A binary PATH jail.** The approved script runs with `PATH` restricted to a directory of
-  symlinks to an enumerated set of binaries, so an unlisted command does not resolve — `gsutil`
+  symlinks to an enumerated set of binaries, so an unlisted binary does not resolve — `gsutil`
   and `ssh` answer `command not found`. Shell builtins and keywords do not resolve through
   `PATH`, so an ordinary `set -uo pipefail` preamble is unaffected. Command substitution, pipes
   and `xargs` resolve through `PATH` too, so they are covered rather than evaded.
@@ -200,7 +201,7 @@ so agent clients other than this project's own console can reach the control pla
 - **Corrections supersede, never overwrite.** Retracted history stays readable, so you can
   tell a corrected claim from a current one.
 - **Three layers, read in order when something is disputed**: the graph, then the journal
-  (journal written by services — the audit trail), then history (written by agents — what an agent
+  (written by services — the audit trail), then history (written by agents — what an agent
   *believed*, including claims later retracted).
 - `whoami` **delivers** the digest rather than telling an agent to go and read it.
 
