@@ -16,7 +16,8 @@ version stated the opposite just as plainly.
 A CLA has exactly one real function for a project like this: it lets the
 maintainer **relicense the code in the future** without asking every past
 contributor. Dropping it closes that door, and we are closing it on purpose.
-**This code is Apache-2.0 and it stays Apache-2.0.** Once outside contributions\nland, relicensing would need each contributor's individual consent, and some of
+**This code is Apache-2.0 and it stays Apache-2.0.** Once outside contributions
+land, relicensing would need each contributor's individual consent, and some of
 them will be unreachable in five years. That is the point. It is a promise you
 can verify rather than one you have to trust.
 

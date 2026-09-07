@@ -122,8 +122,7 @@ either generation connects to one URL and gets the protocol it speaks.
 - **The two branches cannot leak into each other.** The modern error codes `-32020` /
   `-32021` / `-32022` and the HTTP `404` / `405` / `406` answers exist in the modern file and
   nowhere else, so a legacy request can never be answered in a dialect it does not know.
-- **The v2 SDK is asserted at boot, not at first use.** A dedicated module checks that the
-  dependency resolves *and* exposes `createMcpHandler`, and throws — deliberately uncaught —
+- **The v2 SDK is asserted at boot, not at first use.** A dedicated module checks that the\n  dependency resolves *and* exposes `createMcpHandler`, and throws — deliberately uncaught —
   if it does not. A broken dependency fails the boot, so Cloud Run keeps serving the previous
   good revision instead of routing traffic to a green container missing a capability.
 - **`DELETE /mcp` is registered on purpose.** The modern transport mints no session, so
