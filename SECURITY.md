@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v13.4**
+**Paracoding — v14.0**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim
@@ -77,7 +77,12 @@ This release supports a keyless connector configuration (`PC_NOCARD_EXEC=1` and 
 3. **Disabled Refusal Guardrails:** `PC_GUARDRAILS=0` is set across the control plane, MCP, and the gate executor. Platform-level destructive command and lockout-class checks classify and journal actions but do not block execution.
 4. **Suppressed Confirmation Cards:** `PC_NOCARD_EXEC=1` and `PC_NOCARD_ALL=1` are active on the serving MCP container, which advertises `readOnlyHint:true` for all classified tools. This suppresses all client-side review and confirmation cards.
 
-The composition of these four layers results in an unauthenticated-to-the-user, unreviewed, and unrefused shell directly integrated with the GCP REST surface for whoever accesses the Gemini Enterprise custom connector. While designed to accelerate engineering loops for a single-operator environment, this posture bypasses all human-in-the-loop validation gates. The primary and only active defense for this environment is `strains.tool_classes` — restricting the strain to a safe set of tools (e.g., `['read']`) directly inside Firestore. **Operator Ruling (2026-09-07):** The recommendation to restrict this specific strain is withdrawn; as the primary engineering surface, `fleet-courier` retains all 59 tools. The designated mitigation for multi-user exposure is to explicitly bind additional users to their own individual strains (mapping their Google accounts under `strains.oauth_email`), rather than restricting the primary engineering strain.
+The composition of these four layers results in an unauthenticated-to-the-user, unreviewed, and unrefused shell directly integrated with the GCP REST surface for whoever accesses the Gemini Enterprise custom connector. While designed to accelerate engineering loops for a single-operator environment, this posture bypasses all human-in-the-loop validation gates. The active defenses for this environment comprise four layers:
+1. **`strains.tool_classes` restrictions**: Restricting the strain to a safe set of tools (e.g., `['read']`) directly inside Firestore.
+2. **KMS-signed command pins**: The executor strictly refuses any script whose sha256 does not match what was KMS-signed.
+3. **IAM ceiling**: The executor service account (`fleet-gate-exec-sa`) lacks permissions to read or redeploy its parent (`fleet-gate-exec`), preventing circular privilege escalation (see `deploy/LOCKOUT-CLASS.md` "THE SECOND ARM").
+4. **Git compare-and-swap mechanics**: Prevent blind overrides of repository states by requiring an explicit base OID assertion without force pushes, keeping previous revisions recoverable.
+**Operator Ruling (2026-09-07):** The recommendation to restrict this specific strain is withdrawn; as the primary engineering surface, `fleet-courier` retains all 59 tools. The designated mitigation for multi-user exposure is to explicitly bind additional users to their own individual strains (mapping their Google accounts under `strains.oauth_email`), rather than restricting the primary engineering strain.
 
 ## Who can reach the console
 

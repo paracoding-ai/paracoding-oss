@@ -1,4 +1,4 @@
-# Paracoding — v13.4
+# Paracoding — v14.0
 
 **An MCP connector that gives a chat hands on your own Google Cloud project.**
 

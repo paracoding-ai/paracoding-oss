@@ -808,6 +808,12 @@ const PC_TOOL_CLASS: any = {
   // and return text, and neither touches the lake, the repository, the queue or the executor.
   claude_planner: 'read',
   claude_review: 'read',
+  // [OPUS-COURSE-CORRECT-V148] claude_opus is 'read' for the same reason, with one difference
+  // worth stating rather than hiding: unlike the two above it CAN be handed tools, so "returns
+  // text" stays true and "takes only text" does not. What it is handed is the CALLER'S OWN
+  // admitted surface filtered to this very class, so the annotation is not a claim about the
+  // tool's manners -- it is the same claim the class makes everywhere, enforced by this table.
+  claude_opus: 'read',
   git_propose: 'write',
   git_propose_patch: 'write',
   git_push: 'write',
@@ -1891,7 +1897,7 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
   // nothing. An unrecognised key is REFUSED outright -- it is never downgraded to a weaker
   // role and never silently upgraded to a stronger one. That last direction is not
   // hypothetical: the first cut of this fell back to fleet-advisor, the one role permitted
-  // to stage gated jobs, so a single mistyped character PROMOTED a chat. fleet-curator found
+  // to stage gated jobs, so a single mistyped character PROMOTED a chat. fleet-drafter found
   // it by mutating one character of its own key.
   // Impersonation is bounded by the key being unguessable and server-minted, NOT by any
   // claim in this file.
@@ -1970,7 +1976,7 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
     });
 
   server.registerTool('list_work_items',
-    { description: 'List work items. BOUNDED BY DEFAULT: returns id, title, role, status and a payload SIZE HINT, not the payload itself, so the queue cannot flood your context. ids:["<id>","<id>"] reads those items IN FULL and is how you read a payload. detail:true expands every match and is NOT budgeted. status defaults to any; "all" means the same thing explicitly.',
+    { description: 'List work items. BOUNDED BY DEFAULT: returns id, title, role, status and a payload SIZE HINT, not the payload itself, so the queue cannot flood your context. ids:["<id>","<id>"] reads those items IN FULL and is how you read a payload. detail:true expands every match and is NOT budgeted. status: omit or "all" for every item, "open" for everything not completed or cancelled, or one of pending / in_progress / blocked / error / completed / cancelled. ANY OTHER VALUE IS REFUSED BY NAME rather than answered with an empty list -- an unknown status used to match nothing and read exactly like an empty queue.',
       inputSchema: { role: z.string().optional(), status: z.string().optional(), ids: z.array(z.string()).optional(), detail: z.boolean().optional(), limit: z.number().optional(), ...AG } },
     async ({ role, status, ids, detail, limit }: any) => {
       // WHY THIS TOOL IS NOT TEN LINES ANY MORE. It used to JSON.stringify whole
@@ -2016,34 +2022,109 @@ async function buildMcpServer(agentId: string, keyClasses?: any): Promise<any> {
           truncated: ids.length > 25 ? 'only the first 25 ids were read' : undefined,
           items: out }, null, 2) }] };
       }
-      let q: any = db.collection('work_items');
-      if (role) q = q.where('assigned_role', '==', role);
-      if (status && status !== 'all') q = q.where('status', '==', status);
-      const snap = await q.limit(lim).get();
-      const matched = snap.docs.length;
+      // [WORKITEM-STATUS-VOCAB-V149] AN UNKNOWN STATUS USED TO MATCH NOTHING AND SAY NOTHING.
+      // MEASURED 2026-09-07: a GE chat asked for status:"open", got count:0 with no complaint,
+      // concluded the queue was EMPTY, went looking in handoff prose instead, and rendered a
+      // five-item backlog of which FOUR were already completed -- while EIGHT genuinely pending
+      // items sat here unread. The stored vocabulary is pending / in_progress / blocked / error /
+      // completed / cancelled. "open" is not a value any document has ever carried, so the
+      // where() clause matched zero rows and the tool reported that absence as a fact.
+      // TWO CHANGES, AND THE FIRST IS THE ONE THAT MATTERS.
+      // (1) "open" NOW MEANS WHAT EVERY CALLER ALREADY THINKS IT MEANS -- not completed and not
+      //     cancelled -- which is the definition [DEC-CLOSE-V1] already uses below. Firestore
+      //     has no != in a where(), so it is a filter after the read, and the read is WIDENED to
+      //     compensate rather than quietly returning a short list because the newest rows
+      //     happened to be closed ones.
+      // (2) ANYTHING ELSE IS REFUSED BY NAME, with the valid set in the error. A status this
+      //     collection has never held is a caller error, and answering it with an empty list is
+      //     indistinguishable from an empty queue. Refusing costs one round trip. The silent
+      //     zero cost an entire backlog and produced a fabricated one in its place.
+      const PC_WI_CLOSED = ['done', 'completed', 'cancelled'];
+      const PC_WI_KNOWN = ['pending', 'in_progress', 'blocked', 'error', 'done', 'completed', 'cancelled'];
+      const _st = String(status || '').trim().toLowerCase();
+      const _stAny = (!_st || _st === 'all' || _st === 'any');
+      const _stOpen = (_st === 'open');
+      if (!_stAny && !_stOpen && PC_WI_KNOWN.indexOf(_st) < 0) {
+        return { content: [{ type: 'text', text: JSON.stringify({
+          error: 'unknown status: ' + _st,
+          valid: ['open', 'all'].concat(PC_WI_KNOWN),
+          hint: 'No work item has ever carried that status, so filtering on it would return an empty list that reads exactly like an empty queue. Use "open" for everything not done, completed or cancelled, or "all" for every item.' }, null, 2) }], isError: true };
+      }
+      // [WORKITEM-OPEN-SCAN-V152] THE "open" READ WAS BOUNDED AND THEREFORE STRUCTURALLY BLIND.
+      // MEASURED 2026-09-07, minutes after the 'done' fix above: this collection holds 601
+      // documents. "open" fetched a 300-document window ordered by document id and filtered it
+      // in memory, so it reported 10 open items when a server-side count query says 19. Every
+      // open item whose id sorted past the window edge was invisible -- and the result carried
+      // NO warning, because from the filter's point of view nothing had been dropped. A bounded
+      // read filtered after the fact is the silent zero wearing a smaller hat.
+      // "open" now PAGES the whole collection with a document-id cursor and filters as it goes.
+      // WHY PAGE RATHER THAN FILTER SERVER-SIDE: a status NOT_IN query alone runs fine, but
+      // combined with the assigned_role equality Firestore refuses it for want of a composite
+      // index (verified 2026-09-07: FAILED_PRECONDITION on assigned_role+status). Equality on
+      // assigned_role plus orderBy __name__ needs no composite index, so this path works for
+      // every caller with no index to create and none to forget.
+      const _q0: any = role ? db.collection('work_items').where('assigned_role', '==', role)
+                            : db.collection('work_items');
+      let docs: any[] = [];
+      let open_total = 0;
+      let scan_capped = false;
+      if (_stOpen) {
+        const PAGE = 500, CEILING = 20000;
+        let scanned = 0, cursor: any = null;
+        for (;;) {
+          let p: any = _q0.orderBy('__name__').limit(PAGE);
+          if (cursor) p = p.startAfter(cursor);
+          const s = await p.get();
+          if (s.empty) break;
+          scanned += s.docs.length;
+          for (const d of s.docs) {
+            if (PC_WI_CLOSED.indexOf(String((d.data() || {}).status || '')) < 0) docs.push(d);
+          }
+          cursor = s.docs[s.docs.length - 1];
+          if (s.docs.length < PAGE) break;
+          if (scanned >= CEILING) { scan_capped = true; break; }
+        }
+        open_total = docs.length;
+        docs = docs.slice(0, lim);
+      } else {
+        const s = await (_stAny ? _q0 : _q0.where('status', '==', _st)).limit(lim).get();
+        docs = s.docs;
+      }
+      const matched = docs.length;
       if (detail) {
         // detail:true is the caller explicitly asking for everything and accepting the
         // cap's truncation. It is deliberately NOT budgeted: budgeting it would drop
         // items on the one path whose entire purpose is completeness.
         return { content: [{ type: 'text', text: JSON.stringify({ mode: 'detail',
-          count: matched, limit: lim, detail: true, items: snap.docs.map(whole) }, null, 2) }] };
+          count: matched, limit: lim, detail: true,
+          open_total: (_stOpen && open_total > matched) ? open_total : undefined,
+          scan_capped: scan_capped ? true : undefined,
+          items: docs.map(whole) }, null, 2) }] };
       }
       const items: any[] = [];
       let used = 0;
-      for (const d of snap.docs) {
+      for (const d of docs) {
         const row = proj(d);
         const cost = JSON.stringify(row).length + 1;
         if (used + cost > SUM_BUDGET) break;
         used += cost; items.push(row);
       }
       const dropped = matched - items.length;
+      const cut_by_limit = (_stOpen && open_total > matched) ? (open_total - matched) : 0;
+      const short = (dropped > 0 || cut_by_limit > 0 || scan_capped);
       // Summary is emitted COMPACT; the indent is ~30% of a summary result and buys
       // nothing a machine reads. detail keeps the indent -- there a person is reading
       // the payload.
       return { content: [{ type: 'text', text: JSON.stringify({ mode: 'summary',
         count: items.length, matched, limit: lim, detail: false,
+        open_total: cut_by_limit > 0 ? open_total : undefined,
+        scan_capped: scan_capped ? true : undefined,
         dropped_for_budget: dropped > 0 ? dropped : undefined,
-        note: dropped > 0 ? ('THIS LIST IS SHORT BY ' + dropped + ' ITEM(S): the character budget ran out, NOT the queue. Narrow with role/status, or pass a smaller limit.') : undefined,
+        note: short ? ('THIS LIST IS SHORT, AND THE QUEUE IS NOT: '
+          + (cut_by_limit > 0 ? ('limit=' + lim + ' cut ' + cut_by_limit + ' open item(s) of ' + open_total + '; ') : '')
+          + (dropped > 0 ? ('the character budget cut ' + dropped + ' more; ') : '')
+          + (scan_capped ? 'AND the scan ceiling was reached, so the collection was NOT read to the end; ' : '')
+          + 'raise limit, or narrow with role.') : undefined,
         legend: 'pk=payload key count, pc=payload chars, at=created_at epoch seconds',
         hint: 'payload omitted -- call again with ids:["<id>","<id>"] to read them in full',
         items }, null, 0) }] };
@@ -2610,15 +2691,17 @@ const ctxBuild = async () => {
     });
 
   server.registerTool('complete_work_item',
-    { description: 'Close a work item (bookkeeping; any role may close). Sets status=completed, records who closed it, and journals it.',
-      inputSchema: { id: z.string(), note: z.string().optional(), ...AG } },
+    { description: 'Close a work item. evidence_oid is REQUIRED and the SERVER resolves it: pass the 40-hex oid of the commit that carries the work, and this refuses to close the item unless that commit exists in this repository. You cannot forge it, because you do not do the lookup. WHY IT IS HERE, MEASURED 2026-09-07: an agent reported six review items complete, with detailed per-item "Actions Taken", and none of it had happened -- no commit, no document changed, all six still pending -- and nothing in the system objected. post_work_item already demands cited evidence to OPEN an item; closing one demanded nothing at all, and that asymmetry was the whole defect. SOME ITEMS HONESTLY HAVE NO COMMIT -- a measurement, a negative result, a duplicate: pass evidence_oid:"none" WITH a reason of at least 20 characters saying what was done instead. That is stored on the item and named in the journal line, so it is a decision somebody can go and read rather than a silent default.',
+      inputSchema: { id: z.string(), evidence_oid: z.string(), reason: z.string().optional(), note: z.string().optional(), ...AG } },
     async (a: any) => {
       const ref = db.collection('work_items').doc(a.id);
       const snap = await ref.get();
       if (!snap.exists) return { content: [{ type: 'text', text: `no work item ${a.id}` }] };
-      await ref.update({ status: 'completed', completed_by: who(a), completed_at: FieldValue.serverTimestamp() });
-      await db.collection('journal').add({ agent_id: who(a), action: 'complete_work_item', message: `Completed work item ${a.id}${a.note ? ': ' + a.note : ''}.`, timestamp: FieldValue.serverTimestamp() });
-      return { content: [{ type: 'text', text: `completed work item ${a.id} as ${who(a)}` }] };
+      const ev: any = await pcCompletionEvidence(a.evidence_oid, a.reason);
+      if (!ev.ok) return { content: [{ type: 'text', text: ev.refusal }] };
+      await ref.update({ status: 'completed', completed_by: who(a), completed_at: FieldValue.serverTimestamp(), completion_evidence: ev.evidence });
+      await db.collection('journal').add({ agent_id: who(a), action: 'complete_work_item', message: `Completed work item ${a.id} [${ev.line}]${a.note ? ': ' + a.note : ''}.`, timestamp: FieldValue.serverTimestamp() });
+      return { content: [{ type: 'text', text: `completed work item ${a.id} as ${who(a)} -- ${ev.line}` }] };
     });
 
   server.registerTool('cancel_work_item',
@@ -3003,8 +3086,32 @@ const ctxBuild = async () => {
     });
 
   // ---- Agent-to-agent messaging: a shared inbox, answered by the target's next session ----
+  // [GE-AGENT-ONE-DOOR-V156] WHO MAY REACH THE MODEL ADVISORS AT ALL. Registered below only
+  // for these roles; everyone else does not have claude_opus / claude_planner / claude_review
+  // in their tool list, so a harness that retrieves declarations from the words of a message
+  // cannot find them however the sentence is phrased. That is the point: Gemini Enterprise now
+  // reaches Opus through a registered AGENT, and on 2026-09-08 the words "advisor" and "review"
+  // in a request to use that agent retrieved the MCP skill claude_review instead and called it.
+  // Two doors to the same place, one of them unreliable, is the defect -- not the phrasing.
+  // NOT DELETED, BECAUSE THE AGENT IS THE REASON THEY EXIST: the Agent Runtime deployment calls
+  // claude_opus over /mcp as this strain, so the tool is that agent's own back end.
+  const PC_ADVISOR_ROLES = String(process.env.PC_ADVISOR_ROLES || 'fleet-curator')
+    .split(',').map((s: string) => s.trim().toLowerCase()).filter(Boolean);
+  const PC_ADVISOR_OK = PC_ADVISOR_ROLES.indexOf(String(agentId || '').trim().toLowerCase()) >= 0;
+  const PC_ADVISOR_ELSEWHERE = 'REFUSED: the model advisors are not reachable from this role.'
+    + ' They are registered only for ' + PC_ADVISOR_ROLES.join(', ') + ', which is the identity the'
+    + ' Gemini Enterprise agents run as. IF YOU ARE A CHAT, SELECT THE AGENT INSTEAD -- "Paracoding'
+    + ' Fleet Advisor (Opus)" for anything that must be checked against the real repository or'
+    + ' infrastructure, "Paracoding Fleet Planner" to turn a goal into an ordered plan. Picking the'
+    + ' agent by name is deterministic; matching a tool out of the words of a sentence is not, which'
+    + ' is exactly why this refuses instead of answering. NOTHING WAS SENT TO A MODEL.';
+  // The ONLY registration path for an advisor tool, so one that should be gated cannot be added
+  // later by copying the ungated form standing next to it.
+  const advisorTool = (name: string, spec: any, handler: any) => {
+    if (PC_ADVISOR_OK) server.registerTool(name, spec, handler);
+  };
   server.registerTool('ask_agent',
-    { description: "Ask another fleet role a question with no human relay. Writes to the shared inbox; the target's next session answers. Returns a message id to check_answer.",
+    { description: "Ask another fleet role a question with no human relay. It writes to the shared inbox and the target's next session answers, so NOTHING ANSWERS IT NOW -- do not wait for a reply or poll for one. Returns a message id to check_answer. The model advisors (claude_opus, claude_planner, claude_review) are NOT reachable here unless your role is allowlisted for them: a chat reaches Opus by selecting the 'Paracoding Fleet Advisor (Opus)' agent, which is deterministic, rather than by naming a tool in a sentence, which is not.",
       inputSchema: { to: z.string(), question: z.string(), context: z.string().optional(), urgency: z.string().optional(), ...AG } },
     async (a: any) => {
       // [CLAUDE-PLANNER-ASKAGENT-V136] REACHABLE THROUGH A TOOL THE HARNESS ALREADY KNOWS.
@@ -3019,20 +3126,54 @@ const ctxBuild = async () => {
       // in on it and works in an unmodified GE chat today.
       // THE DEDICATED TOOLS ARE NOT REMOVED: clients that CAN see new tools (Cowork, Grok) should
       // call claude_planner directly, and this branch is the compatibility door for GE.
-      const _pcTo = String(a.to || '').trim().toLowerCase().replace(/-/g, '_');
-      if (_pcTo === 'claude_planner' || _pcTo === 'planner') {
+      // [ASKAGENT-ROUTE-FUZZY-V154] THE MATCH WAS EXACT AND THE FALL-THROUGH WAS SILENT, AND
+      // TOGETHER THEY COST A WHOLE TURN. MEASURED 2026-09-08: the operator said the documented
+      // sentence, GE called ask_agent for claude_opus, and the `to` it sent did not survive an
+      // exact match against a two-item list -- so no branch fired, the request became an
+      // agent_messages row nobody reads, and this tool answered "asked <to> (msg <id>)". The
+      // chat reported the message DELIVERED and then spent nine tool calls hunting the inbox,
+      // the lake and its own history for a reply that was never coming. A misroute that answers
+      // like a success is the same defect as a filter that returns zero and calls it an answer.
+      // (1) NORMALISE HARD, THEN MATCH ON SUBSTRING: every non-alphanumeric character is
+      //     stripped, so "Claude Opus", "claude-opus", "claude_opus_5" and "Opus" all land on
+      //     the same branch. An exact-match list is a spelling test the caller was never told
+      //     it was sitting, and the caller here is a harness that rewrites its own arguments.
+      // (2) THE INBOX PATH SAYS WHAT IT DID -- see the refusal text at the bottom of this tool.
+      const _pcRaw = String(a.to || '').trim();
+      const _pcTo = _pcRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
+      // [GE-AGENT-ONE-DOOR-V156] Refuse rather than park. Falling through to the inbox would
+      // write the request somewhere nobody reads and answer "PARKED", which is true but useless
+      // to a caller that wanted an advisor; this says where the advisor actually is.
+      if (!PC_ADVISOR_OK && (_pcTo.indexOf('planner') >= 0 || _pcTo.indexOf('review') >= 0 || _pcTo.indexOf('opus') >= 0)) {
+        return { content: [{ type: 'text', text: PC_ADVISOR_ELSEWHERE }], isError: true };
+      }
+      if (_pcTo.indexOf('planner') >= 0) {
         const _q = 'REQUEST:\n' + String(a.question || '')
           + (a.context ? ('\n\nCONTEXT THE EXECUTOR HAS ALREADY GATHERED:\n' + String(a.context)) : '');
         return { content: [{ type: 'text', text: await pcClaudeAsk(PC_PLANNER_SYSTEM, _q, 'claude_planner') }] };
       }
-      if (_pcTo === 'claude_review' || _pcTo === 'reviewer' || _pcTo === 'review') {
+      if (_pcTo.indexOf('review') >= 0) {
         const _q = 'PLAN:\n' + String(a.question || '')
           + '\n\nWHAT WAS ACTUALLY DONE AND WHAT THE TOOLS RETURNED:\n' + String(a.context || '');
         return { content: [{ type: 'text', text: await pcClaudeAsk(PC_REVIEW_SYSTEM, _q, 'claude_review') }] };
       }
+      // [OPUS-COURSE-CORRECT-V148] Same door, same reason as the two branches above: claude_opus
+      // is a NEW TOOL NAME and is therefore invisible to every GE chat until the connector is
+      // re-synced, while `to` is a free string on a tool GE already has. This is how it is
+      // reachable from an unmodified GE chat on the day it deploys.
+      if (_pcTo.indexOf('opus') >= 0) {
+        return { content: [{ type: 'text', text: await pcOpusAsk('SITUATION:\n' + String(a.question || '') + (a.context ? ('\n\nWHAT THE WORKER HAS ALREADY DONE OR BELIEVES:\n' + String(a.context)) : ''), who(a)) }] };
+      }
       const ref = db.collection('agent_messages').doc();
       await ref.set({ id: ref.id, from: who(a), to: a.to, question: a.question, context: a.context || '', urgency: a.urgency || 'normal', status: 'open', answer: '', created_at: FieldValue.serverTimestamp() });
-      return { content: [{ type: 'text', text: `asked ${a.to} (msg ${ref.id})` }] };
+      return { content: [{ type: 'text', text: 'PARKED, NOT ANSWERED. "' + _pcRaw + '" is not one of the model'
+        + ' advisors (claude_opus, claude_planner, claude_review), so this was written to the shared inbox as'
+        + ' message ' + ref.id + ' for the role you named. NOTHING HAS ANSWERED IT, and nothing will until a'
+        + ' session running AS THAT ROLE reads its inbox -- there is no daemon and no queue worker. Do NOT wait'
+        + ' for a reply, do NOT poll the inbox, the lake or the work items for one, and do NOT report this as'
+        + ' delivered-and-pending: it is parked, possibly for days. IF YOU MEANT THE READ-ONLY ADVISOR THAT'
+        + ' ANSWERS INSIDE THIS CALL, retry with to:"claude_opus" -- it reads the repository with real tools and'
+        + ' returns a numbered work list before this turn ends.' }] };
     });
 
   server.registerTool('list_my_messages',
@@ -3159,7 +3300,7 @@ const ctxBuild = async () => {
     // posts exactly once (the loop breaks when there are no tool_use blocks) and, when the turn
     // carries no text, returns harChatNoTextReport(trace, stopReason, ...) which NAMES the stop
     // reason. Same request shape, same model, same spend -- strictly more information back.
-    const out: any = await harChatClaudeOps(apiModel, key, system, [{ role: 'me', text: user }], [], 'fleet-drafter');
+    const out: any = await harChatClaudeOps(apiModel, key, system, [{ role: 'me', text: user }], [], 'fleet-engineer');
     // [PLANNER-SPEND-VISIBLE-V145] THE PLANNER AND THE REVIEWER WERE THE ONLY MODEL CALLS THIS
     // SERVICE MAKES THAT RECORDED THEIR SPEND NOWHERE. MEASURED 2026-09-07 on prod: no
     // token_usage row, no token_usage_gaps row, no journal entry, and no log line -- 14 hours
@@ -3174,7 +3315,7 @@ const ctxBuild = async () => {
     // harRecordUsage is the EXISTING recorder and the one place that decides measured-vs-gap;
     // it never throws, so a telemetry failure cannot break a planner answer. `what` is the tool
     // name, so claude_planner and claude_review separate in by_source rather than merging.
-    await harRecordUsage('fleet-drafter', String(out.model || apiModel), what, out.usage);
+    await harRecordUsage('fleet-engineer', String(out.model || apiModel), what, out.usage);
     const u: any = out.usage || {};
     return String(out.text || '').trim() + '\n\n---\n[' + what
       + ' model=' + String(out.model || apiModel)
@@ -3185,7 +3326,7 @@ const ctxBuild = async () => {
       + ' cache_write=' + Number(u.cache_creation_input_tokens || 0)
       + ' cache_read=' + Number(u.cache_read_input_tokens || 0) + ']';
   };
-  server.registerTool('claude_planner',
+  advisorTool('claude_planner',
     { description: "Ask Claude for a numbered, literally-executable plan before doing multi-step work. Call this FIRST for anything involving more than two tool calls. Changes no fleet state. The answer ends with the token counts it cost.",
       inputSchema: { request: z.string(), context: z.string().optional(), ...AG } },
     async (a: any) => {
@@ -3193,12 +3334,163 @@ const ctxBuild = async () => {
         + (a.context ? ('\n\nCONTEXT THE EXECUTOR HAS ALREADY GATHERED:\n' + String(a.context)) : '');
       return { content: [{ type: 'text', text: await pcClaudeAsk(PC_PLANNER_SYSTEM, user, 'claude_planner') }] };
     });
-  server.registerTool('claude_review',
+  advisorTool('claude_review',
     { description: "Ask Claude to check finished work against the tool results that back it. Pass the plan, every tool call and its key result, and the text of anything written. Answers 'VERDICT: OK' when nothing is wrong. Changes no fleet state. The answer ends with the token counts it cost.",
       inputSchema: { plan: z.string(), evidence: z.string(), ...AG } },
     async (a: any) => {
       const user = 'PLAN:\n' + String(a.plan || '') + '\n\nWHAT WAS ACTUALLY DONE AND WHAT THE TOOLS RETURNED:\n' + String(a.evidence || '');
       return { content: [{ type: 'text', text: await pcClaudeAsk(PC_REVIEW_SYSTEM, user, 'claude_review') }] };
+    });
+
+  // ---------------------------------------------------------------- [OPUS-COURSE-CORRECT-V148]
+  // WHAT THIS IS FOR, PLAINLY: the Gemini Enterprise chat does the engineering work on this fleet.
+  // It is fast, it is flat-rate and it is literal. What it is bad at is knowing what to do next
+  // when a workstream goes sideways, and its characteristic failure is narrating a plan as though
+  // it were a result. This is the thing it asks. It reads, it does not write, and what it hands
+  // back is a WORK LIST -- the expensive model decides, the flat-rate one does. That split is the
+  // whole point: an advisor that starts doing the work is a second actor in someone else's
+  // workstream, and this fleet paid for that mistake once already, on 2026-09-07.
+  //
+  // COST IS A FIRST-CLASS CONSTRAINT AND THE DIALS ARE REAL. Every round of a tool loop resends
+  // the whole conversation, so round four pays for rounds one to three again. The shared ceiling
+  // is HAR_CHAT_MAX_ROUNDS (16); this runs at PC_OPUS_MAX_ROUNDS (DEFAULT 6), and harChatClaudeOps
+  // only ever lets a caller lower that, never raise it. ONE ROUND IS NOT ONE LOOKUP: the loop
+  // executes EVERY tool_use block in a response before the next round, and this fleet's git_grep
+  // takes 32 queries at once and git_read 24 paths, so one round can sweep the tree wide.
+  // Tool results are truncated to PC_OPUS_RESULT_CAP (4000) in our own dispatcher, well under the
+  // loop's own 12000, because a result is re-sent on every later round and so is paid for more
+  // than once.
+  //
+  // THE DEFAULT WAS 1 UNTIL 2026-09-08, AND THE PARAGRAPH THAT JUSTIFIED IT SAID "the cache does
+  // NOT rescue a tool loop". That was true, and it was true because CACHING WAS BROKEN, not
+  // because a tool loop cannot be cached: cacheIdx was conv.length-2, which is -1 for this
+  // caller's single message, so the breakpoint never landed, and nothing marked the system block
+  // or the tool schemas at all. [CHAT-CACHE-PREFIX-V162] fixed both. MEASURED the same night on
+  // the deployed revision: call 1 cache_write=10956 cache_read=10956, calls 2 and 3
+  // cache_write=0 cache_read=21912 -- the whole system-plus-28-tool-schema prefix served from
+  // cache at a tenth of the price, on every round of every call.
+  //
+  // WHAT ONE ROUND ACTUALLY COST, MEASURED IN A LIVE GE TURN 2026-09-08: asked whether the
+  // oss/release chmod blocker was gone, this advisor spent its single round on whoami and the
+  // work item, ran out, and opened its answer with "I could not verify the mode-parameter claim
+  // itself -- I made no repo read. Everything below marked unverified is yours, not mine." An
+  // advisor that cannot check the claim it is handed is not cheap, it is decorative. Six is the
+  // smallest number that lets it read, follow what it found, and still stop well short of 16.
+  //
+  // IT SPENDS UNDER ITS OWN NAME. harRecordUsage('fleet-editor', ...) rather than riding the
+  // fleet-engineer bucket, so /api/usage and /api/dash/usage carry this as its own line. A counter
+  // in opus_budget/<YYYY-MM-DD> is read BEFORE the call and refuses over PC_OPUS_DAILY_CALLS, in
+  // text, naming what it has already spent today. A ceiling that tells you where you are is a
+  // budget; one that fails silently is a surprise.
+  //
+  // IT CANNOT SEE MORE THAN ITS CALLER. The toolset is harChatToolset(who(a)) -- the caller's own
+  // admitted surface -- filtered to PC_TOOL_CLASS === 'read'. A strain narrowed by tool_classes
+  // cannot widen itself by asking Opus to look on its behalf. The model tools come out of that
+  // set too: claude_opus reaching claude_planner reaching claude_opus is a spend loop with no
+  // natural bottom.
+  const PC_OPUS_TOOLS_ON = String(process.env.PC_OPUS_TOOLS || '1') === '1';
+  const PC_OPUS_MAX_ROUNDS = Math.max(1, Number(process.env.PC_OPUS_MAX_ROUNDS || 6) || 6);
+  const PC_OPUS_RESULT_CAP = Math.max(500, Number(process.env.PC_OPUS_RESULT_CAP || 4000) || 4000);
+  const PC_OPUS_DAILY_CALLS = Math.max(1, Number(process.env.PC_OPUS_DAILY_CALLS || 40) || 40);
+  const PC_OPUS_EFFORT = String(process.env.PC_OPUS_EFFORT || 'medium');
+  const PC_OPUS_NO_SELF = ['claude_opus', 'claude_planner', 'claude_review', 'ask_agent'];
+  const PC_OPUS_SYSTEM = [
+    'You are the course-corrector for a Gemini Enterprise chat that is doing the engineering work on',
+    'this fleet. YOU DO NOT DO THE WORK. You produce the work list that chat executes.',
+    '',
+    'WHO READS YOUR ANSWER. A Gemini Enterprise chat on this same control plane over MCP, holding the',
+    'tools you hold plus the write and executor ones. It is fast and it is literal. It goes wrong by',
+    'deciding it has finished something it has not, and by narrating a plan as though it were a result.',
+    '',
+    'FOUR MEASURED CONSTRAINTS OF THAT HARNESS. Every step you write must survive them.',
+    '1. GE retrieves tool declarations PER TURN from the words of the message. A step naming a tool must',
+    '   bind the tool name to the verb IN ONE SENTENCE. "use claude_planner to package the bundle" works;',
+    '   "use claude_planner" alone on a line, followed by a separate sentence, FAILS. Write steps that way.',
+    '2. A GE turn is cancelled at 15 minutes. Size every step to finish inside one turn.',
+    '3. About 190 tool round trips fit in a turn however fast the server answers, because most of the time',
+    '   is GE turnaround. Prefer batch-shaped steps: git_grep takes 32 queries at once and git_read takes',
+    '   24 paths at once. One batched call beats twenty serial ones.',
+    '4. Confirmation cards are suppressed on this install. Never write that something will ask to confirm.',
+    '',
+    'WHAT YOU RETURN, AND NOTHING ELSE:',
+    'FINDING -- what is true right now, at most five lines, each citing the file, line or command you read',
+    '  it from. If you did not read it, do not assert it.',
+    'COURSE CORRECTION -- the smallest change of direction that fixes it, or the words NO CHANGE NEEDED.',
+    'WORK LIST -- numbered steps. Each is one sentence of instruction plus a one-line acceptance test',
+    '  saying how the worker will KNOW it is done: a byte count, a returned oid, an HTTP code, a grep that',
+    '  must match. A step with no acceptance test is how work gets reported finished when it is not.',
+    'STOP CONDITIONS -- what should make the worker stop and come back rather than push on.',
+    'NEXT CHECKPOINT -- optional, and usually better than a long list. If the right move is to do a few',
+    '  steps and look again, say so: give those steps, then write the EXACT sentence the worker should send',
+    '  back, in the form "use claude_opus to <verb> ..." naming the results it must carry with it. You are',
+    '  bounded to a small number of tool rounds per call, so two focused passes see more of a tree than one',
+    '  sprawling pass, and a short list plus a checkpoint is cheaper and truer than a long list of guesses.',
+    '',
+    'EVIDENCE RULES. You have read-only tools. Use them before asserting anything about this tree: a plan',
+    'built on what the worker told you inherits whatever the worker misread, which is usually the whole',
+    'problem. You cannot write, deploy, commit or stage anything, and you must not say that you have.',
+    'Do not invent paths, oids, sizes or line numbers. Read them.',
+    '',
+    'BE SHORT. You are billed per token and the operator is watching the meter. Six real steps beat thirty',
+    'speculative ones.',
+  ].join('\n');
+  const pcOpusAsk = async (user: string, caller: string): Promise<string> => {
+    const key = await harKey('claude');
+    const rv: any = harChatResolved('claude', key);
+    const wire = rv.transport === 'vertex' ? 'vertex' : 'key';
+    const mode = await fleetMode();
+    if (!fleetTransportAllowed(mode, wire)) return fleetRefusalText(mode, 'claude_opus', wire);
+    const day = new Date().toISOString().slice(0, 10);
+    const bref = db.collection('opus_budget').doc(day);
+    let spent: any = {};
+    try { const bs: any = await bref.get(); spent = ((bs && bs.exists) ? bs.data() : {}) || {}; } catch (e) { spent = {}; }
+    const usedCalls = Number(spent.calls || 0);
+    if (usedCalls >= PC_OPUS_DAILY_CALLS) {
+      return 'REFUSED: claude_opus has already made ' + usedCalls + ' calls today (' + day + ' UTC), which is the'
+        + ' PC_OPUS_DAILY_CALLS ceiling. Spent so far today: in=' + Number(spent.input_tokens || 0)
+        + ' out=' + Number(spent.output_tokens || 0) + ' tokens. Raise PC_OPUS_DAILY_CALLS on the MCP service'
+        + ' to lift it, or wait for UTC midnight. NOTHING WAS SENT TO THE MODEL and nothing was billed.';
+    }
+    const apiModel = harOpus5(String(process.env.CHAT_API_OPUS || '') || HAR_OPUS5);
+    let toolset: any[] = [];
+    if (PC_OPUS_TOOLS_ON) {
+      try {
+        const full: any[] = await harChatToolset(caller || 'fleet-advisor');
+        toolset = full
+          .filter((t: any) => t && PC_TOOL_CLASS[String(t.name)] === 'read' && PC_OPUS_NO_SELF.indexOf(String(t.name)) < 0)
+          .map((t: any) => ({ name: t.name, description: t.description, schema: t.schema,
+            run: async (i: any) => String(await t.run(i || {})).slice(0, PC_OPUS_RESULT_CAP) }));
+      } catch (e: any) { toolset = []; }
+    }
+    const out: any = await harChatClaudeOps(apiModel, key, PC_OPUS_SYSTEM, [{ role: 'me', text: user }],
+      harClaudeToolWire(toolset as any), caller || 'fleet-advisor', harChatExec(toolset as any),
+      PC_OPUS_EFFORT, PC_OPUS_MAX_ROUNDS);
+    await harRecordUsage('fleet-editor', String(out.model || apiModel), 'claude_opus', out.usage);
+    const u: any = out.usage || {};
+    try {
+      await bref.set({ day: day, calls: FieldValue.increment(1),
+        input_tokens: FieldValue.increment(Number(u.input_tokens || 0)),
+        output_tokens: FieldValue.increment(Number(u.output_tokens || 0)) }, { merge: true });
+    } catch (e) {}
+    return String(out.text || '').trim() + '\n\n---\n[claude_opus'
+      + ' model=' + String(out.model || apiModel)
+      + ' effort=' + String(out.effort || '')
+      + ' transport=' + wire
+      + ' tools=' + toolset.length
+      + ' rounds<=' + PC_OPUS_MAX_ROUNDS
+      + ' in=' + Number(u.input_tokens || 0)
+      + ' out=' + Number(u.output_tokens || 0)
+      + ' cache_write=' + Number(u.cache_creation_input_tokens || 0)
+      + ' cache_read=' + Number(u.cache_read_input_tokens || 0)
+      + ' today=' + (usedCalls + 1) + '/' + PC_OPUS_DAILY_CALLS + ']';
+  };
+  advisorTool('claude_opus',
+    { description: "Ask Claude Opus to look at this fleet read-only and hand back a numbered work list for the worker chat to execute. Call it when a workstream has gone sideways, lost the thread, or needs deciding what to do next. It reads; it cannot write, commit, deploy or stage. Every answer ends with what it cost and how much of today's budget is left.",
+      inputSchema: { situation: z.string(), context: z.string().optional(), ...AG } },
+    async (a: any) => {
+      const user = 'SITUATION:\n' + String(a.situation || '')
+        + (a.context ? ('\n\nWHAT THE WORKER HAS ALREADY DONE OR BELIEVES:\n' + String(a.context)) : '');
+      return { content: [{ type: 'text', text: await pcOpusAsk(user, who(a)) }] };
     });
 
   // VERIFY-GREP: F13-JOBLOG-OWNERSHIP-V1
@@ -3218,8 +3510,89 @@ const ctxBuild = async () => {
     { description: 'Call ANY GCP REST endpoint (https://*.googleapis.com) directly — no gcloud, no Cloud Build, no VM. TRUST LADDER: blessed READS (GET on compute/run/storage/logging/monitoring in our project) run instantly as the least-privilege control-plane identity; if it is not permitted it auto-escalates to the gate. EVERYTHING else — any mutation, DELETE, IAM, Secret Manager, a brand-new API — goes through the executor and, with PC_AUTO_APPROVE=1 (THE SHIPPED DEFAULT -- install.sh sets it to 1), RUNS IN THIS CALL and returns { mode:"ran", result }. There is no approval step and no second confirmation; destructive verbs are still classified, but the classification decides what is journalled, not whether it happens. { mode:"staged" } comes back only when PC_AUTO_APPROVE is off, which is NOT how this ships. That is deliberate: the product accelerates security-minded agentic engineering, so every check that fails a CUT is kept and the per-call tap is not. Pass method (GET/POST/PATCH/DELETE...), url (full https), optional body (object), optional reason (why).', inputSchema: { method: z.string(), url: z.string(), body: z.record(z.string(), z.any()).optional(), reason: z.string().optional(), ...AG } },
     async (a: any) => { const r = await harGcpApi(who(a), a.method, a.url, a.body, a.reason || ''); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
   server.registerTool('run_status',
-    { description: 'List Cloud Run services in our project/region (blessed read via control-plane identity; auto-escalates to the gate if not permitted). Optional region (default us-east1, where our services live).', inputSchema: { region: z.string().optional(), ...AG } },
-    async (a: any) => { const region = a.region || process.env.GCP_REGION || 'us-east1'; const url = 'https://run.googleapis.com/v2/projects/' + (process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT) + '/locations/' + region + '/services'; const r = await harGcpApi(who(a), 'GET', url, null, 'run_status'); return { content: [{ type: 'text', text: JSON.stringify(r) }] }; });
+    { description: 'List Cloud Run services in our project/region: for each one the name, the latest created and latest ready revision, the revision(s) actually SERVING traffic with percent and tag, and the image tag. LATEST IS NOT SERVING on this fleet -- the control-plane services pin traffic to tagged revisions, so a deploy alone moves nothing and `serving` is the field to check before and after a promotion. Blessed read via the control-plane identity; auto-escalates to the gate if not permitted. Optional region (default us-east1, where our services live). detail:true returns the raw Cloud Run v2 body instead, which is ~5KB PER SERVICE and WILL be truncated for a model caller -- take it only when you need a field the projection does not carry.', inputSchema: { region: z.string().optional(), detail: z.boolean().optional(), ...AG } },
+    async (a: any) => {
+      const region = a.region || process.env.GCP_REGION || 'us-east1';
+      const url = 'https://run.googleapis.com/v2/projects/' + (process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT) + '/locations/' + region + '/services';
+      const r: any = await harGcpApi(who(a), 'GET', url, null, 'run_status');
+      // [RUN-STATUS-PROJECTION-V158] THE RAW BODY MADE THIS TOOL'S OWN QUESTION UNANSWERABLE.
+      // ~56,000 characters for eleven services; under claude_opus's 4000-char result cap that is
+      // cut after TWO, and the two that survive are the alphabetically first, not the ones anyone
+      // asked about. Measured twice on the advisor and once on a direct call the same night: asked
+      // to check a production deploy against "the actual Cloud Run state", it could not see either
+      // control-plane service and correctly reported UNMEASURED. A tool that cannot answer what it
+      // exists to answer is not a read, it is a wall.
+      if (a && a.detail === true) return { content: [{ type: 'text', text: JSON.stringify(r) }] };
+      const body: any = (r && r.body) || {};
+      const svcs: any[] = Array.isArray(body.services) ? body.services : [];
+      if (!svcs.length) {
+        // Do not silently answer "no services". Hand back what came so a permission error or an
+        // escalation notice is visible rather than looking like an empty project.
+        return { content: [{ type: 'text', text: JSON.stringify({
+          region, services: [], note: 'No services array in the response. The raw result follows;'
+            + ' this is NOT evidence that the project has no services.', raw: r }, null, 2) }] };
+      }
+      const tail = (s: any) => String(s || '').split('/').pop() || '';
+      const rows = svcs.map((s: any) => {
+        const st: any = s.status || s || {};
+        const latest = tail(s.latestCreatedRevision || st.latestCreatedRevisionName);
+        // [RUN-STATUS-PROJECTION-V159] trafficStatuses IS THE RESOLVED ONE. `traffic` is the SPEC,
+        // and a TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST target carries NO revision name there -- it
+        // means "whatever is newest" and only trafficStatuses says which that is. V158 read the
+        // spec, got revision:"" for seven of eleven services, and then reported all seven as
+        // DRIFTED against their latest revision. They were each serving their latest. A short,
+        // computed, confident wrong answer to the question a promotion turns on -- committed
+        // inside the fix meant to prevent exactly that.
+        const statuses: any[] = Array.isArray(s.trafficStatuses) ? s.trafficStatuses
+          : (Array.isArray(st.trafficStatuses) ? st.trafficStatuses : []);
+        const spec: any[] = Array.isArray(st.traffic) ? st.traffic : (Array.isArray(s.traffic) ? s.traffic : []);
+        const src: any[] = statuses.length ? statuses : spec;
+        const serving = src.filter((t: any) => Number(t && t.percent) > 0).map((t: any) => {
+          const isLatest = String((t && t.type) || '').indexOf('LATEST') >= 0;
+          const named = tail(t.revision || t.revisionName);
+          return {
+            revision: named || (isLatest && latest ? latest : '(unresolved)'),
+            percent: Number(t.percent),
+            mode: isLatest ? 'LATEST' : undefined,
+            tag: t.tag || undefined,
+          };
+        });
+        const containers: any[] = (s.template && s.template.containers) || [];
+        const image = String((containers[0] && containers[0].image) || '');
+        return {
+          name: tail(s.name),
+          latest,
+          ready: tail(s.latestReadyRevision || st.latestReadyRevisionName),
+          serving,
+          // [RUN-STATUS-PROJECTION-V160] NAMED FOR WHAT IT IS. This is template.containers[0].image
+          // -- the SPEC, i.e. the image the next revision would use and therefore the image of
+          // latestCreatedRevision. It is NOT the image of whatever revision is serving, and on a
+          // fleet that pins traffic to tagged revisions those differ routinely. Called `image_tag`
+          // and printed beside `serving`, it read as "the image being served" and the advisor was
+          // right to flag it. Resolving the serving revision's own digest would cost a GET per
+          // revision and put this tool back over the result cap it was just brought under, so the
+          // honest cheap name wins over the expensive answer that reintroduces the original defect.
+          image_tag_latest: image.indexOf('@') >= 0 ? ('@' + image.split('@')[1].slice(0, 19)) : (image.split(':').pop() || ''),
+        };
+      });
+      // The one comparison a promotion turns on. UNKNOWN IS NOT DRIFT: a target whose revision did
+      // not resolve is excluded rather than counted, because reporting it is the V158 bug again.
+      const drifted = rows.filter((x: any) => x.serving.length === 1 && x.latest
+          && x.serving[0].revision !== '(unresolved)' && x.serving[0].mode !== 'LATEST'
+          && x.serving[0].revision !== x.latest)
+        .map((x: any) => x.name);
+      return { content: [{ type: 'text', text: JSON.stringify({
+        region, count: rows.length, services: rows,
+        latest_not_serving: drifted.length ? drifted : undefined,
+        note: 'Projection, not the raw body -- pass detail:true for that, and expect it to be'
+          + ' truncated. `serving` is traffic with percent > 0. Any service named in'
+          + ' latest_not_serving has a newer revision built that is NOT taking traffic, which on'
+          + ' this fleet is the normal state after a --no-traffic deploy and the thing to fix'
+          + ' before calling a promotion done. image_tag_latest IS THE LATEST REVISION\'S IMAGE,'
+          + ' NOT THE SERVING ONE -- they differ whenever latest_not_serving names the service. To'
+          + ' get the digest a serving revision actually runs, gcp_api GET the revision itself.'
+        }, null, 2) }] };
+    });
   server.registerTool('run_roll',
     { description: 'Roll a fresh revision of a Cloud Run service (force a restart / pick up new lake code) by bumping DEPLOY_TS. Deploys are a MUTATION, so this is ALWAYS staged as a privileged job (fast: no Cloud Build); with PC_AUTO_APPROVE=1 (the shipped default) it is KMS-signed and RUNS IN THIS CALL with no per-job approval step, and with it off it sits at pending unrun because there is no approval console. Defaults to THIS control-plane service in us-east1. Optional service, region.', inputSchema: { service: z.string().optional(), region: z.string().optional(), ...AG } },
     async (a: any) => { const service = a.service || process.env.K_SERVICE || ''; if (!service) { return { content: [{ type: 'text', text: JSON.stringify({ error: 'run_roll: no service argument and K_SERVICE is unset, so the service to roll cannot be determined. Cloud Run always sets K_SERVICE; pass service explicitly otherwise. Refusing rather than guessing a bare name, which in a shared project would stage a roll of the OTHER lane.' }) }], isError: true }; } const region = a.region || process.env.GCP_REGION || 'us-east1'; const cmd = 'gcloud run services update ' + service + ' --region ' + region + ' --update-env-vars DEPLOY_TS=$(date +%s) --quiet && echo ROLLED ' + service; const jobId = 'gcp_' + crypto.randomBytes(6).toString('hex'); const _rargs: any = { command: cmd, service, region }; const _adm = await pcAdmitStage(who(a), 'run_roll ' + service, _rargs); if (!_adm.ok) { return { content: [{ type: 'text', text: JSON.stringify({ mode: 'refused', staged: false, duplicate_of: _adm.duplicate_of || null, note: _adm.refusal }) }], isError: true }; } const _rref = db.collection('pending_confirms').doc(jobId); await _rref.set({ job_id: jobId, command_type: 'run_roll ' + service, staged_by: who(a), arguments: _rargs, status: 'pending', created_at: FieldValue.serverTimestamp(), command_sha256: _adm.sha }); /* [SEC-AUTORUN-SCOPE-V1] This said 'pending your gate approval' -- naming a route that returns 404 -- and then waited forever. */ const _auto = await pcAutoRun(_rref, jobId, 'run_roll ' + service, cmd, false, a.confirm === true); if (_auto) return { content: [{ type: 'text', text: _auto }] }; return { content: [{ type: 'text', text: JSON.stringify({ mode: 'staged', job_id: jobId, note: 'NOT run: PC_AUTO_APPROVE is off and there is no approval console.' }) }] }; });
@@ -5694,7 +6067,7 @@ function harToolDefs(agentId: string): any[] {
     { name: 'read_lake', description: 'Read a lake file for ground truth. Allowed: shared/... and agents/' + agentId + '/... .', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
     { name: 'list_work_items', description: 'List work items WITH ids for ' + mine + '. status defaults pending; use "all" for any, or needs_claude / needs_cowork / needs_supervisor to see parked work.', input_schema: { type: 'object', properties: { status: { type: 'string' }, role: { type: 'string' } } } },
     { name: 'cancel_work_item', description: 'Cancel a work item by id (bookkeeping). Junk or obsolete items.', input_schema: { type: 'object', properties: { id: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
-    { name: 'complete_work_item', description: 'Mark a work item completed by id (bookkeeping).', input_schema: { type: 'object', properties: { id: { type: 'string' }, note: { type: 'string' } }, required: ['id'] } },
+    { name: 'complete_work_item', description: 'Mark a work item completed. evidence_oid is REQUIRED and the SERVER resolves it against the repository: give the 40-hex oid of the commit that carries the work, or the literal "none" WITH a reason of at least 20 characters saying what was done instead. A commit that does not resolve refuses the close and NOTHING changes.', input_schema: { type: 'object', properties: { id: { type: 'string' }, evidence_oid: { type: 'string' }, reason: { type: 'string' }, note: { type: 'string' } }, required: ['id', 'evidence_oid'] } },
     { name: 'read_job_log', description: 'Read the result (status/exit/stdout/stderr) of a gate job by job_id.', input_schema: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'] } },
     { name: 'cowork_prompt', description: 'Hand the operator a paste-ready bootstrap prompt to continue this work in a fresh Cowork chat (full source + deploy access). Use when a job needs building, deploying, or heavy iteration -- or when they asks how to port it.', input_schema: { type: 'object', properties: { strain: { type: 'string', description: 'strain to bootstrap; defaults to ' + agentId }, task: { type: 'string', description: 'one line: what they should have it do first' } } } },
   ];
@@ -5822,10 +6195,71 @@ async function harCancelItemTool(input: any, agentId: string): Promise<string> {
   try { await db.collection('work_items').doc(id).update({ status: 'cancelled', cancelled_by: agentId, cancelled_at: FieldValue.serverTimestamp(), cancel_note: String((input && input.note) || '') }); harJournalAs(agentId, 'work_cancelled', 'cancelled ' + id + ' ' + String((input && input.note) || '')); return 'cancelled work item ' + id; } catch (e: any) { return 'cancel failed: ' + String((e && e.message) || e); }
 }
 
+// [WORKITEM-EVIDENCE-V164] ONE GATE, BOTH DOORS. complete_work_item is registered twice -- once
+// as an MCP tool and once in the harness chat's own table -- and a gate on one of them is not a
+// gate, it is a detour sign. Both call this.
+//
+// MEASURED 2026-09-07: an agent reported six review items complete, with per-item "Actions
+// Taken" prose, and none of it had happened: no commit beyond the operator's own, no strain
+// document changed, all six still pending. A human found it by reading git_log and the
+// work_items collection by hand. Nothing in the system objected, because closing an item took
+// nothing but the word for it -- while OPENING one already demanded cited evidence.
+//
+// WHY AN OID AND NOT A REVIEWER. claude_review takes { plan, evidence } and both are strings the
+// agent composes, so an agent that fabricates a completion fabricates the evidence too and the
+// reviewer answers OK to a fiction. A reviewer handed self-reported input can catch internal
+// inconsistency and never a tool call that never happened. THE SERVER does this lookup, against
+// the real object store, so the one thing an agent cannot do is make a commit exist that does not.
+//
+// 'none' IS A REAL ANSWER, NOT A BYPASS. Measurements, negative results and junk items close
+// without a commit and always will. It costs a reason of substance, it is stored on the item as
+// completion_evidence.kind='none', and it is named in the journal line -- so the escape is a
+// decision somebody can go and read, which a silent default never is.
+async function pcCompletionEvidence(evidenceOid: any, reason: any): Promise<any> {
+  const claimed = String(evidenceOid == null ? '' : evidenceOid).trim();
+  if (!claimed) {
+    return { ok: false, refusal: 'REFUSED: evidence_oid is required and NOTHING was closed. Pass'
+      + ' the 40-hex oid of the commit that carries this work -- the server resolves it here, so a'
+      + ' commit that does not exist refuses the close. If this item honestly has no commit (a'
+      + ' measurement, a negative result, a duplicate), pass evidence_oid:"none" WITH a reason of'
+      + ' at least 20 characters saying what was done instead.' };
+  }
+  if (claimed.toLowerCase() === 'none') {
+    const why = String(reason == null ? '' : reason).trim();
+    if (why.length < 20) {
+      return { ok: false, refusal: 'REFUSED: evidence_oid:"none" needs a reason of at least 20'
+        + ' characters and NOTHING was closed. "none" is for items that genuinely produced no'
+        + ' commit, and the reason is what a reader sees instead of one, so it has to say what'
+        + ' was actually done.' };
+    }
+    return { ok: true, evidence: { kind: 'none', reason: why }, line: 'evidence=none: ' + why.slice(0, 160) };
+  }
+  if (!/^[0-9a-f]{40}$/.test(claimed)) {
+    return { ok: false, refusal: 'REFUSED: evidence_oid must be a 40-character lowercase hex commit'
+      + ' oid, or the literal "none" with a reason. Got ' + JSON.stringify(claimed.slice(0, 64))
+      + '. NOTHING was closed. A branch name, a tag or an abbreviated oid is not accepted here:'
+      + ' the point is to name one immutable commit, not something that can move afterwards.' };
+  }
+  try {
+    const gt = require('./gittools.js');
+    if (typeof gt.gitResolveCommitForEvidence !== 'function') throw new Error('gittools.js does not export gitResolveCommitForEvidence');
+    const cm: any = await gt.gitResolveCommitForEvidence(claimed);
+    return { ok: true,
+      evidence: { kind: 'commit', oid: cm.oid, tree: cm.tree, subject: cm.subject, author: cm.author, timestamp: cm.timestamp },
+      line: 'evidence=' + String(cm.oid).slice(0, 12) + ' "' + String(cm.subject || '').slice(0, 100) + '"' };
+  } catch (e: any) {
+    return { ok: false, refusal: 'REFUSED: ' + claimed + ' does not resolve to a commit in this'
+      + ' repository, so NOTHING was closed. ' + String((e && e.message) || e).slice(0, 200)
+      + ' -- push the work first, then close the item with the oid the push returned.' };
+  }
+}
+
 async function harCompleteItemTool(input: any, agentId: string): Promise<string> {
   const id = String((input && input.id) || '').trim(); if (!id) return 'complete: id required.';
   if (!(await harOwns(id, agentId))) return 'complete denied: ' + id + ' is not in your lane.';
-  try { await db.collection('work_items').doc(id).update({ status: 'completed', completed_by: agentId, finished_at: FieldValue.serverTimestamp(), result_note: String((input && input.note) || '') }); harJournalAs(agentId, 'work_completed', 'completed ' + id + ' ' + String((input && input.note) || '')); return 'completed work item ' + id; } catch (e: any) { return 'complete failed: ' + String((e && e.message) || e); }
+  const ev: any = await pcCompletionEvidence(input && input.evidence_oid, input && input.reason);
+  if (!ev.ok) return ev.refusal;
+  try { await db.collection('work_items').doc(id).update({ status: 'completed', completed_by: agentId, finished_at: FieldValue.serverTimestamp(), completion_evidence: ev.evidence, result_note: String((input && input.note) || '') }); harJournalAs(agentId, 'work_completed', 'completed ' + id + ' [' + ev.line + '] ' + String((input && input.note) || '')); return 'completed work item ' + id + ' -- ' + ev.line; } catch (e: any) { return 'complete failed: ' + String((e && e.message) || e); }
 }
 
 async function harReadJobLogTool(input: any): Promise<string> {
@@ -6134,32 +6568,66 @@ async function harClaudePost(apiModel: string, key: string, body: any): Promise<
 }
 
 // tool-capable Claude chat: 1h cache + effort + bounded tool loop.
-async function harChatClaudeOps(apiModel: string, key: string, system: string, msgs: any[], tools: any[], agentId: string, exec?: (name: string, input: any) => Promise<string>): Promise<{ text: string; usage: any }> {  /* [CHAT-ONE-REGISTRY-V49] `exec` is the ONE dispatcher for the tools in `tools`. Absent == the legacy chat-only table (harRunChatTool). It is NOT a second execution path: harChatToolset() builds it out of the handlers buildMcpServer already registered, so a tool call from here lands in the same closure the MCP transports call. */
+async function harChatClaudeOps(apiModel: string, key: string, system: string, msgs: any[], tools: any[], agentId: string, exec?: (name: string, input: any) => Promise<string>, effortOverride?: string, maxRounds?: number): Promise<{ text: string; usage: any }> {  /* [CHAT-ONE-REGISTRY-V49] `exec` is the ONE dispatcher for the tools in `tools`. Absent == the legacy chat-only table (harRunChatTool). It is NOT a second execution path: harChatToolset() builds it out of the handlers buildMcpServer already registered, so a tool call from here lands in the same closure the MCP transports call. */
+  // [OPUS-OWN-DIALS-V148] TWO OPTIONAL DIALS, AND BOTH DEFAULT TO WHAT THIS FUNCTION ALREADY
+  // DID. HAR_CHAT_EFFORT and HAR_CHAT_MAX_ROUNDS are module constants read from inside this
+  // closure, so a caller wanting its own effort or its own round ceiling had NO seam -- the
+  // only alternative was a second copy of this loop, which is how two loops drift apart.
+  // Pass neither and EFF is HAR_CHAT_EFFORT and ROUNDS is HAR_CHAT_MAX_ROUNDS, exactly.
+  // maxRounds CAN ONLY LOWER THE CEILING. The Math.min is the point: a caller may make itself
+  // cheaper and may never make itself more expensive than the console chat already is. Every
+  // round resends the whole conversation, so tool results compound and round four pays for
+  // rounds one to three again -- the round count is the largest cost multiplier here.
+  const EFF = String(effortOverride || HAR_CHAT_EFFORT || '');
+  const ROUNDS = (typeof maxRounds === 'number' && maxRounds > 0) ? Math.min(maxRounds, HAR_CHAT_MAX_ROUNDS) : HAR_CHAT_MAX_ROUNDS;
   const conv: any[] = msgs.map((m: any) => ({ role: m.role === 'me' ? 'user' : 'assistant', content: [{ type: 'text', text: String(m.text || m.content || '') }] }));
   const cacheIdx = conv.length - 2;
   const sumUsage: any = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
   const addUsage = (u: any) => { if (!u) return; sumUsage.input_tokens += u.input_tokens || 0; sumUsage.output_tokens += u.output_tokens || 0; sumUsage.cache_creation_input_tokens += u.cache_creation_input_tokens || 0; sumUsage.cache_read_input_tokens += u.cache_read_input_tokens || 0; };
-  const buildBody = (withTtl: boolean, withEffort: boolean) => {
+  // [CHAT-CACHE-PREFIX-V162] THE PREFIX IS WHAT REPEATS, AND IT WAS NEVER MARKED.
+  // cacheIdx above is conv.length - 2 -- "one turn back" -- which is right for the console
+  // chat and UNREACHABLE for a single-shot caller: claude_opus passes exactly one message, so
+  // conv.length is 1, cacheIdx is -1, and no index ever matches. Meanwhile the thing actually
+  // worth caching on that path is not the conversation at all (it is unique every call) but
+  // the SYSTEM PROMPT PLUS THE TOOL SCHEMAS -- ~20k of a ~25k call, byte-identical every time.
+  // Anthropic caches the prefix in the order tools -> system -> messages, so one breakpoint on
+  // the system block covers the tool definitions too. Measured before this: cache_write=0 and
+  // cache_read=0 on every claude_opus call ever made, and 285K uncached input in one day.
+  const PC_CACHE_SYS_MIN = Math.max(0, Number(process.env.PC_CACHE_SYS_MIN || 2000) || 2000);
+  const cacheSystem = String(system || '').length >= PC_CACHE_SYS_MIN;
+  const buildBody = (withTtl: boolean, withEffort: boolean, forceText?: boolean) => {
+    const cc = () => (withTtl ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' });
     const messages = conv.map((m: any, i: number) => {
-      if (i === cacheIdx && Array.isArray(m.content) && m.content.length) {
+      // cacheIdx >= 0 guard: a negative index cannot match, and silently matching nothing is
+      // how this went unnoticed for every single-message caller.
+      if (cacheIdx >= 0 && i === cacheIdx && Array.isArray(m.content) && m.content.length) {
         const last = m.content[m.content.length - 1];
-        if (last && typeof last === 'object') last.cache_control = withTtl ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
+        if (last && typeof last === 'object') last.cache_control = cc();
       }
       return { role: m.role, content: m.content };
     });
-    const body: any = { model: apiModel, max_tokens: HAR_CHAT_MAX_TOKENS, system, tools, messages };
-    if (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') body.output_config = { effort: HAR_CHAT_EFFORT };
+    // A short system prompt is left as a plain string: below the minimum cacheable prompt
+    // length a breakpoint buys nothing and spends one of the four available.
+    const sys: any = cacheSystem
+      ? [{ type: 'text', text: String(system || ''), cache_control: cc() }]
+      : system;
+    const body: any = { model: apiModel, max_tokens: HAR_CHAT_MAX_TOKENS, system: sys, tools, messages };
+    // [OPUS-FORCED-VERDICT-V155] forceText is the last round: the model must answer in words from
+    // what it already gathered. tool_choice 'none' rather than dropping `tools`, because the
+    // conversation already carries tool_use blocks and the API requires their definitions present.
+    if (forceText && Array.isArray(tools) && tools.length) body.tool_choice = { type: 'none' };
+    if (withEffort && EFF && EFF !== 'high') body.output_config = { effort: EFF };
     return body;
   };
-  const post = async (withTtl: boolean, withEffort: boolean) => await harClaudePost(apiModel, key, buildBody(withTtl, withEffort));
+  const post = async (withTtl: boolean, withEffort: boolean, forceText?: boolean) => await harClaudePost(apiModel, key, buildBody(withTtl, withEffort, forceText));
   let withTtl = true; let withEffort = true; let guard = 0; let finalText = '';
   const claudeTrace: string[] = []; let claudeStop = '';
   // [HARNESSUI-MODEL-DERIVE-V1] what was ACTUALLY served. j.model is the provider's own
   // answer, and effortApplied tracks the withEffort fallback above -- when output_config is
   // dropped on a retry the request really did run at the default, and the badge must say so.
   let apiModelSeen = apiModel;
-  let effortApplied = (HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high';
-  while (guard++ < HAR_CHAT_MAX_ROUNDS) {
+  let effortApplied = (EFF && EFF !== 'high') ? EFF : 'high';
+  while (guard++ < ROUNDS) {
     let { r, j } = await post(withTtl, withEffort);
     if (!r.ok) {
       const eb = JSON.stringify(j); let changed = false;
@@ -6173,7 +6641,7 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
         ' HTTP ' + r.status + ': ' + JSON.stringify(j).slice(0, 400) + harChatRemedy(rv, r.status)));
     }
     if (j && j.model) apiModelSeen = String(j.model);
-    effortApplied = (withEffort && HAR_CHAT_EFFORT && HAR_CHAT_EFFORT !== 'high') ? HAR_CHAT_EFFORT : 'high';
+    effortApplied = (withEffort && EFF && EFF !== 'high') ? EFF : 'high';
     addUsage(j.usage);
     const content = j.content || [];
     conv.push({ role: 'assistant', content });
@@ -6186,7 +6654,71 @@ async function harChatClaudeOps(apiModel: string, key: string, system: string, m
     for (const tu of toolUses) { let out = ''; try { out = exec ? await exec(String(tu.name), tu.input || {}) : await harRunChatTool(tu.name, tu.input || {}, agentId); } catch (e: any) { out = 'tool error: ' + String((e && e.message) || e); } results.push({ type: 'tool_result', tool_use_id: tu.id, content: String(out).slice(0, 12000) }); claudeTrace.push(String(tu.name) + ' -> ' + String(out).replace(/\s+/g, ' ').trim().slice(0, 500)); }
     conv.push({ role: 'user', content: results });
   }
-  return { text: finalText || harChatNoTextReport(claudeTrace, claudeStop, false, 0), usage: sumUsage, model: apiModelSeen, effort: effortApplied };
+  // [OPUS-FORCED-VERDICT-V155] THE CEILING USED TO END THE CALL WITH NOTHING TO SHOW FOR IT.
+  // MEASURED 2026-09-08: a claude_opus call made nine tool calls across its whole round budget,
+  // the loop exited while stop_reason was still 'tool_use', and this function returned empty --
+  // 62,413 input tokens billed, no verdict written, and the caller left reporting that the
+  // reviewer "dropped the request". The model never refused; it was never given a turn in which
+  // it was allowed to speak. A bound that returns nothing is not a bound, it is a quiet way to
+  // lose money. So the last word is now MANDATORY: one more call with tool_choice 'none', which
+  // cannot investigate further and must answer from what is already in the conversation.
+  // [OPUS-FORCED-VERDICT-V157] AND IT MUST SAY SO WHEN THAT FAILS. V155 wrapped this in a catch
+  // that fell through silently "deliberately". It worked from one caller and returned NOTHING
+  // from another -- 28,967 tokens billed, "ended its turn without writing a reply", nothing in
+  // the logs to say why, because the one path that could have explained it discarded the error.
+  // A fallback that fails quietly is worse than no fallback. Now: ask in words AS WELL as with
+  // tool_choice, retry once without tool_choice if that leg is what broke, and put the reason in
+  // the answer either way. The caller gets a verdict or an explanation, never silence.
+  let forcedNote = '';
+  if (claudeStop === 'tool_use') {
+    // The instruction is not decoration. tool_choice is a constraint the API imposes; this is
+    // one the model understands, and it survives a provider that ignores or rejects the former.
+    conv.push({ role: 'user', content: [{ type: 'text', text:
+      'ROUND BUDGET EXHAUSTED. Do not call any more tools -- any further tool call is discarded'
+      + ' and this conversation ends here. Write your answer NOW, in words, from what you already'
+      + ' hold. If what you gathered is not enough to answer, say exactly what is missing and what'
+      + ' single call would get it. An empty reply is the one outcome that helps nobody.' }] });
+    const attempts: Array<{ label: string; force: boolean }> = [
+      { label: 'tool_choice=none', force: true },
+      { label: 'instruction-only', force: false },
+    ];
+    const why: string[] = [];
+    for (const att of attempts) {
+      try {
+        const fin: any = await post(withTtl, withEffort, att.force);
+        if (!fin || !fin.r || !fin.r.ok) {
+          why.push(att.label + ': HTTP ' + String((fin && fin.r && fin.r.status) || '?')
+            + ' ' + JSON.stringify((fin && fin.j) || {}).slice(0, 300));
+          continue;
+        }
+        addUsage(fin.j && fin.j.usage);
+        if (fin.j && fin.j.model) apiModelSeen = String(fin.j.model);
+        const ftxt = ((fin.j && fin.j.content) || [])
+          .filter((b: any) => b && b.type === 'text').map((b: any) => b.text).join('').trim();
+        if (ftxt) {
+          finalText = ftxt;
+          if (fin.j.stop_reason) claudeStop = String(fin.j.stop_reason);
+          why.length = 0;
+          break;
+        }
+        why.push(att.label + ': HTTP 200 but NO TEXT BLOCK (stop_reason='
+          + String((fin.j && fin.j.stop_reason) || '?') + ', blocks='
+          + ((fin.j && fin.j.content) || []).map((b: any) => b && b.type).join(',') + ')');
+      } catch (e: any) {
+        why.push(att.label + ': threw ' + String((e && e.message) || e).slice(0, 300));
+      }
+    }
+    if (!finalText && why.length) {
+      forcedNote = 'THE FORCED VERDICT FAILED, AND THIS IS WHY RATHER THAN SILENCE.'
+        + ' The round budget (' + ROUNDS + ') ran out while the model still wanted tools, so it was'
+        + ' asked to answer from what it had. Both attempts failed:\n  - ' + why.join('\n  - ')
+        + '\nThe tool results it did gather are below; they are real and were paid for.'
+        + ' Re-ask with a narrower question rather than repeating this one.\n\n';
+    }
+  }
+  return { text: finalText
+      || (forcedNote + harChatNoTextReport(claudeTrace, claudeStop, claudeStop === 'tool_use', ROUNDS)),
+    usage: sumUsage, model: apiModelSeen, effort: effortApplied };
 }
 // ============ end OPS CONSOLE TOOLS ============
 
@@ -10056,7 +10588,7 @@ app.get('/git/archive', async (req: any, res: any) => {
     // [PCGIT-ARCHIVE-401-V1] A 401 THAT NAMES THE SCHEME, BECAUSE THE COMMONEST CAUSE IS
     // NOT A BAD KEY. Every other fleet tool takes its credential as ?agent= / ?key= /
     // ?session_key= on the query string; this route reads ONLY the Authorization header.
-    // A perfectly valid key passed the fleet-editor way therefore failed here with the
+    // A perfectly valid key passed the fleet-herald way therefore failed here with the
     // identical opaque body a revoked key produced, and callers concluded their credential
     // had been revoked and went looking for the wrong fault. The body now separates the two.
     const _hdr = String((req.get && req.get('authorization')) || '');
@@ -10340,6 +10872,9 @@ app.post('/git/blob', pcBlobBody, async (req: any, res: any) => {
 //     still arrive through POST /git/blob, still owned by whoever uploaded them, so this route
 //     grants no new way to introduce bytes -- only a way to reference ones already attributed.
 //   * The branch is PC_RELEASE_TREE_BRANCH (default main) and nothing else.
+//   * `mode` IS accepted, "100644" or "100755" and nothing else, because the re-cut this
+//     route exists for is mostly chmods. It decides which bit a file inside the prefix
+//     carries, never which paths the route may touch, so the blast radius below is unchanged.
 //
 // THE BLAST RADIUS, STATED PLAINLY. An allowlisted build can overwrite the generated release
 // tree and nothing else. That tree is regenerable from any commit by re-running gen.py under
@@ -10388,6 +10923,16 @@ app.post('/git/release-tree', async (req: any, res: any) => {
     if (typeof f.content === 'string') { refused.push({ path: p, why: 'content is not accepted here -- upload via POST /git/blob and reference it with uploaded{blob_oid}' }); continue; }
     if (f.copy_from) { refused.push({ path: p, why: 'copy_from is not accepted here' }); continue; }
     if (!f.delete && !(f.uploaded && f.uploaded.blob_oid)) { refused.push({ path: p, why: 'each entry needs uploaded{blob_oid} or delete:true' }); continue; }
+    // [PCGIT-MODE-UP-V163] MODE IS ACCEPTED HERE, because the re-cut this route exists for
+    // is FOURTEEN chmods and six content changes: gen.py emits install.sh and friends
+    // executable and the committed tree holds them flat, so every earlier route could
+    // express the bytes and not the bit. Same two spellings as git_propose, and checked
+    // HERE so a bad one is the scoped 400 that names the entry rather than a 500 thrown
+    // three layers down after the request looked accepted. Omitted still means LEAVE IT.
+    if (f.mode !== undefined && f.mode !== null) {
+      if (f.mode !== '100644' && f.mode !== '100755') { refused.push({ path: p, why: 'mode must be "100644" or "100755", spelled in full; omit it to keep whatever mode the path already has' }); continue; }
+      if (f.delete) { refused.push({ path: p, why: 'mode together with delete:true names nothing -- a removal writes no entry to have a mode' }); continue; }
+    }
   }
   if (refused.length) {
     console.error('[git-release-tree] REFUSED for ' + who + ': ' + refused.length + ' of ' + files.length + ' entries out of scope');
@@ -10898,7 +11443,7 @@ async function pcResolveIdentity(req: any): Promise<any> {
   // character in a pasted key did not degrade a chat to a weaker role -- it SILENTLY
   // PROMOTED it to fleet-advisor, the one role permitted to stage gated jobs and supersede
   // every other chat's pending work. Fail-open, on the identity check itself.
-  // fleet-curator found it by mutating one character of its own key, which is the test that
+  // fleet-drafter found it by mutating one character of its own key, which is the test that
   // should have existed before this shipped.
   // PC_ENFORCE governs the NO-KEY case ONLY -- letting chats that predate the mechanism
   // keep working through the cutover is the entire reason that flag exists. It is not a

@@ -1557,7 +1557,7 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
     });
   server.registerTool('git_propose',
     { description: 'Create a commit on top of a branch head. WHOLE FILE writes only: each entry replaces the entire file. Each entry gives EXACTLY ONE of four options -- zero or two is refused. (1) content, the bytes. (2) copy_from {path, ref}, which REUSES A BLOB ALREADY IN THE REPOSITORY -- the server resolves path at ref and writes that blob oid straight into the tree, so none of its bytes cross the wire and the file cannot be corrupted in transit. copy_from goes through the same ref gate and the same path rules as git_read, so it reaches nothing you could not already read, and an oid is NEVER a lookup key. Optional copy_from.blob_oid is an ASSERTION: the whole call is refused if the source does not resolve to it. (3) uploaded {blob_oid}, for bytes that are NOT yet in the repository: POST the raw file to /git/blob with your session key first, then name the blobOid that call returned. The bytes go over HTTP straight into the object store, so they never cross THIS tool and nothing has to be retyped -- which is the only sane way to land a large file. It resolves ONLY against an upload the SAME agent made, and only while that upload is unexpired; an upload that was never made, has expired, or belongs to another agent is REFUSED and NOTHING is written. An oid is still NEVER a lookup key: you are naming bytes YOU supplied, not naming a blob in the store. Optional uploaded.sha256 is an ASSERTION against the digest recorded when the bytes arrived, and a mismatch refuses the whole call. (4) delete:true, which REMOVES the path. One explicit path per entry: there is no glob, no prefix and no recursive directory removal. Removing a path that does not exist is REFUSED, never a silent success, and a directory left empty by a removal is pruned so the resulting tree stays a valid git object. A removal is resolved against the branch you are already writing to and reaches nothing a write to the same path would not, so it is refused wherever an overwrite would be (a directory, a symlink, a submodule). A per-file blobOid comes back for every entry that writes, so you can still verify each against a locally computed sha1; a removal reports source.removedBlobOid instead -- the oid the path actually held -- plus top-level deleted and deletedPaths, and an uploaded entry reports source.sha256 plus top-level uploaded and bytesUploaded. Nothing becomes visible until git_push. Returns commitOid and baseOid.',
-      inputSchema: { branch: z.string(), files: z.array(z.object({ path: z.string(), content: z.string().optional(), copy_from: z.object({ path: z.string(), ref: z.string(), blob_oid: z.string().optional() }).optional(), uploaded: z.object({ blob_oid: z.string(), sha256: z.string().optional() }).optional(), delete: z.boolean().optional() })).min(1), message: z.string(), ...AG } },
+      inputSchema: { branch: z.string(), files: z.array(z.object({ path: z.string(), content: z.string().optional(), copy_from: z.object({ path: z.string(), ref: z.string(), blob_oid: z.string().optional() }).optional(), uploaded: z.object({ blob_oid: z.string(), sha256: z.string().optional() }).optional(), delete: z.boolean().optional(), mode: z.string().optional().describe('FILE MODE, and the only two values are "100644" (regular) and "100755" (executable) -- a symlink or a submodule is not something this API writes. OMITTING mode does NOT mean 100644: it means LEAVE THE MODE ALONE, so rewriting the contents of an executable does not disarm it, a path that does not exist yet gets 100644, and copy_from keeps the mode of the blob it copied. mode alongside delete:true is REFUSED, because a removal writes no entry to have a mode.') })).min(1), message: z.string(), ...AG } },
     wrap(gitPropose, (a: any) => ({
       branch: a.branch, files: a.files, message: a.message,
       ...(agentId ? { author: { name: agentId, email: agentId + '@' + ctx().cfg.authorEmailDomain } } : {}),
@@ -1568,7 +1568,7 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
       ...(agentId ? { uploader: agentId } : {}),
     })));
   server.registerTool('git_propose_patch',
-    { description: 'Create a commit by applying a UNIFIED DIFF to a branch head, instead of sending whole files. Strict: every hunk must match the current bytes exactly at the line it names -- no fuzz, no offset search. Any hunk that does not apply fails the whole call and NOTHING is committed. Line numbers and context lines MUST come from git_read in the same turn (via line_start and line_count) -- never guess or infer line numbers. A 1.1MB file cannot be held in context, so paging with git_read is the normal path rather than a fallback. Cannot create, delete, rename, chmod or patch binaries. Optional expected_blob_sha is a per-file compare-and-swap (path -> 40-hex blob oid, or null meaning the file must not exist yet). Nothing becomes visible until git_push. Returns commitOid and baseOid.',
+    { description: 'Create a commit by applying a UNIFIED DIFF to a branch head, instead of sending whole files. Strict: every hunk must match the current bytes exactly at the line it names -- no fuzz, no offset search. Any hunk that does not apply fails the whole call and NOTHING is committed. Line numbers and context lines MUST come from git_read in the same turn (via line_start and line_count) -- never guess or infer line numbers. A 1.1MB file cannot be held in context, so paging with git_read is the normal path rather than a fallback. CHMOD IS SUPPORTED since [GPPATCH-MODE-V165]: a "new mode 100644" or "new mode 100755" line is applied, including the header-only form git emits for a pure chmod (diff --git, old mode, new mode, and no hunks at all). Any other mode value is refused by name. Cannot delete, rename, copy or patch binaries -- those move or remove a path rather than rewriting one, and git_propose expresses all of them directly. Optional expected_blob_sha is a per-file compare-and-swap (path -> 40-hex blob oid, or null meaning the file must not exist yet). Nothing becomes visible until git_push. Returns commitOid and baseOid.',
       inputSchema: { branch: z.string(), patch: z.string(), message: z.string(), expected_blob_sha: z.record(z.string(), z.string().nullable()).optional(), ...AG } },
     wrap(gitProposePatch, (a: any) => ({
       branch: a.branch, patch: a.patch, message: a.message,
@@ -2059,5 +2059,32 @@ export async function gitReleaseTreeForRoute(
     treeOid: (proposed && proposed.treeOid) || null,
     files: (proposed && proposed.files) || [],
     push: { ref: pushed.ref, oid: pushed.oid, previousOid: pushed.previousOid },
+  };
+}
+
+// [WORKITEM-EVIDENCE-V164] RESOLVE ONE COMMIT OID, FOR THE ONE CALLER THAT NEEDS TO KNOW A
+// COMMIT IS REAL. complete_work_item takes an evidence_oid from an agent and must not take the
+// agent's word for it; this does the lookup on the server, through the same gate and object
+// store every other read uses, so an oid that names nothing throws instead of resolving.
+//
+// IT RETURNS THE SUBJECT LINE AND THE AUTHOR ON PURPOSE. A gate that only says yes teaches
+// nobody anything: the closing journal entry carries the commit's own first line, so a human
+// scanning the journal sees WHAT was cited, not merely that something was.
+//
+// IT IS DELIBERATELY NOT A REF RESOLVER. Only a full oid reaches here (the caller checks the
+// shape first), because the point is to name one immutable commit -- a branch name would let
+// the evidence move after the item was closed.
+export async function gitResolveCommitForEvidence(oid: string): Promise<any> {
+  const c: any = ctx();
+  const out: any = await gitLog(c, { ref: String(oid), max_count: 1 } as any);
+  const cm: any = (out && Array.isArray(out.commits) && out.commits[0]) || null;
+  if (!cm || !cm.oid) throw new Error('resolved to no commit: ' + String(oid));
+  const au: any = cm.author || {};
+  return {
+    oid: String(cm.oid),
+    tree: String(cm.tree || ''),
+    subject: String(cm.message || '').split('\n')[0].slice(0, 200),
+    author: String(au.name || au.email || ''),
+    timestamp: Number(cm.timestamp || 0),
   };
 }

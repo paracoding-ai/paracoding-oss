@@ -413,7 +413,14 @@ async function resolveCopySource(
   ctx: ServerContext,
   destPath: string,
   src: ProposeCopyFrom,
-): Promise<{ oid: string; path: string; ref: string; refName: string | null; commit: string }> {
+): Promise<{
+  oid: string;
+  path: string;
+  ref: string;
+  refName: string | null;
+  commit: string;
+  mode: string;
+}> {
   if (src === null || typeof src !== 'object' || Array.isArray(src)) {
     throw badRequest(`files[${destPath}].copy_from must be an object { path, ref }`, {
       path: destPath,
@@ -464,25 +471,24 @@ async function resolveCopySource(
       commit,
     });
   }
-  if (entry.type !== 'blob' || entry.mode !== MODE_FILE) {
-    // 100755 is refused along with everything else, deliberately: `buildTree`
-    // has no mode parameter and defaults a NEW path to 100644, so copying an
-    // executable onto a path that does not exist yet would silently drop its
-    // executable bit. A refusal is recoverable; a silently non-executable
-    // install script is not. Every blob in this repository is 100644 today,
-    // so this costs nothing and closes the hole before it can open.
+  if (entry.type !== 'blob' || (entry.mode !== MODE_FILE && entry.mode !== MODE_EXEC)) {
+    // [PCGIT-MODE-UP-V163] 100755 WAS REFUSED HERE TOO, and the reason was true
+    // when it was written: `buildTree` had no mode parameter and defaulted a NEW
+    // path to 100644, so copying an executable onto a path that did not exist
+    // yet would have silently dropped its executable bit. A refusal is
+    // recoverable; a silently non-executable install script is not. That gap is
+    // closed at the tree layer now, so a copy carries the SOURCE's mode instead.
+    // Symlinks and submodules stay refused: their contents are not a file's.
     const what =
       entry.mode === MODE_GITLINK
         ? 'submodule'
         : entry.mode === MODE_SYMLINK
           ? 'symlink'
-          : entry.mode === MODE_EXEC
-            ? 'executable file'
-            : entry.type;
+          : entry.type;
     throw new ToolError(
       'NOT_A_BLOB',
       `cannot copy ${from} at ${src.ref}: it is a ${what} (mode ${entry.mode}), not a ` +
-        `regular ${MODE_FILE} file`,
+        `regular file (${MODE_FILE} or ${MODE_EXEC})`,
       { path: from, ref: src.ref, commit, mode: entry.mode, type: entry.type },
     );
   }
@@ -511,7 +517,10 @@ async function resolveCopySource(
     }
   }
 
-  return { oid: entry.oid, path: from, ref: src.ref, refName, commit };
+  // The SOURCE's mode rides back with the oid. gitPropose writes it when the
+  // caller named no mode of its own, so copy_from on an executable lands an
+  // executable rather than quietly demoting it to 100644.
+  return { oid: entry.oid, path: from, ref: src.ref, refName, commit, mode: entry.mode };
 }
 
 // ---------------------------------------------------------------------------
@@ -886,10 +895,10 @@ async function resolveUploadSource(
 
 /** One entry of a proposal after its bytes have been named, any of four ways. */
 type NormalizedFile =
-  | { path: string; content: string; copyFrom: null; uploaded: null; remove: false }
-  | { path: string; content: null; copyFrom: ProposeCopyFrom; uploaded: null; remove: false }
-  | { path: string; content: null; copyFrom: null; uploaded: ProposeUploaded; remove: false }
-  | { path: string; content: null; copyFrom: null; uploaded: null; remove: true };
+  | { path: string; content: string; copyFrom: null; uploaded: null; remove: false; mode: string | null }
+  | { path: string; content: null; copyFrom: ProposeCopyFrom; uploaded: null; remove: false; mode: string | null }
+  | { path: string; content: null; copyFrom: null; uploaded: ProposeUploaded; remove: false; mode: string | null }
+  | { path: string; content: null; copyFrom: null; uploaded: null; remove: true; mode: null };
 
 /** One resolved entry of a proposal, as reported back to the caller. */
 interface ProposedFile {
@@ -909,6 +918,13 @@ interface ProposedFile {
    * removal.
    */
   size: number | null;
+  /**
+   * The mode this entry WRITES at `path`: '100644', '100755', or `null` when the
+   * caller named none and the tree keeps whatever the path already held (100644
+   * for a path that did not exist). A copy reports its SOURCE's mode, because
+   * that is what it writes. `null` for a removal, which writes nothing.
+   */
+  mode: string | null;
   source:
     | { kind: 'content' }
     | { kind: 'copy'; path: string; ref: string; refName: string | null; commit: string }
@@ -955,6 +971,7 @@ export async function gitPropose(
       copy_from?: ProposeCopyFrom | null;
       uploaded?: ProposeUploaded | null;
       delete?: boolean | null;
+      mode?: string | null;
     }>;
     message: string;
     author?: { name: string; email: string };
@@ -1044,7 +1061,38 @@ export async function gitPropose(
     if (hasContent && typeof file.content !== 'string') {
       throw badRequest(`files[${path}].content must be a string`, { path });
     }
-    if (hasDelete) return { path, content: null, copyFrom: null, uploaded: null, remove: true };
+
+    // [PCGIT-MODE-UP-V163] THE EXECUTABLE BIT, NAMED IN FULL OR NOT AT ALL.
+    // Two spellings, no octal arithmetic and no umask: '100644' and '100755' are
+    // the only two modes a regular file has in a git tree, and everything else --
+    // a symlink, a submodule, a directory -- is a different KIND of entry that
+    // this whole-file API does not write. Omitting mode is NOT "default to
+    // 100644": it means LEAVE THE MODE ALONE, so rewriting the contents of an
+    // executable does not quietly disarm it, and a copy keeps the mode of the
+    // blob it copied. A removal takes no mode, because it writes no entry.
+    const rawMode = file.mode;
+    if (rawMode !== undefined && rawMode !== null) {
+      if (rawMode !== MODE_FILE && rawMode !== MODE_EXEC) {
+        throw badRequest(
+          `files[${path}].mode is ${JSON.stringify(rawMode)}. The only modes this API ` +
+            `writes are ${MODE_FILE} (regular) and ${MODE_EXEC} (executable), spelled in ` +
+            `full. Omit mode entirely to keep whatever mode the path already has.`,
+          { path, mode: rawMode },
+        );
+      }
+      if (hasDelete) {
+        throw badRequest(
+          `files[${path}] sets both delete:true and mode. A removal writes no entry, so ` +
+            `there is no mode for it to have. NOTHING was written.`,
+          { path, mode: rawMode },
+        );
+      }
+    }
+    const mode: string | null = rawMode === undefined || rawMode === null ? null : rawMode;
+
+    if (hasDelete) {
+      return { path, content: null, copyFrom: null, uploaded: null, remove: true, mode: null };
+    }
     if (hasUploaded) {
       return {
         path,
@@ -1052,16 +1100,25 @@ export async function gitPropose(
         copyFrom: null,
         uploaded: file.uploaded as ProposeUploaded,
         remove: false,
+        mode,
       };
     }
     return hasContent
-      ? { path, content: file.content as string, copyFrom: null, uploaded: null, remove: false }
+      ? {
+          path,
+          content: file.content as string,
+          copyFrom: null,
+          uploaded: null,
+          remove: false,
+          mode,
+        }
       : {
           path,
           content: null,
           copyFrom: file.copy_from as ProposeCopyFrom,
           uploaded: null,
           remove: false,
+          mode,
         };
   });
 
@@ -1125,6 +1182,7 @@ export async function gitPropose(
         path: file.path,
         blobOid: null,
         size: null,
+        mode: null,
         source: { kind: 'delete', removedBlobOid: gone.oid, mode: gone.mode },
       });
       continue;
@@ -1135,6 +1193,9 @@ export async function gitPropose(
         path: file.path,
         blobOid: src.oid,
         size: null,
+        // The caller's mode if it named one, otherwise the SOURCE's -- which is
+        // the whole point of lifting the 100755 refusal in resolveCopySource.
+        mode: file.mode === null ? src.mode : file.mode,
         source: {
           kind: 'copy',
           path: src.path,
@@ -1160,6 +1221,7 @@ export async function gitPropose(
         path: file.path,
         blobOid: src.oid,
         size: src.size,
+        mode: file.mode,
         source: { kind: 'upload', sha256: src.sha256 },
       });
       continue;
@@ -1170,7 +1232,13 @@ export async function gitPropose(
       gitdir: ctx.gitdir,
       blob,
     });
-    written.push({ path: file.path, blobOid, size: blob.byteLength, source: { kind: 'content' } });
+    written.push({
+      path: file.path,
+      blobOid,
+      size: blob.byteLength,
+      mode: file.mode,
+      source: { kind: 'content' },
+    });
   }
 
   const treeOid = await buildTree(
@@ -1178,7 +1246,11 @@ export async function gitPropose(
     baseTree,
     written
       .filter((w) => w.source.kind !== 'delete')
-      .map((w) => ({ path: w.path, oid: w.blobOid as string })),
+      .map((w) => ({
+        path: w.path,
+        oid: w.blobOid as string,
+        mode: w.mode === null ? undefined : w.mode,
+      })),
     written.filter((w) => w.source.kind === 'delete').map((w) => w.path),
   );
 

@@ -1,19 +1,19 @@
-# release manifest v13.4
-# generated from source commit d8d73977596145165fd28eb9c661f74821341d2d
+# release manifest v14.0
+# generated from source commit 3b1c9d4982e15145e4413d79fb575df395c2bd80
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
-b053cdbcd3cfecaf     17311  FEATURES.md
+d63d2d77df2f9872     17310  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 78cc7525c53ed734      4150  NOTICE
-ef9d050bcaf00bf0     23961  README.md
-85415e5a80250934     16811  SECURITY.md
-52ad9e8b0d4fe12d    412307  install.sh
+8ed8bfbe99133af3     23961  README.md
+653a6bd17c610f23     17376  SECURITY.md
+2bec13c40a70827f    412307  install.sh
 a9692055a950925d     45532  uninstall.sh
-322150089c7648ca     14689  upgrade.sh
+b153361a389b2ef8     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-8399533afdf1b5b2       639  agent-plugin/plugin.json
+d1c688303915043d       639  agent-plugin/plugin.json
 b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
@@ -26,10 +26,10 @@ eb686039b4985d17      1064  control-plane/package.json
 415023a6d54977cf     74093  control-plane/mcp2026/conformance.mjs
 e3f26784f73fc8fe     14216  control-plane/src/dash.html
 a945184f44c56f9f     38888  control-plane/src/ghtools.ts
-63f522f4fa290214    132358  control-plane/src/gittools.ts
-67596eadcc4423bb     28968  control-plane/src/gppatch.ts
-caa5f22bcc7d2227    176812  control-plane/src/harness.html
-5aa021e6c561d7a1    839140  control-plane/src/index.ts
+9acbd4f2f63777e4    134701  control-plane/src/gittools.ts
+5abc7fca2f7f1ff2     36113  control-plane/src/gppatch.ts
+a320968b22599bcf    176186  control-plane/src/harness.html
+81f734cf483f82b6    881775  control-plane/src/index.ts
 22db75f0e21c8e3d      9314  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
 3788869547c9b7ce     33245  control-plane/src/mcp2026.ts
@@ -56,9 +56,9 @@ ecdc94f12edde025     16261  control-plane/src/pcgit/07-refs/src/push.ts
 c5b69b06cd702d38      8049  control-plane/src/pcgit/09-mcp/src/context.ts
 e277961bba823332     10114  control-plane/src/pcgit/09-mcp/src/diff.ts
 a2bb5727fe6a17e2      4182  control-plane/src/pcgit/09-mcp/src/errors.ts
-35879030ca376297     61538  control-plane/src/pcgit/09-mcp/src/ops.ts
+ec06793c3d85dd2f     64333  control-plane/src/pcgit/09-mcp/src/ops.ts
 406ae47e0d07f066      9957  control-plane/src/pcgit/09-mcp/src/ref-gate.ts
-2b07148791737798     15144  control-plane/src/pcgit/09-mcp/src/tree.ts
+60370c546b9f94fc     16661  control-plane/src/pcgit/09-mcp/src/tree.ts
 7903b244d135e858     95941  control-plane/src/wiki-assets/01-surface-split.png
 537dab7fd8f8e0d2     32194  control-plane/src/wiki-assets/02-auth-path.png
 1ee08c44ae9d1062     58897  control-plane/src/wiki-assets/03-git-store.png

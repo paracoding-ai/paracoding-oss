@@ -135,7 +135,10 @@ export async function readTreeEntries(
 
 interface DirNode {
   dirs: Map<string, DirNode>;
-  files: Map<string, { oid: string }>;
+  // [PCGIT-MODE-V161] `mode`, when present, is an EXPLICIT request to set the blob's mode
+  // rather than inherit it. Absent means the historical behaviour: preserve what is there,
+  // default a new path to 100644.
+  files: Map<string, { oid: string; mode?: string }>;
   /** Leaf names to REMOVE from this directory. [SEC-PROPOSE-DELETE-V1] */
   removals: Set<string>;
 }
@@ -168,13 +171,13 @@ function descend(root: DirNode, path: string): { node: DirNode; leaf: string } {
  * directory is rewritten exactly once no matter how many entries land in it.
  */
 function planFrom(
-  files: Array<{ path: string; oid: string }>,
+  files: Array<{ path: string; oid: string; mode?: string }>,
   deletes: readonly string[],
 ): DirNode {
   const root = emptyDir();
   for (const file of files) {
     const { node, leaf } = descend(root, file.path);
-    node.files.set(leaf, { oid: file.oid });
+    node.files.set(leaf, { oid: file.oid, mode: file.mode });
   }
   for (const path of deletes) {
     const { node, leaf } = descend(root, path);
@@ -227,9 +230,17 @@ function assertNoNameCollisions(node: DirNode, prefix: string): void {
  * Rewrite the tree rooted at `baseTreeOid` with the given whole-file contents.
  *
  * Existing entries are preserved verbatim. When a path already exists as a
- * blob, its MODE IS PRESERVED -- replacing the contents of a 100755 script must
- * not silently drop its executable bit, and the tool surface has no mode
- * parameter to say otherwise. New files get 100644.
+ * blob and the caller says nothing, its MODE IS PRESERVED -- replacing the
+ * contents of a 100755 script must not silently drop its executable bit. A new
+ * path with no stated mode gets 100644.
+ *
+ * [PCGIT-MODE-V161] A file entry MAY carry `mode` to set it explicitly, which is
+ * how a chmod is expressed at all. Only '100644' and '100755' are accepted; any
+ * other value is refused by name rather than coerced. Before this existed the
+ * fleet could not re-cut oss/release -- fourteen of its twenty entries are pure
+ * 100644 -> 100755 changes -- and an agent asked to do it closed the work item
+ * by deleting the gate instead. A surface that cannot say what the job needs
+ * does not yield a refusal, it yields a workaround.
  *
  * A path that currently exists as a tree, a symlink or a gitlink is refused:
  * turning a directory into a file, or clobbering a submodule pointer, is a
@@ -243,7 +254,7 @@ function assertNoNameCollisions(node: DirNode, prefix: string): void {
 export async function buildTree(
   deps: GitDeps,
   baseTreeOid: string | null,
-  files: Array<{ path: string; oid: string }>,
+  files: Array<{ path: string; oid: string; mode?: string }>,
   deletes: readonly string[] = [],
 ): Promise<string> {
   const oid = await writeSubtree(deps, baseTreeOid, planFrom(files, deletes), '');
@@ -322,8 +333,20 @@ async function writeSubtree(
       );
     }
     byName.set(name, {
-      // Preserve an existing executable bit; default new files to 100644.
-      mode: existing ? existing.mode : MODE_FILE,
+      // [PCGIT-MODE-V161] An explicit mode wins; otherwise preserve an existing
+      // executable bit and default a new file to 100644, exactly as before.
+      mode: (() => {
+        if (file.mode === undefined) return existing ? existing.mode : MODE_FILE;
+        if (file.mode === MODE_FILE || file.mode === MODE_EXEC) return file.mode;
+        throw new ToolError(
+          'BAD_REQUEST',
+          `cannot write ${joinPath(prefix, name)}: mode "${file.mode}" is not one this API ` +
+            `writes. Use "100644" for a regular file or "100755" for an executable. A mode ` +
+            `outside those two is refused rather than rounded off, because a silently ` +
+            `corrected mode is the same defect as having no mode at all.`,
+          { path: joinPath(prefix, name), mode: file.mode },
+        );
+      })(),
       path: name,
       oid: file.oid,
       type: 'blob',

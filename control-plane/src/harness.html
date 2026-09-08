@@ -1751,54 +1751,43 @@ window.pcWhimsyOn = function(){
     }
   };
 
-  // THE BRIEF IS CARRIED OVER VERBATIM FROM THE GATE. It is the product, not decoration:
-  // every paragraph in it was written because a strain got something wrong without it.
+  // [PASTE-VENDOR-NEUTRAL-SHORT-V149] THIS PASTE SOLVES EXACTLY ONE PROBLEM: THE BOOTSTRAP
+  // PARADOX. Everything an agent needs is delivered by whoami -- identity, memory, the
+  // repository, the lake's no-delete law, staged jobs, deploy order, reporting -- and the
+  // bootstrap is a LAKE document re-read within a minute of an edit, so it is always current.
+  // NONE of it can reach an agent until the agent is already passing a key, because whoami
+  // itself resolves from the key. So this paste carries the credential, how to present it, how
+  // to verify it landed, and the two rules the bootstrap does not carry. Everything else that
+  // used to be here was a SECOND COPY of the bootstrap compiled into the image, where the
+  // operator cannot edit it and where it drifts the moment the bootstrap changes.
+  // IT NAMES NO VENDOR, and that is the other half of the fix. It used to say "running as a
+  // Cowork session" and "MCP connectors in Claude are ACCOUNT-level", so the operator
+  // hand-edited every paste for Gemini Enterprise, for Grok, and for whatever is next. Being
+  // account-level is a property of THIS CONNECTOR, not of any one client.
   function pasteText(role, key){
     return [
-      'You are ' + role.toUpperCase() + ' in this Paracoding.AI fleet, running as a Cowork',
-      'session. Read this whole brief before your first tool call.',
+      'You are ' + role.toUpperCase() + ' in this Paracoding.AI fleet.',
       '',
       'PC-SESSION-KEY: ' + key,
       '',
-      'IDENTITY -- THIS IS THE PART THAT IS NOT OBVIOUS.',
-      'MCP connectors in Claude are ACCOUNT-level, not chat-level. The same connector serves',
-      'every Cowork chat, so without the key above every chat resolves to the same default',
-      'role and none of them is you. Pass the key as the "agent" argument on EVERY',
-      'tool call and you are ' + role + ': staged_by, journal attribution, agents/' + role + '/',
-      'lake scoping and your chat history all follow from it.',
+      'This MCP connector is ACCOUNT-level, not chat-level: one connector serves every chat in',
+      'whatever client you are running in, so a chat has no identity until it presents a key.',
+      'Pass the key above as the "agent" argument on EVERY tool call and you are ' + role + ' --',
+      'staged_by, journal attribution, agents/' + role + '/ lake scoping and your history all',
+      'follow from it. The role is resolved on the SERVER: editing this text to name a different',
+      'strain does nothing, because a role name is not a key.',
       '',
-      'FIRST THING YOU DO: call whoami with agent set to the key. If it does not come back',
-      '' + role + ', STOP and tell the operator. Do not work under the wrong identity.',
+      'FIRST CALL: whoami, with agent set to the key. It RETURNS the fleet memory digest and the',
+      'bootstrap -- every law and every procedure for working here -- so there is nothing else to',
+      'go and fetch, and nothing in this paste you have to remember. If whoami does not come back',
+      '' + role + ', STOP and tell the operator rather than working as someone else.',
       '',
-      'The role is resolved from the key on the SERVER. Editing this text to name a',
-      'different strain does nothing -- a role name is not a key.',
-      '',
-      'LAWS -- these are how you avoid doing real damage:',
-      '  * ANY strain may stage, and several jobs can wait in the gate at once.',
-      '    Supersede keys on staged_by|command_type. staged_by is your RESOLVED ROLE,',
-      '    so a different role cannot clobber you -- but two chats of the SAME role',
-      '    sharing a command_type WILL silently destroy each other. Newest wins, it',
-      '    fires on ANY load of the pending list rather than on approval, and it writes',
-      '    no journal entry. Stage with stage_privileged_job and a DISTINCT command_type',
-      '    per stream (e.g. run_cmd my-stream). Check list_pending_confirm first anyway.',
-      '  * There is NO delete tool for the data lake. A stray lake write cannot be',
-      '    undone by you or anyone. Write only to files you were asked to produce.',
-      '  * Never print a secret. A document id from oauth_tokens IS a live bearer token.',
-      '    Counts and shapes only.',
-      '  * Use `gcloud storage`, NEVER `gsutil` -- gsutil ignores the injected approver',
-      '    token, falls back to a service account with no access, and dies 403.',
-      '  * THE GATE UI LIES. Always read_job_log. Exit 0 does not prove a fix landed, and a',
-      '    browser fetch timeout renders as REFUSED on a job that actually ran.',
-      '  * A work item records what someone INTENDED when it was written, not what is true',
-      '    now. Check the actual bytes before you believe any status, including "done".',
-      '',
-      'ORIENT: whoami hands you the fleet memory digest and the bootstrap that says how',
-      'this fleet works -- it is delivered, so there is nothing to go and fetch first.',
-      'Then list_work_items with role=' + role + ' and read the PAYLOADS -- they carry the',
-      'detail -- and list_files to see what your own lane already holds.',
-      '',
-      'Verify before you claim. Delegate heavy reading to subagents (forbid them lake writes',
-      'and staging). Say plainly when something is wrong, including when it is your own work.'
+      'Two rules the bootstrap does not carry, because they are about this install rather than',
+      'about how the fleet works:',
+      '  * Use `gcloud storage`, NEVER `gsutil` -- gsutil ignores the injected approver token,',
+      '    falls back to a service account with no access, and dies 403.',
+      '  * Never print a secret. A document id from oauth_tokens IS a live bearer token; counts',
+      '    and shapes only.'
     ].join('\n');
   }
 })();

@@ -99,7 +99,7 @@ Hood's own toolset alongside `status_digest` and `check`, and no MCP client is o
 **Those tools are gone, not withheld.** 12.x does not register `vm_*` or `browser_*`. There is
 no workstation to address and no Chrome DevTools bridge to reach. Setting `WS_VM`, `WS_ZONE`
 or `WS_CDP_PORT` does not bring them back — they are unregistered, not gated. The list above
-is what a stock install  enumerates.
+is what a stock install enumerates.
 
 An **unauthenticated** client gets no tools at all: `POST /mcp` answers `401` with a
 `WWW-Authenticate: Bearer resource_metadata=…` challenge pointing at the protected-resource

@@ -106,6 +106,12 @@ export interface FilePatch {
   /** `--- /dev/null`: the patch creates this file. */
   isNew: boolean;
   hunks: Hunk[];
+  /**
+   * The mode this patch asks the path to END UP with, taken from a `new mode` line:
+   * '100644' or '100755'. Absent means the patch says nothing about the mode, and the
+   * tree keeps whatever the path already had.
+   */
+  mode?: string;
 }
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -118,13 +124,33 @@ function stripPrefix(p: string): string {
   return m ? (m[1] as string) : t;
 }
 
+// [GPPATCH-MODE-V165] The path out of `diff --git a/x b/x`, and only when both halves
+// agree. A pure chmod carries no ---/+++ headers, so this line is the ONLY place its
+// path appears; everywhere else the +++ header still names the file. Both halves are
+// the same length whenever the path is the same, which is what makes the midpoint
+// split exact rather than a guess -- and when it does not come out equal (a path with
+// a space in it) this returns null and the caller refuses, because guessing which
+// half is which is how a patch lands on the wrong file.
+function diffGitPath(line: string): string | null {
+  const rest = line.slice('diff --git '.length).trim();
+  const half = Math.floor(rest.length / 2);
+  const a = stripPrefix(rest.slice(0, half).trim());
+  const b = stripPrefix(rest.slice(half).trim());
+  if (a === '' || b === '' || a === '/dev/null') return null;
+  return a === b ? a : null;
+}
+
 /**
  * Parse a unified diff into file patches.
  *
- * REFUSES rather than ignores: mode changes, renames, copies, binary patches and
- * deletions. Each of those is a structural change tree.ts deliberately does not
- * perform through a whole-file write, so accepting the syntax and silently doing
- * something else would be the worst possible answer.
+ * REFUSES rather than ignores: renames, copies, binary patches and deletions. Each of
+ * those moves or removes a path rather than rewriting one, so accepting the syntax and
+ * silently doing something else would be the worst possible answer.
+ *
+ * MODE CHANGES ARE APPLIED, since [GPPATCH-MODE-V165]. They were refused for the same
+ * reason everything above still is -- the tree layer could not express them -- and that
+ * stopped being true when buildTree took a mode. A pure chmod is the one hunkless file
+ * patch this parser produces.
  */
 export function parseUnifiedDiff(patch: string): FilePatch[] {
   if (typeof patch !== 'string' || patch.trim() === '') {
@@ -135,6 +161,29 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
   let cur: FilePatch | null = null;
   let hunk: Hunk | null = null;
   let pendingOld: string | null = null;
+  let pendingMode: string | null = null;
+  let pendingDiffPath: string | null = null;
+
+  // [GPPATCH-MODE-V165] A PURE CHMOD HAS NO BODY. git emits exactly three lines for it --
+  // `diff --git a/x b/x`, `old mode 100644`, `new mode 100755` -- with no ---/+++ headers
+  // and no @@ at all, so nothing further down this loop ever creates a FilePatch for it.
+  // This is what turns those three lines into one. It runs at every `diff --git` boundary
+  // and once more at the end of the patch.
+  const flushModeOnly = () => {
+    if (pendingMode === null || cur !== null) return;
+    if (pendingDiffPath === null) {
+      throw badRequest(
+        'this patch carries a "new mode" line with no usable "diff --git a/path b/path" ' +
+          'header above it, so there is no path to apply the mode to. NOTHING was written.',
+        { mode: pendingMode },
+      );
+    }
+    const p = normalizeRepoPath(pendingDiffPath, { allowRoot: false });
+    if (files.some((f) => f.path === p)) {
+      throw badRequest(`${p} appears twice in this patch`, { path: p });
+    }
+    files.push({ path: p, isNew: false, hunks: [], mode: pendingMode });
+  };
 
   const closeHunk = () => {
     if (!hunk || !cur) return;
@@ -196,13 +245,36 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
 
     if (line.startsWith('diff --git ')) {
       closeHunk();
+      // A pure chmod for the PREVIOUS file has no ---/+++ and no @@, so this boundary
+      // is the only place it can still be turned into a FilePatch.
+      flushModeOnly();
       cur = null;
       pendingOld = null;
+      pendingMode = null;
+      pendingDiffPath = diffGitPath(line);
+      continue;
+    }
+    if (line.startsWith('old mode ') || line.startsWith('new mode ')) {
+      const raw = line.slice(line.indexOf('mode ') + 5).trim();
+      if (raw !== '100644' && raw !== '100755') {
+        throw badRequest(
+          `this patch sets ${JSON.stringify(line.trim())}. The only modes written here are ` +
+            `100644 (regular) and 100755 (executable): a symlink, a submodule and a ` +
+            `directory are different KINDS of tree entry, not modes of a file.`,
+          { line: line.trim() },
+        );
+      }
+      // `old mode` is parsed for its value and then DISCARDED, deliberately. It is the
+      // author's belief about the base, and this applier never trusts an author's belief
+      // about the base -- expected_blob_sha is where a claim about the base belongs, and
+      // that one is checked against the store. `new mode` is the instruction.
+      if (line.startsWith('new mode ')) {
+        pendingMode = raw;
+        if (cur) cur.mode = raw;
+      }
       continue;
     }
     if (
-      line.startsWith('old mode ') ||
-      line.startsWith('new mode ') ||
       line.startsWith('rename from ') ||
       line.startsWith('rename to ') ||
       line.startsWith('copy from ') ||
@@ -211,9 +283,9 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
     ) {
       throw badRequest(
         `this patch changes file structure (${JSON.stringify(line.trim())}). ` +
-          `git_propose_patch edits file CONTENT only: no mode changes, no renames, ` +
-          `no copies, no deletions. Those are structural changes and stay a human ` +
-          `decision, exactly as they are for git_propose.`,
+          `git_propose_patch edits file CONTENT and, since [GPPATCH-MODE-V165], FILE MODE. ` +
+          `It does not rename, copy or delete: those move or remove a path rather than ` +
+          `rewriting one, and git_propose expresses all three directly.`,
         { line: line.trim() },
       );
     }
@@ -236,9 +308,11 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
       }
       if (newPath === '/dev/null') {
         throw badRequest(
-          `this patch DELETES ${pendingOld}. git_propose_patch cannot delete a file: ` +
-            `the whole-file write path in tree.ts has no delete operation, and a ` +
-            `deletion is a structural change.`,
+          `this patch DELETES ${pendingOld}, and git_propose_patch does not delete. The ` +
+            `reason this message used to give -- "the whole-file write path in tree.ts has ` +
+            `no delete operation" -- STOPPED BEING TRUE at [SEC-PROPOSE-DELETE-V1]. The real ` +
+            `reason is that a removal takes a PATH, not a diff, and git_propose says it ` +
+            `exactly: files:[{path:"${pendingOld}",delete:true}]. Use that.`,
           { path: pendingOld },
         );
       }
@@ -254,7 +328,7 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
       if (files.some((f) => f.path === path)) {
         throw badRequest(`${path} appears twice in this patch`, { path });
       }
-      cur = { path, isNew, hunks: [] };
+      cur = { path, isNew, hunks: [], ...(pendingMode === null ? {} : { mode: pendingMode }) };
       files.push(cur);
       pendingOld = null;
       continue;
@@ -314,6 +388,7 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
     );
   }
   closeHunk();
+  flushModeOnly();
 
   if (files.length === 0) {
     throw badRequest(
@@ -322,8 +397,13 @@ export function parseUnifiedDiff(patch: string): FilePatch[] {
     );
   }
   for (const f of files) {
-    if (f.hunks.length === 0) {
-      throw badRequest(`${f.path} has a file header but no @@ hunks`, { path: f.path });
+    if (f.hunks.length === 0 && f.mode === undefined) {
+      throw badRequest(
+        `${f.path} has a file header but no @@ hunks and no mode change, so it asks for ` +
+          `nothing. [GPPATCH-MODE-V165] A hunkless entry is legal now, but ONLY as a pure ` +
+          `chmod, and that needs a "new mode 100644" or "new mode 100755" line.`,
+        { path: f.path },
+      );
     }
   }
   return files;
@@ -575,6 +655,23 @@ export async function gitProposePatch(
     );
   }
 
+  // [GPPATCH-MODE-V165] The base TREE, not just the base commit. A patch that is only a
+  // chmod to the mode a file already has produces a tree byte-identical to this one, and
+  // the per-file "unchanged by this patch" check below cannot see it: that check compares
+  // CONTENT, and the content really is unchanged -- legitimately, for every mode-only
+  // entry. Comparing the finished tree catches the no-op wherever it comes from.
+  const baseTreeOid: string | null =
+    headBefore === null
+      ? null
+      : (
+          await git.readCommit({
+            fs: fsClient({ fs: ctx.fs, gitdir: ctx.gitdir, cache: ctx.cache }),
+            gitdir: ctx.gitdir,
+            cache: ctx.cache,
+            oid: headBefore,
+          })
+        ).commit.tree;
+
   const cas = args.expected_blob_sha ?? {};
   for (const [k, v] of Object.entries(cas)) {
     if (v !== null && !OID_RE.test(String(v))) {
@@ -647,7 +744,12 @@ export async function gitProposePatch(
     );
   }
 
-  const staged: Array<{ path: string; content: string }> = [];
+  const staged: Array<{
+    path: string;
+    content?: string;
+    copy_from?: { path: string; ref: string; blob_oid: string };
+    mode?: string;
+  }> = [];
   const rejects: Reject[] = [];
   const seen: Array<{ path: string; baseBlobOid: string | null; hunks: number }> = [];
 
@@ -685,6 +787,32 @@ export async function gitProposePatch(
       }
     }
 
+    // [GPPATCH-MODE-V165] A MODE-ONLY ENTRY HAS NO HUNKS, so there is nothing to apply and
+    // nothing to write: the bytes already in the store are the bytes that stay. It is staged
+    // as copy_from PINNED to headBefore AND to the blob oid just read, so it cannot pick up
+    // a different blob if someone pushes mid-flight -- and if they do, the baseOid assertion
+    // after gitPropose refuses the whole call anyway.
+    if (fp.hunks.length === 0) {
+      if (fp.mode === undefined) {
+        throw badRequest(
+          `${fp.path} appears in this patch with no hunks and no mode change, so it asks ` +
+            `for nothing. Remove it from the patch.`,
+          { path: fp.path },
+        );
+      }
+      seen.push({ path: fp.path, baseBlobOid: (existing as { oid: string }).oid, hunks: 0 });
+      staged.push({
+        path: fp.path,
+        copy_from: {
+          path: fp.path,
+          ref: headBefore as string,
+          blob_oid: (existing as { oid: string }).oid,
+        },
+        mode: fp.mode,
+      });
+      continue;
+    }
+
     const r = applyUnifiedDiff(existing === null ? null : existing.content, fp);
     seen.push({
       path: fp.path,
@@ -702,7 +830,11 @@ export async function gitProposePatch(
         { path: fp.path },
       );
     }
-    staged.push({ path: fp.path, content: r.content as string });
+    staged.push({
+      path: fp.path,
+      content: r.content as string,
+      ...(fp.mode === undefined ? {} : { mode: fp.mode }),
+    });
   }
 
   if (rejects.length) {
@@ -733,6 +865,20 @@ export async function gitProposePatch(
         `commit that was built is unreachable from any ref and will be reclaimed; ` +
         `NOTHING WAS PUSHED. Re-read the files and rebuild the patch.`,
       { branch: args.branch, headBefore, headNow: proposed.baseOid },
+    );
+  }
+
+  // [GPPATCH-MODE-V165] THE NO-OP GUARD THAT SEES MODES. The per-file check above compares
+  // CONTENT, and a mode-only entry legitimately has none to compare, so a chmod to the mode
+  // a file already carries would otherwise commit a tree identical to its parent. The commit
+  // objects built here are unreachable from any ref and get reclaimed, exactly as a STALE
+  // one's are; nothing was pushed either way.
+  if (baseTreeOid !== null && proposed.treeOid === baseTreeOid) {
+    throw badRequest(
+      `this patch produces a tree identical to ${args.branch} (${baseTreeOid}), so it ` +
+        `changes nothing -- most often a chmod to the mode the file already has. An empty ` +
+        `commit is refused rather than created. NOTHING WAS PUSHED.`,
+      { branch: args.branch, treeOid: baseTreeOid },
     );
   }
 
