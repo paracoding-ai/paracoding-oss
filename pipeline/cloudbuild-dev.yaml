@@ -213,12 +213,43 @@ steps:
         LANE="${_LANE}"
         REGION="${_REGION}"
 
+        # [LANE-EXPLICIT-NAMES-V1 2026-09-14] THE MARKER IS A DERIVATION INPUT, NOT A LICENCE.
+        # Everything the marker's pc-suffix label feeds is a NAME, and names below can also be
+        # supplied directly -- the escape hatch this file already documents ("a non-empty value
+        # here still WINS"). When EVERY name is supplied there is nothing left to derive, so
+        # reading the marker would be a ceremony whose only effect is to refuse a build that
+        # needs nothing from it.
+        #
+        # WHY THIS EXISTS. A single-lane install -- build, deploy to the one real service, judge
+        # it, move traffic on green -- has no rehearsal lane and therefore no lane marker. Before
+        # this, that install could not run this pipeline at all, and the alternative on offer was
+        # a SECOND copy of it with the checks removed. A pipeline whose judge was deleted to make
+        # it fit is not a smaller pipeline, it is an unjudged deploy, and this file exists to
+        # prevent exactly that.
+        #
+        # FAIL-CLOSED IS PRESERVED WHERE IT MEANS ANYTHING. The escape is all-or-nothing: miss a
+        # single name and the derived path runs unchanged, marker read and all. There is no
+        # partial mode in which some names are derived from an absent marker -- that is the shape
+        # that composes a plausible-looking resource name and deploys at it.
+        EXPLICIT_ALL=1
+        for _v in "${_CP_SVC}" "${_MC_SVC}" "${_GX_SVC}" "${_LAKE}" "${_SMOKE_SA}" "${_FIRESTORE_DB}"; do
+          [ -n "$$_v" ] || EXPLICIT_ALL=0
+        done
+        if [ "$$EXPLICIT_ALL" = "1" ]; then
+          INFIX=""
+          echo "  ok   every resource name was supplied explicitly; nothing to derive."
+          echo "       the install marker is NOT read, because no value below comes from it."
+          echo "       lane '$$LANE' is a label on this run, not a lookup."
+        else
         MARK="pc-$${LANE}-install-marker"
         if ! TOK=$$(gcloud secrets describe "$$MARK" --project "$$PROJECT" \
                       --format='value(labels.pc-suffix)' 2>/dev/null); then
           echo "REFUSE cannot read the install marker $$MARK in $$PROJECT."
-          echo "  Lane '$$LANE' is not installed there. Install it -- SAME PROJECT as prod:"
+          echo "  Lane '$$LANE' is not installed there, OR this build cannot describe the"
+          echo "  secret. Install the lane -- SAME PROJECT as prod:"
           echo "      PC_LANE=$$LANE bash install.sh $$PROJECT $$REGION"
+          echo "  Or supply EVERY name explicitly (_CP_SVC _MC_SVC _GX_SVC _LAKE _SMOKE_SA"
+          echo "  _FIRESTORE_DB) and this step will derive nothing and read nothing."
           exit 9
         fi
         TOK=$$(printf '%s' "$$TOK" | tr -d '[:space:]')
@@ -228,6 +259,7 @@ steps:
           *) echo "REFUSE the pc-suffix label on $$MARK is not six lowercase hex characters."
              echo "  This build will not guess a resource name."; exit 9 ;;
         esac
+        fi
 
         # A non-empty substitution still WINS -- the escape hatch survives, it just is not
         # the default any more.
@@ -258,7 +290,19 @@ steps:
           echo "LANE_BUCKET=$$LANE_BUCKET"
           echo "LAKE=$$LAKE"
           echo "SMOKE_SA=$$SMOKE_SA"
-          echo "FIRESTORE_DB=$$FIRESTORE_DB"
+          # *** SINGLE-QUOTED, AND IT HAS TO BE. *** The default Firestore database
+          # is literally named "(default)", parentheses included, and every step
+          # SOURCES this file. Unquoted, `FIRESTORE_DB=(default)` is a bash ARRAY
+          # ASSIGNMENT: the variable becomes a one-element array and $$FIRESTORE_DB
+          # -- written with two dollars because Cloud Build resolves substitutions
+          # inside COMMENTS as well, and one dollar here fails the whole config --
+          # expands to `default`, so the collector asks Firestore for a database
+          # that does not exist and gets a 404 that reads exactly like a permission
+          # refusal. MEASURED 2026-09-19 -- "Project 'your-prod-project' or
+          # database 'default' does not exist" -- after three runs of reading a bare
+          # HTTP 404 and looking for the missing IAM grant. A database id is
+          # [a-z0-9-] or "(default)", so it can never contain a single quote.
+          echo "FIRESTORE_DB='$$FIRESTORE_DB'"
         } > /workspace/lane.env
         echo "--- lane resolved -------------------------------------------"
         cat /workspace/lane.env
@@ -619,13 +663,69 @@ steps:
           echo "ROUTE TABLE absent: routes.table_source records why, every route field"
           echo "derived from it is OMITTED, and smoke F7.1/F7.2/F7.3/F2.5 go RED."
         fi
+        # [SEC-IAP-PRODNAME-V1] THE IAP FENCE IS ARGUED BY SERVICE NAME NOW, AND THE
+        # NAME IT REFUSES IS A LITERAL HERE RATHER THAN A SUBSTITUTION. What this line
+        # used to do was pass "$$PROJECT" as --iap-toggle-projects -- the allowlist for
+        # the very project being collected -- so the collector's "project not in
+        # allowed" test was false by construction and the fence could never fire. In
+        # the single-project layout dev and prod are lanes of ONE project, so the
+        # project question cannot answer "is this safe", while --service is fed from
+        # _CP_SVC, an OVERRIDABLE trigger substitution: a trigger naming the production
+        # console would have taken IAP off the live console for the probe window.
+        #
+        # --prod-console-services NAMES THE SERVICE THIS COLLECTOR MUST NEVER TOUCH and
+        # the collector refuses OUTRIGHT -- exit 4, before any read, probe or update --
+        # when --service is on it. The literal paracoding-control-plane is read out of
+        # this repository, not guessed: pipeline/cloudbuild-prod.yaml declares it as
+        # _CP_SVC, the console prod deploys and moves traffic onto, and
+        # pipeline/home-deploy.sh passes the same literal. IT IS DELIBERATELY NOT A
+        # SUBSTITUTION: a substitution is overridable by the same trigger that would
+        # override _CP_SVC, which is the hole being closed.
+        #
+        # THIS LANE STILL PROBES, AND THAT WAS CHECKED BEFORE THIS WAS WRITTEN.
+        # resolve-lane above sets CP_SVC to the derived lane name
+        # paracoding-<lane>-<infix>control-plane -- for LANE=dev that is
+        # paracoding-dev-control-plane, or paracoding-dev-<6 hex>-control-plane when
+        # the install marker carries a suffix -- and neither is paracoding-control-plane,
+        # so the toggle runs exactly as it did and F6.IAP_RESTORED_AFTER_PROBES stays
+        # EXERCISED instead of turning into an unearned NOT-EXERCISED.
+        #
+        # EXIT 4 NEEDS NOTHING NEW FROM THE GATE: promote-gate.sh condition 0 already
+        # refuses any non-zero collect rc with 64, and the refused bundle also carries
+        # _collect_refused for its second sink.
+        #
+        # [SEC-IAP-PRODNAME-V2] AND THE HOME LANE SAYS SO OUT LOUD, BECAUSE THE PARAGRAPH
+        # ABOVE IS WRONG ABOUT THIS PIPELINE. It says "a lane build must never carry the
+        # production one" and reasons from LANE=dev. MEASURED at integration against the
+        # real builds: EVERY promotion run of this file carries _LANE=home with
+        # _CP_SVC=paracoding-control-plane -- build f6d29cfb at 55d12120 and b246fe00 at
+        # b13bac78 both show exactly that, and pipeline/home-deploy.sh passes the same
+        # literal. The home lane IS the lane that probes the LIVE console, which is why
+        # wave 1 added F6.IAP_RESTORED_AFTER_PROBES to assert IAP comes back afterwards.
+        # A blanket refusal would have made collect rc 4, gate condition 0 exit 64, and
+        # every future promotion red -- a security fix that stops the release pipeline is
+        # not a security fix, it is an outage with a good explanation.
+        #
+        # SO THE REFUSAL IS THE DEFAULT AND THE ACKNOWLEDGEMENT IS LANE-GATED. This is a
+        # SHELL test on $$LANE, not a substitution, and that is the whole point: a dev
+        # lane trigger that overrides _CP_SVC to the production console gets no flag and
+        # still refuses. To reach the live console a build must ALSO declare itself the
+        # home lane, which is a build that has said what it is.
+        PROD_IAP_ACK=""
+        if test "$$LANE" = "home" ; then
+          PROD_IAP_ACK="--allow-prod-iap-toggle"
+          echo "HOME LANE: acknowledging the IAP toggle against $$CP_SVC deliberately."
+        else
+          echo "LANE $$LANE: no prod-console acknowledgement; a prod _CP_SVC would refuse."
+        fi
         collect() {
           python3 /workspace/work/pipeline/collect-evidence.py \
             --project $$PROJECT --region ${_REGION} \
             --service $$CP_SVC --gate-exec $$GX_SVC \
             --tag "$$TAG" --tree /workspace/work \
             --out /workspace/evidence.json --mcp-service "$$MC_SVC" --lake "$$LAKE" \
-            --iap-toggle-projects $$PROJECT --firestore-db $$FIRESTORE_DB
+            --iap-toggle-projects "$$PROJECT" --firestore-db "$$FIRESTORE_DB" \
+            --prod-console-services "paracoding-control-plane" $$PROD_IAP_ACK
         }
         # PERSIST THE COLLECTOR'S EXIT CODE. [SEC-CI-COLLECTRC-V1]
         # This step used to run the collect line and then `echo "collect rc=$$?"` --
@@ -690,10 +790,24 @@ steps:
         test -s /workspace/work/devgate/smoke.py || { echo "smoke.py missing or empty"; echo 12 > /workspace/smoke.rc; exit 0; }
         test -s /workspace/evidence.json || { echo "evidence.json missing or empty"; echo 12 > /workspace/smoke.rc; exit 0; }
         wc -l /workspace/work/devgate/smoke.py
+        # [SEC-CI-INSTALLEXIT-NOTMEASURED-V1] THIS STEP USED TO HAND THE JUDGE
+        # SMOKE_INSTALL_EXIT=20 AS A LITERAL. 20 is the judge's code for "the
+        # installer reached the 9/10 boundary and stopped there" -- and NO
+        # INSTALLER RUNS IN THIS LANE AT ALL. Verdict 0 in smoke.py is a
+        # conjunction of an install half and a functional half, so the literal
+        # made the install half true by assignment: the report printed "0
+        # requires BOTH" over an installer that was never started, the marker
+        # recorded smoke:"pass", and promote-gate.sh moved production traffic on
+        # that word. Measured at this ref: the only reader of that variable is
+        # devgate/smoke.py, and the only writer of it in this lane was this line.
+        # THE VARIABLE IS NOW UNSET. smoke.py reads its absence as NOT MEASURED
+        # and reports only the functional half, which is the half this lane
+        # actually exercises; verdict 0 is still reachable on a clean bundle.
+        # Setting it again is how a REAL installer exit gets in. A literal is the
+        # defect, not the interface.
         judge() {
           SMOKE_EVIDENCE=/workspace/evidence.json \
           SMOKE_REPORT=/workspace/smoke-report.txt \
-          SMOKE_INSTALL_EXIT=20 \
           python3 /workspace/work/devgate/smoke.py
         }
         judge > /workspace/smoke-stdout.txt 2>&1

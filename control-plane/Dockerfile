@@ -41,7 +41,7 @@ COPY package.json ./
 # the same clock.
 RUN npm install --omit=dev --no-audit --no-fund && npm install --no-save --no-audit --no-fund esbuild@0.21.5 && find /app -exec touch -h -t 198510260815 {} +
 COPY src ./src
-COPY route-audit.mjs route-baseline.json blob-audit.mjs blob-baseline.json ./
+COPY route-audit.mjs route-baseline.json blob-audit.mjs blob-baseline.json batch-cap-audit.mjs ./
 
 # [WIKI-ASSETS-V77] The wiki diagrams ride in on `COPY src ./src` above, which is exactly why
 # this line exists: a copy that silently picks up nothing still produces a green build, and
@@ -69,6 +69,15 @@ RUN node route-audit.mjs src/index.ts route-baseline.json
 # NO BLOBS: an encoded document anywhere under src/ fails the BUILD -- no image, no deploy.
 # 57% of this file was base64 on 2026-08-02 and the release leak gate could not see inside it.
 RUN node blob-audit.mjs src blob-baseline.json
+
+# [GE-BATCH-CAP-V2] THE BATCH RESULT BUDGET IS ABSOLUTE, and a regression here is invisible at
+# runtime: the seat simply stops being able to see the operator's own question, because a large
+# batch pushed it out of the context window -- and the result lands in the GE session permanently.
+# The original bug was a per-result FLOOR, which meant 32 tools produced 64,000 characters against
+# a 24,000 budget and 256 produced 512,000, with nothing reporting it. Counting characters would
+# not catch that; the INVARIANT is checked instead, across every batch size to 256. Same rule as
+# the two audits above: runs BEFORE esbuild, so a regression means no image is ever emitted.
+RUN node batch-cap-audit.mjs src/index.ts
 RUN npx esbuild src/index.ts --platform=node --format=cjs --target=node20 --outfile=dist/index.js \
  && test -s dist/index.js
 RUN npx esbuild src/gittools.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/gittools.js --external:firebase-admin --external:@google-cloud/storage --external:isomorphic-git \
@@ -123,6 +132,41 @@ RUN npx esbuild src/mcp2.ts --platform=node --format=cjs --target=node20 --outfi
 # APPENDED as its own RUN so every neighbouring line stays byte-identical.
 RUN npx esbuild src/mcp2026.ts --platform=node --format=cjs --target=node20 --outfile=dist/mcp2026.js \
  && test -s dist/mcp2026.js
+# [PC-WITNESS-V1] The evidence module. APPENDED as its own RUN so every neighbouring line stays
+# byte-identical -- a deploy pre-condition counts the gittools assertion above exactly once, and
+# this comment deliberately does not repeat that string.
+#
+# THIS LINE IS THE BUILD, NOT THE package.json SCRIPT. deploy/BUILD-FROM-THE-STORE.md says it
+# plainly: this Dockerfile does not run `npm run build`, so editing that script compiles nothing.
+# index.ts require()s ./evidence.js UNCONDITIONALLY in buildMcpServer, so without this line the
+# image builds green and every MCP request dies at the require.
+RUN npx esbuild src/evidence.ts --platform=node --format=cjs --target=node20 --outfile=dist/evidence.js \
+ && test -s dist/evidence.js
+# [PC-ANCHOR-V1] The anchoring module. NOT required at boot -- it runs out of band -- but built and
+# gated here for the same reason: a module that compiles to nothing should fail the build.
+RUN npx esbuild src/anchor.ts --platform=node --format=cjs --target=node20 --outfile=dist/anchor.js \
+ && test -s dist/anchor.js
+# [PC-WITNESS-V1] BOOT GATE, and `test -s` above cannot do this job. esbuild TRANSPILES: it never
+# resolves a specifier, so the size checks pass whether or not anchor.js's require of
+# ./evidence.js resolves. Only a real require() proves it. Build stage and runtime stage are the
+# same image here, so a require() that succeeds on this line is one that succeeds at boot, and the
+# whole "breaks at boot" class becomes "breaks at build". The exports are asserted BY NAME: a
+# module that loads but does not export what index.ts calls is as broken as a missing file.
+RUN node -e "const e=require('./dist/evidence.js'); if (typeof e.witnessWrap !== 'function') { console.error('WITNESS RESOLVE FAIL: exports = ' + Object.keys(e).join(',')); process.exit(1); } const a=require('./dist/anchor.js'); if (typeof a.chainRows !== 'function') { console.error('ANCHOR RESOLVE FAIL: exports = ' + Object.keys(a).join(',')); process.exit(1); } console.log('WITNESS RESOLVE OK: ' + require.resolve('./dist/evidence.js')); console.log('ANCHOR RESOLVE OK: ' + require.resolve('./dist/anchor.js'));"
+# [PC-ANCHOR-V1] The anchoring worker's I/O half. Its own RUN so every neighbouring line stays
+# byte-identical -- a deploy pre-condition counts the gittools assertion above exactly once, and
+# this comment deliberately does not repeat that string. NOT required at boot: the worker runs out
+# of band and index.ts does not reference it, which is why the gate below matters more, not less.
+RUN npx esbuild src/anchor-run.ts --platform=node --format=cjs --target=node20 --outfile=dist/anchor-run.js \
+ && test -s dist/anchor-run.js
+# [PC-ANCHOR-V1] BOOT GATE for it, appended as its OWN RUN so the gate above stays byte-identical.
+# Same argument as that one: esbuild transpiles and never resolves a specifier, so `test -s` is
+# satisfied whether or not anchor-run.js's require of ./anchor.js resolves. Only a real require()
+# proves it. anchorRun and the adapters are asserted BY NAME -- a worker that loads but cannot read
+# its rows, write its segment or save its watermark is as useless as one that is absent, and much
+# quieter about it. A missing bundle here would not crash the service; it would do nothing at all,
+# until someone asked why the chain had stopped growing.
+RUN node -e "const r=require('./dist/anchor-run.js'); const need=['anchorRun','firestoreReader','firestoreWatermark','gcsWriter','firestoreTs']; const bad=need.filter(function(k){return typeof r[k]!=='function';}); if (bad.length) { console.error('ANCHOR-RUN RESOLVE FAIL: not a function: ' + bad.join(',') + '; exports = ' + Object.keys(r).join(',')); process.exit(1); } console.log('ANCHOR-RUN RESOLVE OK: ' + require.resolve('./dist/anchor-run.js'));"
 # MCP2026-DUAL-ERA-V1: tools/list on the modern branch MUST publish a JSON Schema per tool
 # (spec: inputSchema "MUST be a valid JSON Schema object (not null)"), and our 40-odd tool
 # specs are written as zod raw shapes for the 2025-era SDK. zod 4 is the converter. It is

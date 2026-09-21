@@ -116,6 +116,26 @@
 #                        collector log, 65 says the two sinks DISAGREE, which means
 #                        either the yaml that ran is older than this bundle or step
 #                        5a lost the code. The bundle is believed over the rc.
+#   68  REFUSED-VACUOUS  THE SELF-TEST'S CONTROLS PROVED NOTHING. A VACUOUS row is
+#                        one whose assertion was ALREADY at the status its seeded
+#                        defect was supposed to produce: the mutation flipped
+#                        nothing, so the row is not evidence that the check can
+#                        fail. Kept distinct from 54 because 54 means the report
+#                        contradicts itself, and here the report agrees with
+#                        itself perfectly and the agreement is EMPTY. Refused only
+#                        above a threshold -- MAX_VACUOUS here, VACUOUS_BUDGET in
+#                        the judge -- both shipped UNARMED, because the count in
+#                        the tree today has never been measured. [SEC-DEVGATE-VACUOUS-V1]
+#   67  REFUSED-WRONG-REVISION  [SEC-PROMOTE-REVNAME-V1] the move reported success,
+#                        the re-read found exactly one revision at 100 percent, and IT
+#                        IS NOT $TARGET. Emitted by pipeline/verify-serving.py and
+#                        passed straight through this file. Kept distinct from 57
+#                        because 57 says "the deployment looks wrong" and 67 says
+#                        "traffic is on a revision NOBODY IN THIS BUILD JUDGED" -- a
+#                        rollback, a console click or a second build of the same
+#                        commit landing between the move and the re-read. The digest
+#                        and BUILD_COMMIT match in that case, which is exactly why
+#                        neither of them can be the witness for it.
 #
 # THE MOVE IS NEVER JUDGED BY THE EXIT CODE OF update-traffic. It is judged by
 # reading the service back and finding the new revision alone at 100 percent, for
@@ -196,6 +216,17 @@ say ""
 # check must use the SAME matcher as the thing it is vouching for, or it vouches
 # for nothing. Keep this list and the scrapes below in lockstep -- a scrape with no
 # entry here is exactly the unguarded coupling that caused this.
+#
+# [SEC-DEVGATE-IAP-RESTORE-V1] "IAP WAS NOT CONFIRMED RESTORED" is the one entry
+# below that this gate does NOT scrape, and it is here on purpose. It is the
+# literal devgate's F6.IAP_RESTORED_AFTER_PROBES prints when the collector took
+# IAP off the console for its anonymous probes and could not prove it came back.
+# That finding is a FAIL, so conditions 1-3 already refuse the build on their own
+# strength; what this entry buys is that RENAMING OR DELETING the literal in the
+# judge breaks this gate LOUDLY with 61 instead of quietly retiring the only
+# check standing between a half-restored IAP and a promotion. Measured before it
+# was written: iap_restore_confirmed appeared exactly twice in the whole tree --
+# the collector's write and its generated copy -- and was read by nothing.
 COUPLING="UNCHECKED"
 COUPLING_MISSING=""
 if [ -f "$JUDGE_SRC" ]; then
@@ -209,11 +240,14 @@ if [ -f "$JUDGE_SRC" ]; then
 proved they can fail
 skipped assertion
 CHECK(S) DID NOT BITE
+control(s) were VACUOUS
+VACUOUS CONTROL(S) PROVED NOTHING
 COULD BE READ AS GREEN
 COVERAGE REGRESSION
 VERDICT %d
    FAIL           %d
 BUILD_COMMIT:
+IAP WAS NOT CONFIRMED RESTORED
 COUPLED_LITERALS
 fi
 say "  coupling to the judge: $COUPLING${COUPLING_MISSING:+ -- MISSING:$COUPLING_MISSING}"
@@ -238,7 +272,7 @@ say ""
 #
 # TWO SINKS, BECAUSE THEY ARE COUPLED TO DIFFERENT FILES AND DIE SEPARATELY.
 #   SINK 1  $WORK/collect.rc, written by cloudbuild-dev.yaml step 5a. The yaml is the
-#           TRIGGER's copy and is NOT guaranteed to be the same tree as this file.
+#           TRIGGER'S copy and is NOT guaranteed to be the same tree as this file.
 #   SINK 2  "_collect_refused" in the evidence bundle, written by the collector, which
 #           travels in the SAME bundle as this gate and therefore always IS the same
 #           tree. This is the sink that covers an older yaml writing no rc at all.
@@ -370,6 +404,37 @@ else
       # build and sends the reader to the wrong file.
       UNPARSED=""
       BAD=""
+      # [SEC-DEVGATE-VACUOUS-V1] THE FOURTH SCRAPE, AND IT HAS ITS OWN CODE.
+      #   vacuous      W("   %d control(s) were VACUOUS: ...")
+      # A VACUOUS control is one whose assertion was ALREADY at the status its
+      # seeded defect was supposed to produce. The row flipped nothing, and the
+      # judge used to count it in the N/N "proved they can fail" ratio anyway,
+      # while nothing here ever read the count -- so a self-test whose controls
+      # prove nothing could reach VERDICT 0 and promote. The judge now excludes
+      # those rows from the ratio and prints the count on EVERY run, including
+      # zero, so this gate reads the number instead of inferring it from silence.
+      #
+      # DELIBERATELY NOT IN $UNPARSED. An absent count line means the judge in the
+      # bundle predates this change: that is a COUPLING fact, and the coupling
+      # check above already refuses it by name with 61. Adding it to UNPARSED as
+      # well would refuse the same build twice, under the less specific code.
+      #
+      # THRESHOLDED, NOT ABSOLUTE, AND THE REASON IS HONESTY ABOUT MEASUREMENT.
+      # How many rows are vacuous in this tree today is UNMEASURED -- the judge
+      # needs a collected bundle to say so. MAX_VACUOUS therefore ships EMPTY
+      # (unarmed) and no build's verdict changes today. Set MAX_VACUOUS=0 once a
+      # green run has printed its count. The judge carries the same threshold on
+      # its own side; either side firing lands here as 68.
+      MAX_VACUOUS="${MAX_VACUOUS:-}"
+      VACUOUS_BAD=""
+      VACUOUS="$(sed -n 's/^   \([0-9][0-9]*\) control(s) were VACUOUS.*/\1/p' "$REPORT" | head -1)"
+      say "  vacuous controls : ${VACUOUS:-<unmeasured>}"
+      grep -Fq 'VACUOUS CONTROL(S) PROVED NOTHING' "$REPORT" \
+        && VACUOUS_BAD="the judge reported ${VACUOUS:-?} vacuous control(s), over its own VACUOUS_BUDGET"
+      if [ -z "$VACUOUS_BAD" ] && [ -n "$MAX_VACUOUS" ] && [ -n "$VACUOUS" ] \
+         && [ "$VACUOUS" -gt "$MAX_VACUOUS" ]; then
+        VACUOUS_BAD="the selftest reported $VACUOUS vacuous control(s), over this gate's MAX_VACUOUS=$MAX_VACUOUS"
+      fi
       [ -z "$NFAIL" ] && UNPARSED="the census FAIL line is absent or does not have the
      shape '   FAIL           <n>' that this gate reads"
       [ -z "$PROVED" ] && UNPARSED="${UNPARSED:+$UNPARSED; }the selftest line is absent or
@@ -403,6 +468,18 @@ else
       elif [ -n "$BAD" ]; then
         CODE=54
         WHY="$BAD. A report that contradicts its own verdict is refused."
+      elif [ -n "$VACUOUS_BAD" ]; then
+        # [SEC-DEVGATE-VACUOUS-V1] 68, NOT 54, AND IT SITS BELOW 54 ON PURPOSE. 54
+        # means the report contradicts its own verdict. This is a different fault:
+        # the report agrees with itself perfectly and the agreement is empty --
+        # the controls that were supposed to prove these checks can fail were
+        # already at the status they were meant to produce. Ranking it below 54
+        # keeps an already-bad build on the code it had, which is what keeps the
+        # yaml's negative control (a red fixture must produce EXACTLY 51) meaningful.
+        CODE=68
+        WHY="$VACUOUS_BAD. A control whose assertion was already at the seeded status
+     flipped nothing, and a self-test built out of those is not evidence that these
+     checks can fail."
       else
         # ---- condition 5: the report is for THIS commit ---------------------
         WANT="$(cat "$COMMIT_FILE" 2>/dev/null | tr -dc '0-9a-f' | head -c 40)"
@@ -537,44 +614,61 @@ if [ "$MOVE_RC" != "0" ]; then
   exit 56
 fi
 
-# CONFIRMED BY RE-READING, NEVER BY THE EXIT CODE ABOVE, and confirmed against the
-# TARGET rather than against latestReadyRevisionName -- "the newest revision is at
-# 100%" is not the claim this gate is making.
-gcloud run services describe "$SVC" --region "$REGION" --project "$PROJECT" \
-  --format=json > "$WORK/after.json" 2>/dev/null
-READBACK="$(python3 - "$WORK/after.json" "$TARGET" <<'PYGATE'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    print("||NO"); raise SystemExit(0)
-target = sys.argv[2]
-st = d.get("status", {})
-latest = st.get("latestReadyRevisionName", "")
-serving = [t for t in st.get("traffic", []) if t.get("percent")]
-at100 = [t.get("revisionName") for t in serving if t.get("percent") == 100]
-print("%s|%s|%s" % (latest,
-                    ",".join("%s=%s" % (t.get("revisionName"), t.get("percent"))
-                             for t in serving),
-                    "YES" if at100 == [target] else "NO"))
-PYGATE
-)"
-LATEST="${READBACK%%|*}"
-REST="${READBACK#*|}"
-TRAFFIC="${REST%%|*}"
-CONFIRMED="${REST##*|}"
-say "  latest ready   : $LATEST"
-say "  traffic after  : $TRAFFIC"
-if [ "$LATEST" != "$TARGET" ]; then
-  say "  NOTE: latestReadyRevision ($LATEST) is NOT the revision this build judged"
-  say "        ($TARGET). Traffic was moved to the JUDGED one. A --to-latest gate"
-  say "        would have promoted an unjudged revision here."
+# CONFIRMED BY RE-READING, using the unified pipeline/verify-serving.py tool.
+# This confirms the serving revision holds exactly 100% of traffic, has the correct
+# expected image digest, and holds the expected env (BUILD_COMMIT).
+#
+# [SEC-PROMOTE-REVNAME-V1] -- AND THAT IT IS $TARGET. THE RE-READ USED TO CONFIRM THE
+# WRONG SENTENCE. It resolved whatever revision happened to hold the traffic and then
+# checked THAT revision's digest and BUILD_COMMIT, which proves "some revision built
+# from this commit is serving" and NOT "the revision this gate judged is serving".
+# The target's NAME was never passed in and never compared. Both witnesses are blind
+# to the gap: a rollback to an earlier revision of the same commit, a second build of
+# that commit, or a console click landing between update-traffic and this re-read all
+# present a MATCHING digest and a MATCHING BUILD_COMMIT under a DIFFERENT revision
+# name -- and the gate printed PROMOTED and CONFIRMED BY RE-READ over it. Everything
+# condition 5 and the 63 target-resolution established about WHICH revision had been
+# judged was discarded one line before the finish.
+#
+# $TARGET IS NOT A NEW READING. It was resolved above out of THIS service's
+# status.traffic by tag, so passing it down closes the loop on the only identifier
+# the two ends actually share. verify-serving.py still finds the serving revision the
+# one legitimate way -- status.traffic filtered to percent > 0 -- and merely compares
+# the name; nothing added here reads the deploy command's message or
+# status.traffic[0], which is the [SEC-UPGRADE-TRAFFIC0-V1] defect.
+#
+# 67 IS PASSED STRAIGHT THROUGH rather than folded into 57, because the two send the
+# reader to different places. Measured at this commit before the code was chosen:
+# 50-57, 61 and 63-65 are this file's, 58/59/60/66 are the yaml promote step's, 62 is
+# the collector selftest's, and 67 occurs nowhere under pipeline/.
+EXPECT_IMAGE="$(gcloud run revisions describe "$TARGET" --region "$REGION" --project "$PROJECT" --format='value(status.imageDigest)' 2>/dev/null)"
+if [ -z "$EXPECT_IMAGE" ]; then
+  say "GATE EXIT 57  could not read imageDigest of target revision $TARGET"
+  exit 57
 fi
-if [ "$CONFIRMED" = "YES" ]; then
-  say "GATE EXIT 0  PROMOTED and CONFIRMED BY RE-READ: $TARGET serves 100%."
+
+python3 "$GATE_DIR/verify-serving.py" \
+  --project "$PROJECT" \
+  --region "$REGION" \
+  --service "$SVC" \
+  --expect-revision "$TARGET" \
+  --expect-image "$EXPECT_IMAGE" \
+  --expect-env "BUILD_COMMIT=$WANT"
+VERIFY_RC=$?
+
+if [ "$VERIFY_RC" = "0" ]; then
+  say "GATE EXIT 0  PROMOTED and CONFIRMED BY RE-READ: $TARGET serves 100% with verified digest and env."
   exit 0
 fi
-say "GATE EXIT 57  update-traffic reported success but the re-read does NOT show"
-say "              $TARGET alone at 100%. The claim and the observation disagree,"
-say "              and this gate believes the observation."
+
+if [ "$VERIFY_RC" = "67" ]; then
+  say "GATE EXIT 67  update-traffic reported success and the re-read found a DIFFERENT"
+  say "revision serving than the one this gate judged ($TARGET). Traffic is on a revision"
+  say "NOBODY IN THIS BUILD JUDGED -- most likely a rollback, a console click or a second"
+  say "build of this commit landed between the move and the re-read. DO NOT re-run the"
+  say "promotion blind: read the service's traffic and decide deliberately."
+  exit 67
+fi
+
+say "GATE EXIT 57  update-traffic reported success but verify-serving.py failed."
 exit 57

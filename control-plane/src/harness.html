@@ -67,7 +67,7 @@ window.pcWhimsyOn = function(){
        Nothing is deleted here: every value below is the one the renderer computes today, so stock
        is unchanged, and a brand that ships a finished asset sets --logo-filter:none,
        --logo-radius:0, --logo-w-*:auto and a --logo-maxw as DATA. */
-    --logo-filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05);
+    --logo-filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45));
     --logo-radius:50%;
     --logo-fit-hdr:cover;--logo-fit-empty:contain;
     --logo-h-hdr:30px;--logo-w-hdr:30px;
@@ -84,7 +84,7 @@ window.pcWhimsyOn = function(){
     display:flex;flex-direction:column;height:100dvh;overflow:hidden;}
   a{color:var(--ink);text-decoration:none}
   .hdr{display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;background:rgba(var(--sunk-rgb),.22);border-bottom:1px solid var(--glass-line);backdrop-filter:blur(8px)}
-  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45));mix-blend-mode:screen}
+  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45))}
   .hdr .ttl{font-weight:800;letter-spacing:.02em;font-size:1.02rem}
   .hdr .sub{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-dim)}
   /* [HARNESSUI-THINKING-V75] THE WAIT USED TO LOOK LIKE A CRASH. The pending bubble was the single
@@ -166,6 +166,8 @@ window.pcWhimsyOn = function(){
   .chat .cbar .via.provsw:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
   .chat .cbar .via.provsw b{font-weight:700;opacity:.42;padding:.04rem .3rem;border-radius:999px;transition:opacity .12s}
   .chat .cbar .via.provsw b.on{opacity:1;color:var(--ink);background:rgba(var(--ink-rgb),.13)}
+  .chat .cbar .via.provsw b[data-p="ge"].on{box-shadow:inset 0 0 0 1px rgba(90,200,160,.75)}
+  .dotGe{background:#5ac8a0}
   .chat .cbar .via.provsw b[data-p="claude"].on{box-shadow:inset 0 0 0 1px rgba(217,119,87,.65)}
   .chat .cbar .via.provsw b[data-p="gemini"].on{box-shadow:inset 0 0 0 1px rgba(75,139,245,.65)}
   .chat .cbar .via.provsw i{font-style:normal;opacity:.4;font-size:.7rem}
@@ -180,8 +182,8 @@ window.pcWhimsyOn = function(){
      know the model for, because that is the only way a switched history stays legible. */
   .msg .nmtag .mdl{opacity:.62;font-weight:600;letter-spacing:.06em}
   .empty{margin:auto;text-align:center;color:var(--ink-soft);max-width:340px}
-  .empty img{width:64px;height:64px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05) drop-shadow(0 0 16px rgba(var(--acc-rgb),.45));mix-blend-mode:screen;margin-bottom:.6rem}
-  .composer{padding:.7rem 1rem;border-top:1px solid var(--glass-line);background:rgba(var(--ink-rgb),.06)}
+  .empty img{width:64px;height:64px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 16px rgba(var(--acc-rgb),.45));margin-bottom:.6rem}
+  .composer{position:relative;padding:.7rem 1rem;border-top:1px solid var(--glass-line);background:rgba(var(--ink-rgb),.06)}
   .cin{display:flex;gap:.5rem;align-items:flex-end}
   textarea{flex:1;resize:none;max-height:140px;background:rgba(var(--sunk-rgb),.28);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;padding:.7rem .8rem;font:inherit;font-size:.95rem}
   textarea::placeholder{color:var(--ink-dim)}
@@ -243,6 +245,20 @@ window.pcWhimsyOn = function(){
 </style>
 </head>
 <body>
+<!-- [HARNESSUI-GOLDBRAIN-KNOCKOUT-V1] THE ARTWORK KNOCKS ITSELF OUT. Keeps RGB, replaces ALPHA
+     with the pixel's own luminance, then a steep table drops the low end to zero: logo.png's dark
+     disc becomes transparent, the gold mark stays solid. One filter, referenced by every place
+     the logo appears -- header, empty state, the icon beside each strain name, and the thinking
+     indicator -- so a theme change can never leave black showing around the mushroom.
+     STATIC, NOT CREATED ON DEMAND: the header paints before any script runs a chat turn, and a
+     filter referenced before it exists renders as an unfiltered image for that first frame. -->
+<div id="pcbfilters" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+<svg width="0" height="0"><defs>
+  <filter id="pcbKnock" color-interpolation-filters="sRGB">
+    <feColorMatrix type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  .2126 .7152 .0722 0 0"/>
+    <feComponentTransfer><feFuncA type="table" tableValues="0 0 0.14 0.70 0.96 1"/></feComponentTransfer>
+  </filter>
+</defs></svg></div>
   <div class="hdr">
     <img src="/brand/logo.png" alt="logo" onerror="this.style.display='none'">
     <div><div class="sub">Paracoding.ai</div><div class="ttl">Paracoding.AI - Agentic Harness</div></div>
@@ -258,6 +274,7 @@ window.pcWhimsyOn = function(){
       <div class="sec">
         <div class="lbl">Provider</div>
         <div class="toggle" id="toggle">
+          <button data-p="ge" onclick="setProvider('ge')"><span class="dotc dotGe"></span>GE seat</button>
           <button data-p="claude" onclick="setProvider('claude')"><span class="dotc dotClaude"></span>Claude</button>
           <button data-p="gemini" class="on" onclick="setProvider('gemini')"><span class="dotc dotGemini"></span>Gemini</button>
         </div>
@@ -279,7 +296,7 @@ window.pcWhimsyOn = function(){
         <span class="via provsw" id="cVia" role="button" tabindex="0"
               onclick="pcToggleProvider()"
               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pcToggleProvider();}"
-        ><b data-p="claude">Claude</b><i>&#8646;</i><b data-p="gemini">Gemini</b></span>
+        ><b data-p="ge">GE seat</b><i>&#8646;</i><b data-p="claude">Claude</b><i>&#8646;</i><b data-p="gemini">Gemini</b></span>
         <span class="meter" id="cMeter">session 0 in / 0 out</span>
       </div>
       <div class="stream" id="stream">
@@ -288,7 +305,7 @@ window.pcWhimsyOn = function(){
           <div><b>Pick a strain</b> on the left to start chatting.<br>Status up top reads its live state; Claude &#8646; Gemini up top switches substrate, and the model version is stamped on each reply. Which model within a substrate still lives in Layers &rsaquo; Settings.</div>
         </div>
       </div>
-      <div class="composer"><div class="cin">
+      <div class="composer"><div id="pcqbar" aria-live="polite"><span id="pcqtext"></span><span class="qx" id="pcqx" role="button" tabindex="0" title="Discard what is queued" onclick="pcQClear()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pcQClear();}">&#10005;</span></div><div class="cin">
         <textarea id="ta" rows="1" placeholder="Message the selected agent…" oninput="grow(this)" onkeydown="keyd(event)"></textarea>
         <input type="file" id="imgIn" accept="image/*" multiple style="display:none" onchange="onImg(this)"><button class="mic" id="upBtn" onclick="document.getElementById('imgIn').click()" title="Attach a screenshot"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><button class="mic" id="micBtn" onclick="toggleMic()" title="Dictate — voice to text"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></button>
         <button class="mic" id="playBtn" onclick="playLast()" title="Play the last reply aloud"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:middle"><polygon points="6 4 20 12 6 20 6 4"/></svg></button><button class="send" id="send" onclick="send()" disabled>Send</button>
@@ -341,7 +358,18 @@ window.pcWhimsyOn = function(){
     <button class="close" onclick="closeKeys()">Done</button>
   </div></div>
 <script>
-  let PROVIDER='gemini', AGENTS=[], SEL=null; const HIST={}; let DEMO=false;
+  /* [CHAT-DEFAULT-FIRSTPAINT-V1] THE FIRST PAINT IS THE INSTALL'S DEFAULT, not a hardcoded one.
+     MEASURED, and it cost the operator real money: this said 'gemini' and the boot IIFE called
+     setProvider('gemini') before /api/models answered, so every fresh load and every hard
+     refresh landed on a METERED substrate. loadModels() then swapped to the configured default
+     -- correctly -- but anything sent in that window billed Gemini, and until the provenance
+     stamp shipped an hour ago there was nothing on the bubble to show which one had answered.
+     He had been billing Flash without knowing.
+     __PC_DEFAULT_PROVIDER__ is substituted when the page is served, from the same
+     CHAT_DEFAULT_PROVIDER the server publishes as default_provider, so there is no window at
+     all: the pill is right before the first byte of script runs. The round trip below still
+     applies the server value, which is now agreement rather than correction. */
+  let PROVIDER='__PC_DEFAULT_PROVIDER__', AGENTS=[], SEL=null; const HIST={}; let DEMO=false;
   const $=id=>document.getElementById(id);
   const esc=s=>String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
   function ago(ms){ if(!ms)return''; const m=Math.max(0,Math.round((Date.now()-ms)/60000)); if(m<1)return'now'; if(m<60)return m+'m'; const h=Math.round(m/60); if(h<24)return h+'h'; return Math.round(h/24)+'d'; }
@@ -350,8 +378,11 @@ window.pcWhimsyOn = function(){
      /api/models, which builds the catalog from the CHAT_API_* environment. A literal here is
      the defect this change exists to remove: it renders before the fetch and then keeps
      rendering if the fetch fails, so a stale literal outlives the config it contradicts. */
-  const MODELS={ claude:[], gemini:[] };
-  const MODEL={claude:'',gemini:''};
+  /* [PG-GE-SUBSTRATE] The flat-rate seat, added to the picker this console already had.
+     It is listed FIRST because it is the one that does not cost per token: the operator
+     should have to make a deliberate move to leave it, not a deliberate move to reach it. */
+  const MODELS={ ge:[], claude:[], gemini:[] };
+  const MODEL={ge:'',claude:'',gemini:''};
   var PCEFFORT='';                    /* server-configured effort, from /api/models */
   var PCRUNTIME={model:'',effort:''}; /* what /api/chat reported it ACTUALLY answered with */
   function renderModelToggle(){ const el=$('modelToggle'); el.innerHTML='';
@@ -382,8 +413,13 @@ window.pcWhimsyOn = function(){
      It returns '' when the id cannot be derived, and an undecided stamp renders as NO stamp
      rather than as a guess. */
   function pcProviderName(p){ p=String(p||'').toLowerCase();
+    if(p==='ge') return 'Gemini Enterprise';
     return p==='claude'?'Claude':(p==='gemini'?'Gemini':(p?(p.charAt(0).toUpperCase()+p.slice(1)):'')); }
   function pcModelStamp(prov,api,eff){
+    /* [PG-GE-SUBSTRATE] The seat has one model and its name IS the substrate name, so the
+       derived label would only ever repeat it -- 'gemini-enterprise' derives to 'Enterprise'
+       and the stamp read "Gemini Enterprise Enterprise". */
+    if(String(prov||'').toLowerCase()==='ge') return 'Gemini Enterprise';
     var name=pcProviderName(prov), lab=pcModelLabel(api),
         e=(String(prov||'').toLowerCase()==='claude')?pcEffortLabel(eff):'';
     var tail=[lab,e].filter(function(x){return !!x;}).join(' ');
@@ -415,7 +451,11 @@ window.pcWhimsyOn = function(){
   /* [HARNESSUI-PROVSW-V1] The header toggle's click handler. It flips to the OTHER provider and
      hands off to setProvider() -- it deliberately holds no state of its own, so the Layers >
      Settings substrate buttons and this pill can never disagree. */
-  function pcToggleProvider(){ setProvider(PROVIDER==='claude'?'gemini':'claude'); }
+  /* Three substrates now, so the pill CYCLES rather than flips. The order is the cost order
+     -- seat, then the two metered advisors -- so one click from the seat never lands on a
+     billed substrate by surprise; it takes two to get to Gemini and two to get back. */
+  var PCPROVS=['ge','claude','gemini'];
+  function pcToggleProvider(){ var i=PCPROVS.indexOf(PROVIDER); setProvider(PCPROVS[(i<0?0:i+1)%PCPROVS.length]); }
   window.pcToggleProvider=pcToggleProvider;
   /* PCRUNTIME is "what /api/chat reported it ACTUALLY answered with". After a substrate flip that
      report describes the substrate you just left, so it is cleared: keeping it would have made
@@ -443,13 +483,14 @@ window.pcWhimsyOn = function(){
   function setProvider(p,explicit){ if(explicit!==false) PCPICKED=true;
     if(p!==PROVIDER) PCRUNTIME={model:'',effort:''};
     PROVIDER=p; document.querySelectorAll('#toggle button').forEach(b=>b.classList.toggle('on',b.dataset.p===p)); renderModelToggle(); updateVia(); }
-  async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.effort) PCEFFORT=String(d.effort);
+  async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.ge) MODELS.ge=d.ge; if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.effort) PCEFFORT=String(d.effort);
+      if(!MODELS.ge.some(m=>m.id===MODEL.ge)) MODEL.ge=MODELS.ge[0]&&MODELS.ge[0].id;
       if(!MODELS.claude.some(m=>m.id===MODEL.claude)) MODEL.claude=MODELS.claude[0]&&MODELS.claude[0].id; if(!MODELS.gemini.some(m=>m.id===MODEL.gemini)) MODEL.gemini=MODELS.gemini[0]&&MODELS.gemini[0].id;
       /* Applied AFTER the catalog is in hand, so the chip row repaints once, on the right list.
          An unknown or absent value is ignored rather than defaulted over: a server that says
          nothing must not move a page that is already showing something. */
       var _dp=d&&d.default_provider?String(d.default_provider).toLowerCase():'';
-      if(!PCPICKED && (_dp==='claude'||_dp==='gemini') && _dp!==PROVIDER) setProvider(_dp,false);
+      if(!PCPICKED && (_dp==='ge'||_dp==='claude'||_dp==='gemini') && _dp!==PROVIDER) setProvider(_dp,false);
       renderModelToggle(); updateVia(); }catch(e){} }
   // ---- token / cost meter -------------------------------------------------------------------
   // Session tally accumulates client-side from the `usage` /api/chat now returns per turn.
@@ -481,8 +522,29 @@ window.pcWhimsyOn = function(){
   function renderAgents(){ const el=$('agents'); el.innerHTML='';
     if(!AGENTS.length){ el.innerHTML='<div style="padding:.6rem;color:var(--ink-dim);font-size:.82rem">No agents provisioned yet.</div>'; return; }
     for(const a of AGENTS){ const d=document.createElement('div'); d.className='agent'+(SEL&&SEL.id===a.id?' sel':''); d.onclick=()=>selectAgent(a.id);
-      d.innerHTML='<span class="st '+statusClass(a.status)+'">●</span><div style="min-width:0"><div class="nm">'+esc(a.name)+'</div><div class="rl">'+esc(a.role||a.id)+'</div></div><div class="meta"><div class="rl">'+(a.last_ts?ago(a.last_ts):'')+'</div>'+(a.backlog?'<div class="rl" style="color:var(--gold)">'+a.backlog+' queued</div>':'')+'</div>'; el.appendChild(d); } }
-  function selectAgent(id){ SEL=AGENTS.find(a=>a.id===id)||null; window.SEL=SEL; renderAgents(); $('cWho').textContent=SEL?SEL.name:'Select an agent';
+      /* [STRAINROW-ID-V1] THE ROW CARRIES ITS OWN ID. rid() below used to recover it by reading
+         the .rl text back -- text that a later decoration pass REWRITES in place (it strips the
+         "fleet-" namespace) and that the mushroom dictionary rewrites again. Deriving an
+         identifier from a string three passes have edited is how you end up POSTing a delete for
+         something that was never on screen. The id is data now; the text stays free to change. */
+      d.setAttribute('data-strain-id', a.id||'');
+      d.innerHTML='<span class="st '+statusClass(a.status)+'">●</span><div style="min-width:0"><div class="nm">'+esc(a.name)+'</div><div class="rl pcid">'+esc(a.role||a.id)+'</div></div><div class="meta"><div class="rl">'+(a.last_ts?ago(a.last_ts):'')+'</div>'+(a.backlog?'<div class="rl" style="color:var(--gold)">'+a.backlog+' queued</div>':'')+'</div>'; el.appendChild(d); } }
+  /* [STRAINMEMORY-V1] THE CONSOLE REMEMBERS WHICH STRAIN YOU WERE IN.
+     The boot sequence preferred fleet-advisor unconditionally, so every reload -- including the
+     hard refreshes this session asked for over and over -- silently moved the operator to a
+     different strain. He read a reply in the wrong transcript because of it and said so: "when I
+     hard refresh it moves me into the advisor strain I thought i was in infra still".
+     localStorage, and ONLY for this. The substrate deliberately does NOT persist -- see
+     [HARNESSUI-PROVSW-V1], which argues that cross-reload memory of the substrate would outrank
+     the install's configured default, and that default is now the whole reason a fresh load lands
+     on the flat-rate seat instead of a metered one. A remembered STRAIN outranks nothing: it is a
+     view preference, it is per-browser, and losing it costs one click.
+     EVERY READ AND WRITE IS WRAPPED, because localStorage throws in a private window and in a
+     browser with site data blocked, and a console that will not open is worse than one that
+     forgets. A remembered id that is no longer on the fleet falls through to the old behaviour. */
+  function pcRemember(id){ try{ if(id) localStorage.setItem('pc.strain', String(id)); }catch(e){} }
+  function pcRemembered(){ try{ return localStorage.getItem('pc.strain')||''; }catch(e){ return ''; } }
+  function selectAgent(id){ SEL=AGENTS.find(a=>a.id===id)||null; window.SEL=SEL; pcRemember(SEL&&SEL.id); renderAgents(); $('cWho').textContent=SEL?SEL.name:'Select an agent';
     $('cWhoDot').className='st '+(SEL?statusClass(SEL.status):'s-idle'); $('ta').disabled=!SEL; $('send').disabled=!SEL; renderStream(); $('ta').focus(); if(SEL){ HIST[SEL.id]=[]; renderStream(); loadHistory(SEL.id,true); } }
   async function loadHistory(id,force){ if(DEMO) return; try{ const d=await api('/api/chat/history?agentId='+encodeURIComponent(id)+(force?'&full=1':'')); if(d&&d.history){ const cur=HIST[id]||[]; if(force||cur.length<=d.history.length){ HIST[id]=d.history.map(function(h){
         /* [HARNESSUI-PROVSW-V1] h.stamp / h.model / h.provider are read on the chance the route
@@ -491,20 +553,120 @@ window.pcWhimsyOn = function(){
         var st=h.stamp||(h.model?pcModelStamp(h.provider||'',h.model,h.effort||''):'');
         return {role:h.role,text:h.text,stamp:st||''};}); if(SEL&&SEL.id===id) renderStream(); } } }catch(e){} }
   function refreshHistory(){ if(!SEL) return; loadHistory(SEL.id,true); }
+  /* [MD-FENCES-V1] WHY THIS WAS REWRITTEN, because the old version's failure is instructive.
+     It ran the inline-code rule -- a /`([^`]+)`/ replace -- FIRST, over the whole message,
+     knowing nothing about fenced blocks. Given a three-backtick fence those backticks cannot
+     match as a pair, so the regex skipped two and matched the THIRD against the first backtick
+     of the CLOSING fence: one <code> element wrapping the entire listing, newlines and all, with
+     the closing fence's two leftover backticks rendered as literal text. The line splitter then
+     put every line in its own <p> INSIDE that still-open <code>, which is why a requirements.txt
+     arrived as a stack of separate grey pills with a stray pair of backticks above it. Measured
+     on the operator's own screen, on a real Gemini Enterprise answer.
+     So fences are extracted BEFORE any inline rule now, held aside as placeholders, and put back
+     as real <pre> blocks at the end. Inline code is also pinned to a single line, so it can never
+     again reach across a newline and swallow a block. Headings, pipe tables and horizontal rules
+     are handled too -- the seat emits all three constantly and every one of them was previously
+     shown to the operator as its literal markdown. */
+  function pcCodeBlock(lang, body){
+    var bar = lang ? ('<div style="font:600 .66rem ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;'
+      + 'text-transform:uppercase;opacity:.55;padding:.28rem .6rem;background:rgba(var(--ink-rgb),.08);'
+      + 'border-bottom:1px solid rgba(var(--ink-rgb),.12)">' + lang + '</div>') : '';
+    return '<div style="margin:.55rem 0;border:1px solid rgba(var(--ink-rgb),.16);border-radius:8px;overflow:hidden">'
+      + bar
+      + '<pre style="margin:0;padding:.6rem .7rem;overflow-x:auto;background:rgba(var(--ink-rgb),.05)">'
+      + '<code style="font:.84rem/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre;background:none;padding:0">'
+      + body + '</code></pre></div>';
+  }
+  /* [HARNESSUI-LINKIFY-V1] A URL IN THE TEXT BECOMES A LINK YOU CAN CLICK. It runs AFTER md()'s
+     entity escape, so what it wraps is already safe HTML and the address it builds cannot break
+     out of its own attribute: the match stops dead at a quote or at an escaped angle bracket.
+     Trailing sentence punctuation is left OUTSIDE the anchor, which is what keeps the closing ]
+     of the turn footer, and a full stop at the end of a sentence, out of the address itself. */
+  function lnk(s){
+    return String(s).replace(/https?:\/\/[^\s<>"']+/g, function(u){
+      var tail='', m=u.match(/[.,;:!?)\]}]+$/);
+      if(m){ tail=m[0]; u=u.slice(0, u.length-tail.length); }
+      return '<a href="'+u+'" target="_blank" rel="noopener noreferrer"'
+        + ' style="color:var(--acc1);text-decoration:underline;word-break:break-all">'+u+'</a>'+tail;
+    });
+  }
   function md(t){
     t=String(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    t=t.replace(/`([^`]+)`/g,'<code style="background:rgba(var(--ink-rgb),.1);padding:.05rem .3rem;border-radius:4px;font-size:.86em">$1</code>');
-    t=t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    var CB=[];
+    function stash(lang, body){ CB.push(pcCodeBlock(lang, String(body).replace(/\s+$/,''))); return '@@PCCODE'+(CB.length-1)+'@@'; }
+    /* Closed fences first, then any UNCLOSED trailing fence -- an answer that was cut off
+       mid-block must still render as a block rather than spraying backticks down the page. */
+    t=t.replace(/```[ \t]*([A-Za-z0-9_+#.-]*)[ \t]*\r?\n([\s\S]*?)```/g, function(_m,l,b){ return stash(l,b); });
+    t=t.replace(/```[ \t]*([A-Za-z0-9_+#.-]*)[ \t]*\r?\n([\s\S]*)$/, function(_m,l,b){ return stash(l,b); });
+    t=t.replace(/`([^`\n]+)`/g,'<code style="background:rgba(var(--ink-rgb),.1);padding:.05rem .3rem;border-radius:4px;font-size:.86em">$1</code>');
+    t=t.replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>');
+    var isBlock=function(ln){
+      return /^@@PCCODE\d+@@$/.test(ln.trim())
+        || /^\s{0,3}#{1,6}\s+/.test(ln)
+        || /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(ln)
+        || /^\s*([-*•])\s+/.test(ln)
+        || /^\s*\d+[.)]\s+/.test(ln)
+        || /^\s*\|.*\|\s*$/.test(ln);
+    };
+    var cells=function(x){ return x.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(function(c){ return c.trim(); }); };
     var lines=t.split(/\n/), out=[], i=0;
     while(i<lines.length){
       var ln=lines[i];
-      if(/^\s*([-*•])\s+/.test(ln)){ var it=[]; while(i<lines.length){ var m=lines[i].match(/^\s*([-*•])\s+(.*)$/); if(!m)break; it.push('<li style="margin:.15rem 0">'+m[2]+'</li>'); i++; } out.push('<ul style="margin:.35rem 0;padding-left:1.2rem">'+it.join('')+'</ul>'); continue; }
-      if(/^\s*\d+[.)]\s+/.test(ln)){ var itn=[]; while(i<lines.length){ var mn=lines[i].match(/^\s*\d+[.)]\s+(.*)$/); if(!mn)break; itn.push('<li style="margin:.15rem 0">'+mn[1]+'</li>'); i++; } out.push('<ol style="margin:.35rem 0;padding-left:1.4rem">'+itn.join('')+'</ol>'); continue; }
+      var tok=ln.trim().match(/^@@PCCODE(\d+)@@$/);
+      if(tok){ out.push(CB[Number(tok[1])]); i++; continue; }
+      var mh=ln.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+      if(mh){ var sz=[1.16,1.09,1.02,.97,.93,.9][mh[1].length-1];
+        out.push('<div style="margin:.75rem 0 .3rem;font-weight:700;font-size:'+sz+'em;line-height:1.3">'
+          +mh[2].replace(/\s*#+\s*$/,'')+'</div>'); i++; continue; }
+      if(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(ln)){
+        out.push('<hr style="border:0;border-top:1px solid rgba(var(--ink-rgb),.15);margin:.65rem 0">'); i++; continue; }
+      if(/^\s*\|.*\|\s*$/.test(ln) && i+1<lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+        var head=cells(ln); i+=2; var rows=[];
+        while(i<lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ rows.push(cells(lines[i])); i++; }
+        var th=head.map(function(c){ return '<th style="text-align:left;padding:.3rem .5rem;border-bottom:1px solid rgba(var(--ink-rgb),.22);font-weight:700">'+lnk(c)+'</th>'; }).join('');
+        var tb=rows.map(function(r){ return '<tr>'+r.map(function(c){ return '<td style="padding:.28rem .5rem;border-bottom:1px solid rgba(var(--ink-rgb),.08);vertical-align:top">'+lnk(c)+'</td>'; }).join('')+'</tr>'; }).join('');
+        out.push('<div style="overflow-x:auto;margin:.5rem 0"><table style="border-collapse:collapse;font-size:.92em">'
+          +'<thead><tr>'+th+'</tr></thead><tbody>'+tb+'</tbody></table></div>');
+        continue;
+      }
+      /* [HARNESSUI-TRACE-FOLD-V1] THE PER-TURN TOOL TRACE COLLAPSES. The operator's words were
+         "i don't need to see this on every turn its too much", and he was right: a 29-tool turn
+         printed 29 lines of JSON above a three-line answer. It is kept, not dropped -- the trace
+         is how a fabricated tool result gets caught -- it is just folded behind one line you can
+         open. Server-side HTML is not an option: md() escapes < and > on entry, so a <details>
+         emitted by the seat would render as literal text. Hence the fold lives here. */
+      var mtr=ln.match(/^this turn: (\d+) fleet tools? run$/);
+      if(mtr){ var tr=[]; i++;
+        while(i<lines.length && /^ {2}- /.test(lines[i])){ tr.push(lines[i].replace(/^ {2}- /,'')); i++; }
+        if(!tr.length){ out.push('<p style="margin:.45rem 0;line-height:1.5">'+ln+'</p>'); continue; }
+        out.push('<details style="margin:.4rem 0"><summary style="cursor:pointer;color:var(--ink-dim);font-size:.85rem;user-select:none">'
+          +mtr[1]+' fleet tool'+(mtr[1]==='1'?'':'s')+' run</summary>'
+          +'<ul style="margin:.35rem 0 .2rem;padding-left:1.2rem;font-size:.84rem;color:var(--ink-dim);line-height:1.45">'
+          +tr.map(function(x){ return '<li style="margin:.12rem 0;word-break:break-word">'+lnk(x)+'</li>'; }).join('')
+          +'</ul></details>');
+        continue; }
+      /* [HARNESSUI-FOOTER-FOLD-V1] THE TURN FOOTER FOLDS TOO, for the same reason the trace does:
+         it printed five lines of accounting under every three-line answer. The two numbers that
+         actually change a decision stay on the summary line -- what this turn cost, and how much
+         of today is gone -- and the model, the rounds and the logs link sit one click behind it. */
+      if(/^\[seat model=/.test(ln)){
+        var ft=[]; while(i<lines.length){ ft.push(lines[i]); var fin=/\]\s*$/.test(lines[i]); i++; if(fin) break; }
+        var fb=ft.join('\n'), fq=(fb.match(/queries=(\d+)/)||[])[1], fu=(fb.match(/you (\d+\/\d+ \(\d+%\))/)||[])[1];
+        out.push('<details style="margin:.4rem 0"><summary style="cursor:pointer;color:var(--ink-dim);font-size:.85rem;user-select:none">'
+          +(fq?(fq+' quer'+(fq==='1'?'y':'ies')):'seat')+(fu?(' · you '+fu):'')+'</summary>'
+          +'<div style="margin:.35rem 0 .2rem;font-size:.84rem;color:var(--ink-dim);line-height:1.45;word-break:break-word">'
+          +lnk(fb).replace(/\n/g,'<br>')+'</div></details>');
+        continue; }
+      if(/^\s*([-*•])\s+/.test(ln)){ var it=[]; while(i<lines.length){ var m=lines[i].match(/^\s*([-*•])\s+(.*)$/); if(!m)break; it.push('<li style="margin:.15rem 0">'+lnk(m[2])+'</li>'); i++; } out.push('<ul style="margin:.35rem 0;padding-left:1.2rem">'+it.join('')+'</ul>'); continue; }
+      if(/^\s*\d+[.)]\s+/.test(ln)){ var sm=ln.match(/^\s*(\d+)[.)]\s+/); var st=sm&&sm[1]!=='1'?' start="'+sm[1]+'"':''; var itn=[]; while(i<lines.length){ if(lines[i].trim()===''){ var j=i; while(j<lines.length && lines[j].trim()==='') j++; if(j<lines.length && /^\s*\d+[.)]\s+/.test(lines[j])){ i=j; } else { break; } } var mn=lines[i].match(/^\s*\d+[.)]\s+(.*)$/); if(!mn)break; itn.push('<li style="margin:.15rem 0">'+lnk(mn[1])+'</li>'); i++; } out.push('<ol'+st+' style="margin:.35rem 0;padding-left:1.4rem">'+itn.join('')+'</ol>'); continue; }
       if(ln.trim()===''){ i++; continue; }
-      var para=[]; while(i<lines.length && lines[i].trim()!=='' && !/^\s*([-*•]|\d+[.)])\s+/.test(lines[i])){ para.push(lines[i]); i++; }
-      out.push('<p style="margin:.45rem 0;line-height:1.5">'+para.join('<br>')+'</p>');
+      var para=[]; while(i<lines.length && lines[i].trim()!=='' && !isBlock(lines[i])){ para.push(lines[i]); i++; }
+      out.push('<p style="margin:.45rem 0;line-height:1.5">'+lnk(para.join('<br>'))+'</p>');
     }
-    return out.join('');
+    /* A placeholder that ended up mid-paragraph still becomes its block rather than showing the
+       sentinel: a renderer that can leak its own scaffolding is worse than one that cannot render
+       at all, because the leak looks like the model's output. */
+    return out.join('').replace(/@@PCCODE(\d+)@@/g, function(_m,n){ return CB[Number(n)]||''; });
   }
   function pickStrainNav(){
     if(typeof SEL!=='undefined' && SEL) return;
@@ -532,6 +694,34 @@ window.pcWhimsyOn = function(){
   function grow(t){ t.style.height='auto'; t.style.height=Math.min(140,t.scrollHeight)+'px'; }
   function keyd(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } }
   let PENDIMG=[];
+  /* [HARNESSUI-QUEUE-V1] TYPE WHILE IT IS WORKING, AND THE TYPING GROUPS INTO ONE NEXT TURN.
+     The behaviour this replaces: a second message sent during a run either had to wait for the
+     operator to notice the run had ended, or -- worse, in a queue that sent them one at a time --
+     arrived as its own turn AFTER the first one had already been acted on. So a correction typed
+     ten seconds after the thing it corrects was applied ten seconds too late, and the model did
+     the wrong thing first and then fixed it. Grouping is the whole point: everything entered
+     while a turn is in flight is joined, in order, and handed over as a SINGLE next turn, so the
+     statement and its correction are read together before anything runs.
+     PCBUSY rather than "is the dock present": the dock is a rendering detail and can be absent
+     for a turn that is still very much in flight. */
+  var PCBUSY=false, PCQ=[], PCABORT=null, PCSTOPPED=false;
+  function pcQPaint(){ try{
+      var bar=$('pcqbar'), t=$('pcqtext'); if(!bar||!t) return;
+      var n=PCQ.length;
+      if(!n){ bar.classList.remove('on'); t.textContent=''; return; }
+      // Short on purpose: this line has to survive a 375px composer without wrapping, and the
+      // character count that used to be here was the part that pushed it over.
+      t.innerHTML='<b>'+n+' queued</b> &middot; '+(n===1?'sent when this finishes':'grouped into one message');
+      bar.classList.add('on');
+    }catch(e){} }
+  function pcQClear(){ PCQ=[]; pcQPaint(); }
+  /* [HARNESSUI-STOPBTN-V1] Stop means stop WAITING. The fetch is aborted, so the page stops
+     blocking and the operator gets his input back immediately -- but a tool call already handed
+     to the server may well complete, and the reply to this turn is simply never collected. The
+     bubble says exactly that rather than claiming the work was cancelled, because claiming that
+     would be a lie the operator could act on. */
+  function pcStopTurn(){ PCSTOPPED=true; try{ if(PCABORT) PCABORT.abort(); }catch(e){} }
+  window.pcQClear=pcQClear; window.pcStopTurn=pcStopTurn;
   /* [HARNESS-UI-ICONS-V1] ONE PLACE THAT KNOWS WHAT THE ATTACH BUTTON LOOKS LIKE. The badge
      used to be painted by assigning textContent at three call sites, which is why the icon had
      to be a single character: an SVG cannot be set through textContent, and three copies of the
@@ -541,8 +731,22 @@ window.pcWhimsyOn = function(){
     b.innerHTML = (cnt&&cnt>0) ? (icon+'<span style="margin-left:3px;font-size:12px;font-weight:700">'+cnt+'</span>') : icon; }
   function onImg(inp){ const fs=inp.files; if(!fs||!fs.length) return; for(var i=0;i<fs.length;i++){ (function(f){ const rd=new FileReader(); rd.onload=function(e){ PENDIMG.push({media_type:f.type||'image/png', data:String(e.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; pcPaintUp(PENDIMG.length); }; rd.readAsDataURL(f); })(fs[i]); } inp.value=''; }
   $('ta').addEventListener('paste', e => { for (const it of (e.clipboardData?.items||[])) { if (it.type && it.type.indexOf('image')===0){ const f=it.getAsFile(); if(f){ const rd=new FileReader(); rd.onload=ev=>{ PENDIMG.push({media_type:f.type||'image/png', data:String(ev.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; pcPaintUp(PENDIMG.length); }; rd.readAsDataURL(f); e.preventDefault(); } } } });
-  async function send(){ const ta=$('ta'); const text=ta.value.trim(); if((!text&&!PENDIMG.length)||!SEL) return;
-    const imgs=PENDIMG; PENDIMG=[]; pcPaintUp(0);
+  async function send(preset){ const ta=$('ta');
+    /* [HARNESSUI-QUEUE-V1] A send while a turn is in flight QUEUES instead of racing it. The
+       send button is deliberately left enabled during a run -- it is how the operator adds to
+       the queue -- so this branch, not a disabled attribute, is what keeps two turns from being
+       in flight at once. `preset` is the flush calling back in with the grouped batch, and it
+       must never re-enter this branch. */
+    if(PCBUSY && !preset){
+      const qt=ta.value.trim();
+      if(!qt && !PENDIMG.length) return;
+      PCQ.push({text:qt, imgs:PENDIMG}); PENDIMG=[]; pcPaintUp(0);
+      ta.value=''; grow(ta); pcQPaint(); return;
+    }
+    const text = preset ? String(preset.text||'') : ta.value.trim();
+    const imgs = preset ? (preset.imgs||[]) : PENDIMG;
+    if((!text&&!imgs.length)||!SEL) return;
+    if(!preset){ PENDIMG=[]; pcPaintUp(0); }
     (HIST[SEL.id]=HIST[SEL.id]||[]).push({role:'me',text,imgs}); ta.value=''; grow(ta); renderStream();
     /* [HARNESSUI-PROVSW-V1] The stamp is fixed at SEND time from the selection this turn is
        actually going out on, so flipping the toggle while the reply is in flight cannot change
@@ -552,9 +756,13 @@ window.pcWhimsyOn = function(){
        toggle is one click away and the request is in flight for seconds; reading PROVIDER again
        after the await would attribute the reply to whatever is selected when it lands. */
     const _turnProv=PROVIDER, _turnModel=MODEL[PROVIDER];
+    /* [HARNESSUI-QUEUE-V1] / [HARNESSUI-STOPBTN-V1] One flag for "a turn is in flight" and one
+       controller for "stop waiting on it". Both are cleared in the finally below, so a thrown
+       turn cannot leave the composer permanently queueing into a run that already ended. */
+    PCBUSY=true; PCSTOPPED=false; PCABORT=(typeof AbortController!=='undefined')?new AbortController():null;
     try{ let reply; const mlabel=(MODELS[_turnProv]||[]).find(x=>x.id===_turnModel); const mname=mlabel?mlabel.label:_turnModel;
       if(DEMO){ await new Promise(r=>setTimeout(r,500)); reply='(demo) '+SEL.name+' via '+pcProviderName(_turnProv)+' '+mname+': got "'+text+'".'; }
-      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:_turnProv,model:_turnModel,agentId:SEL.id,message:text,images:imgs,history:[]})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage);
+      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},signal:PCABORT?PCABORT.signal:undefined,body:JSON.stringify({provider:_turnProv,model:_turnModel,agentId:SEL.id,message:text,images:imgs,history:[]})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage);
         /* [HARNESSUI-PROVSW-V1] Re-stamp this turn from what the server says it ACTUALLY answered
            with -- d.model beats the catalog entry we guessed from at send time. PCRUNTIME is only
            updated when the substrate has not been flipped out from under this reply, otherwise a
@@ -576,8 +784,92 @@ window.pcWhimsyOn = function(){
        flipped TO while the failing request was in flight and send him to the wrong key. (2) The
        stamp is cleared, so a model stamp on a message always means a model produced that text;
        this text is the page talking, and it should not wear a model's name. */
-    }catch(e){ const _why=(e&&e.body&&(e.body.detail||e.body.error))||''; pending.stamp=''; pending.text=(e.status===401)?'🔒 Session expired — reload this page to sign in again.':(e.status===412?'No '+_turnProv+' API key set — add one with the 🔑 key button.':'Error talking to '+_turnProv+(_why?(': '+String(_why).slice(0,300)):'')+'.'); }
-    pcThinkStop(); renderStream(); }
+    }catch(e){ const _why=(e&&e.body&&(e.body.detail||e.body.error))||'';
+      /* [HARNESSUI-ERRSTAMP-V1] KEEP THE STAMP ON A FAILED TURN. It used to be cleared, which is
+         exactly backwards: a turn that failed is the turn where the operator most needs to know
+         WHICH substrate failed. Measured -- three seat quota refusals in a row rendered as a bare
+         'FLEET GCP' with no engine, so the transcript could not be read back to tell whether the
+         flat-rate seat or a metered substrate had been the one to break. The stamp names the
+         substrate this turn was PINNED to at send; it is not a claim about a reply that never
+         arrived. */
+      pending.stamp=pcModelStamp(_turnProv,_turnModel||'',PCEFFORT);
+      /* [HARNESSUI-STOPBTN-V1] An abort is not an error and must not be reported as one. */
+      if(PCSTOPPED || (e && (e.name==='AbortError' || String(e)==='AbortError'))){
+        pending.text='⏹ Stopped waiting on this turn. Anything already handed to the server may '
+          +'have finished running — the reply just was not collected.';
+      } else {
+        /* [HARNESSUI-ORPHAN-RESCUE-V1] A request killed by the browser (e.g. iOS switching apps)
+           looks like a network error to the client, but the server usually finished the turn and
+           saved it to the DB. Before this, the UI wrote an error over a turn that actually worked.
+           Now, on a generic failure, it ASKS the server whether the turn is there. If it is, it
+           paints the real reply. If not, it falls back to the original error message. */
+        var _errFallback = (e.status===401)?'🔒 Session expired — reload this page to sign in again.':(e.status===412?(_why?String(_why).slice(0,400):'No '+_turnProv+' API key set — add one with the 🔑 key button.'):'Error talking to '+_turnProv+(_why?(': '+String(_why).slice(0,300)):((e&&e.status)?(' (HTTP '+e.status+')'):' (the connection dropped before an answer arrived)'))+'.');
+        // [HARNESSUI-ORPHAN-RESCUE-V2] We only overwrite if the request REALLY made it and is complete.
+        // The page's own text is dropped entirely ONLY if the server hands us back our exact query
+        // followed immediately by an assistant reply.
+        /* [HARNESSUI-ORPHAN-RESCUE-V3] THREE CORRECTIONS, ALL MEASURED RATHER THAN REASONED.
+           (1) THE DEFERRED BRANCH REPAINTED THE WRONG THING. It set pending.text and then called
+           pcQPaint(), which draws the COMPOSER'S QUEUE STRIP, not the transcript. The reply was
+           fetched, assigned, and never drawn: the operator came back to "Reconnecting..." sitting
+           there for ever -- in the one branch that exists for exactly his case. renderStream() is
+           the transcript painter. Caught by a rig whose own first two versions were invalid (it
+           read window.HIST, which is closure-scoped, and its stub leaked the reply on the boot
+           history load); it only became trustworthy once SABOTAGING the rescue made it go red.
+           (2) THE POLL HAD NO STOP. setInterval every 1s for ever if the tab never comes back --
+           on a phone left in a pocket that is a battery leak with no upper bound. It now gives up
+           after PC_RESCUE_MAX tries (~10 minutes) and writes the honest error.
+           (3) THE IMMEDIATE BRANCH READ SEL.id LIVE. The selection can change while a request is
+           in flight -- that is why _turnProv is pinned at send -- so a strain switch mid-turn
+           compared this turn against another strain's history. Both branches now use the id
+           pinned when the turn failed. */
+        var _rsAgent = (SEL && SEL.id) || '';
+        var _rsText  = text;
+        var _rsMatch = function (turns) {
+          var last = turns[turns.length - 1], prev = turns[turns.length - 2];
+          if (!last || last.role !== 'ag' || !prev) return null;
+          var mine = String(prev.text || '');
+          if (mine !== _rsText && mine !== String(_rsText).trim()) return null;
+          return String(last.text || '');
+        };
+        var _rsTry = async function () {
+          var ch = await api('/api/chat/history?agentId=' + encodeURIComponent(_rsAgent) + '&full=1');
+          return _rsMatch((ch && ch.history) || []);
+        };
+        if(!_why && e.status!==401 && e.status!==412 && document.visibilityState==='visible') {
+          pending.text = 'Reconnecting... checking if the turn finished.';
+          try { var got = await _rsTry(); pending.text = got || _errFallback; }
+          catch(e2) { pending.text = _errFallback; }
+        } else if(!_why && e.status!==401 && e.status!==412) {
+           pending.text = 'Reconnecting... checking if the turn finished.';
+           var PC_RESCUE_MAX = 600, _rsN = 0;
+           var intv = setInterval(async function() {
+             if (++_rsN > PC_RESCUE_MAX) { clearInterval(intv); pending.text = _errFallback; renderStream(); return; }
+             if (document.visibilityState!=='visible') return;
+             clearInterval(intv);
+             try { var got2 = await _rsTry(); pending.text = got2 || _errFallback; }
+             catch(e2) { pending.text = _errFallback; }
+             renderStream();
+           }, 1000);
+        } else {
+          pending.text = _errFallback;
+        }
+      }
+    }
+    finally{ PCBUSY=false; PCABORT=null; }
+    pcThinkStop(); renderStream();
+    /* [HARNESSUI-QUEUE-V1] FLUSH AS ONE MESSAGE, IN ORDER. Joined with a blank line so the parts
+       stay legible as separate statements, and sent through a timeout rather than a direct call so
+       this turn's render finishes first and the recursion never nests. */
+    if(PCQ.length){
+      var batch=PCQ.slice(); PCQ=[]; pcQPaint();
+      var parts=[]; var qimgs=[];
+      for(var qi=0; qi<batch.length; qi++){
+        if(batch[qi].text) parts.push(batch[qi].text);
+        qimgs=qimgs.concat(batch[qi].imgs||[]);
+      }
+      var merged=parts.join('\n\n');
+      if(merged||qimgs.length) setTimeout(function(){ send({text:merged, imgs:qimgs}); }, 0);
+    } }
   /* [HARNESSUI-THINKING-V75] Growing dots, driven by a timer rather than by CSS `content`
      keyframes -- animating `content` is a Chrome-only trick and this console is also opened from
      phones. The span is appended to the LAST bubble after renderStream() has drawn it, so nothing
@@ -585,13 +877,89 @@ window.pcWhimsyOn = function(){
      that always runs after the request settles, success or failure, which is why there is exactly
      one clear site and no way to leak the interval. */
   var PCTHINK=null;
+  /* [HARNESSUI-GOLDBRAIN-V1] THE THINKING INDICATOR IS THE ACTUAL LOGO, FLOWING GOLD.
+     This replaces two earlier attempts, and both were wrong in the same way: I drew something
+     instead of using what already exists. First the growing dots, then an ASCII mushroom, then a
+     hand-drawn SVG that the operator correctly said "looks nothing like my logo" -- because it
+     was my guess at his mark rather than his mark.
+     /brand/logo.png IS the mark: a brain-capped mushroom in blue-green on a dark disc. And the
+     page ALREADY knows how to paint it gold -- --logo-filter, forty lines up, is a
+     grayscale->sepia->saturate->hue-rotate chain whose own comment says it exists "to paint a
+     BLUE-GREEN source gold". The header and the empty state both use it. So this reuses that
+     recipe and animates it.
+     TWO STACKED COPIES OF THE SAME IMAGE. The base copy breathes through the gold range
+     (saturate 5.2->8, hue-rotate -8->16deg, brightness .98->1.16) so the metal shifts tone. The
+     top copy is the same image at higher saturation and brightness, masked by a narrow diagonal
+     gradient band whose mask-position travels across it -- a specular highlight sweeping the cap
+     and stem. Together they read as gold flowing through the brain.
+     IT COSTS NOTHING AND NEEDS NO JAVASCRIPT AT ALL. Two CSS animations on filter and
+     mask-position, composited by the browser; no timer, no per-frame string building, no canvas.
+     It is strictly cheaper than the dots it replaces, which ran a 380ms setInterval. The image
+     is one already-cached 96px PNG the page loads anyway for the header.
+     REDUCE-MOTION SLOWS IT, IT DOES NOT REPLACE IT -- the lesson from the ASCII version, which
+     fell back to dots and therefore showed the operator dots, because his browser has the
+     setting on. It is expressed in CSS here, so there is no branch in the script at all. */
   function pcThinkStart(){ pcThinkStop(); try{
       var s=$('stream'), b=s&&s.lastChild; if(!b) return;
-      var d=document.createElement('span'); d.className='pcdots'; d.textContent='.';
-      b.appendChild(d); s.scrollTop=s.scrollHeight;
-      var n=1; PCTHINK=setInterval(function(){ n=(n%6)+1; d.textContent=new Array(n+1).join('.'); },380);
+      /* the knockout filter lives in the document, created once and reused by every turn */
+      if(!document.getElementById('pcbfilters')){
+        var fs=document.createElement('div'); fs.id='pcbfilters';
+        fs.setAttribute('aria-hidden','true');
+        fs.style.cssText='position:absolute;width:0;height:0;overflow:hidden';
+        fs.innerHTML='<svg width="0" height="0"><defs>'
+          + '<filter id="pcbKnock" color-interpolation-filters="sRGB">'
+          + '<feColorMatrix type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  .2126 .7152 .0722 0 0"/>'
+          + '<feComponentTransfer><feFuncA type="table" tableValues="0 0 0.14 0.70 0.96 1"/></feComponentTransfer>'
+          + '</filter></defs></svg>';
+        document.body.appendChild(fs);
+      }
+      /* [HARNESSUI-THINKDOCK-V1] the pending bubble in the stream goes dark and an identical one
+         is docked, centred, just above the input for as long as the turn is in flight. The name
+         tag is LIFTED OFF the real pending bubble rather than rebuilt from SEL, so the docked
+         copy carries the same strain name and the same model stamp this turn was pinned to at
+         send() -- rebuilding it here would read PROVIDER again and could stamp the wrong
+         substrate if the operator flips the toggle mid-turn. innerHTML is moved DOM-to-DOM, so
+         it is the already-escaped markup, not a re-interpolated string. */
+      try{ b.classList.add('pcthinking'); }catch(e){}
+      var w=document.createElement('span'); w.className='pcbrain';
+      var a=document.createElement('img'); a.className='pcb-base';  a.src='/brand/logo.png'; a.alt='';
+      var c=document.createElement('img'); c.className='pcb-shine'; c.src='/brand/logo.png'; c.alt='';
+      w.appendChild(a); w.appendChild(c);
+      var host=document.querySelector('.composer');
+      if(host){
+        var dock=document.createElement('div'); dock.id='pcthinkdock';
+        dock.setAttribute('aria-hidden','true');
+        var bub=document.createElement('div'); bub.className='msg ag';
+        var src=(b.querySelector && b.querySelector('.nmtag'));
+        if(src){ var nt=document.createElement('span'); nt.className='nmtag';
+                 nt.innerHTML=src.innerHTML; bub.appendChild(nt); }
+        bub.appendChild(w);
+        /* [HARNESSUI-STOPBTN-V1] Built here rather than living in the markup, so it exists for
+           exactly as long as there is a turn to stop and cannot be clicked when there is not. */
+        var sb=document.createElement('button'); sb.id='pcthinkstop'; sb.type='button';
+        sb.title='Stop waiting on this turn'; sb.setAttribute('aria-label','Stop waiting on this turn');
+        sb.innerHTML='<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">'
+          + '<rect x="1" y="1" width="10" height="10" rx="2" fill="currentColor"/></svg>';
+        sb.onclick=function(){ try{ pcStopTurn(); }catch(e){} };
+        bub.appendChild(sb);
+        dock.appendChild(bub); host.appendChild(dock);
+      } else {
+        /* the composer is not in the DOM (a trimmed embed): fall back to the old in-stream spot
+           rather than dropping the indicator entirely. */
+        try{ b.classList.remove('pcthinking'); }catch(e){}
+        b.appendChild(w);
+      }
+      s.scrollTop=s.scrollHeight;
     }catch(e){} }
-  function pcThinkStop(){ if(PCTHINK){ try{ clearInterval(PCTHINK); }catch(e){} PCTHINK=null; } }
+  function pcThinkStop(){
+    /* PCTHINK is kept because older builds set an interval here; the gold brain is pure CSS, so
+       the only thing to undo is the node. renderStream() rebuilds the stream after every turn
+       and would drop it anyway -- this is the belt to that braces, so a failed turn that somehow
+       skips the render cannot leave a mushroom spinning under the last bubble. */
+    if(PCTHINK){ try{ clearInterval(PCTHINK); }catch(e){} PCTHINK=null; }
+    try{ var d=document.querySelectorAll('#pcthinkdock'); for(var k=0;k<d.length;k++) d[k].remove(); }catch(e){}
+    try{ var n=document.querySelectorAll('#stream .pcbrain'); for(var i=0;i<n.length;i++) n[i].remove(); }catch(e){}
+    try{ var c=document.querySelectorAll('#stream .msg.pcthinking'); for(var i=0;i<c.length;i++) c[i].classList.remove('pcthinking'); }catch(e){} }
   function playLast(){ try{ var syn=window.speechSynthesis; if(!syn){ alert('Read-aloud is not supported in this browser.'); return; } if(syn.speaking||syn.pending){ syn.cancel(); return; } var h=(SEL&&HIST[SEL.id])||[]; var last=''; for(var i=h.length-1;i>=0;i--){ if(h[i] && h[i].role!=='me' && h[i].text && h[i].text!==String.fromCharCode(8230)){ last=h[i].text; break; } } if(!last) return; var u=new SpeechSynthesisUtterance(String(last).replace(/[#*_>]/g,' ').slice(0,4000)); u.rate=1.02; try{ syn.cancel(); }catch(e){} syn.speak(u); }catch(e){} }  // ---- mic: browser Web Speech API dictation (mobile-friendly, no deps) ----
   let _rec=null, _listening=false, _micWant=false, _micBase='';
   function toggleMic(){ const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -702,6 +1070,24 @@ window.pcWhimsyOn = function(){
   function provision(){ if(DEMO){ alert('Creating a strain is disabled in the demo view.'); return; } if(typeof window.slNewStrain==='function'){ window.slNewStrain(); return; } alert('Create a new strain is unavailable: the strain-lifecycle script did not load.'); }
   const DEMO_AGENTS=[{id:'fleet-advisor',name:'Fleet Advisor',role:'strategy · planning',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-gcp',name:'Fleet GCP',role:'cloud · deploys/IAM/billing',status:'working',last_ts:Date.now()-300000,backlog:0},{id:'fleet-security',name:'Fleet Security',role:'review · audits and refusals',status:'idle',last_ts:Date.now()-1800000,backlog:1}];
   async function loadFleet(){ try{ const d=await api('/api/fleet/agents'); AGENTS=d.agents||d||[]; }catch(e){ DEMO=true; AGENTS=DEMO_AGENTS; } renderAgents(); }
+  /* [STRAINROSTER-STALE-V1] THE PANEL WAS DRAWN ONCE AND NEVER AGAIN.
+     loadFleet ran at init and after a create/delete/subculture, and nowhere else. A console tab
+     is left open for hours, so the strain list on screen drifts arbitrarily far from the fleet:
+     measured today, a tab showed two strains that no longer existed and was missing one that had
+     been added since, against a live roster of 18. Every downstream confusion followed from that
+     -- clicking delete on a row for something already gone, and the delete then appearing to do
+     nothing because there was genuinely nothing to remove.
+     REFRESHED ON A TIMER AND WHEN THE TAB REGAINS FOCUS. The focus hook is the one that matters:
+     coming back to a tab is exactly the moment a person trusts what they are looking at. It is a
+     small read (18 rows) and it is skipped while the tab is hidden, so an idle background tab
+     costs nothing. It does NOT touch the selected strain or the open transcript. */
+  var PCROSTER_MS = 60000;
+  function pcRosterTick(){ if(DEMO) return; if(document.hidden) return; try{ loadFleet(); }catch(e){} }
+  try{
+    setInterval(pcRosterTick, PCROSTER_MS);
+    window.addEventListener('focus', pcRosterTick);
+    document.addEventListener('visibilitychange', function(){ if(!document.hidden) pcRosterTick(); });
+  }catch(e){}
   function toggleSide(){ const s=$('side'); const c=s.classList.toggle('collapsed'); $('railL').classList.toggle('show', c); }
   let _rz=null;
   function startResize(e){ _rz={x:e.clientX, w:$('rdpPanel').offsetWidth}; document.body.style.userSelect='none'; window.addEventListener('mousemove',onResize); window.addEventListener('mouseup',stopResize); e.preventDefault(); }
@@ -723,14 +1109,166 @@ window.pcWhimsyOn = function(){
      what paints before /api/models answers, and the install's own default_provider may replace
      it once the catalog is in hand. The `false` second argument is what marks this call as not
      a human pick, which is the only reason the server default is allowed to win. */
-  (async function(){ setProvider('gemini',false); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{ var _adv=(AGENTS||[]).find(function(a){return a.id==='fleet-advisor';})||(AGENTS||[])[0]; if(_adv && !SEL) selectAgent(_adv.id); }catch(e){} })();
+  (async function(){ setProvider(PROVIDER,false); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{
+    /* [HARNESSUI-DEEPLINK-V1] A LINK CAN NAME THE STRAIN AND THE SUBSTRATE.
+       /chat?strain=fleet-advisor&provider=ge opens straight into that strain on that substrate,
+       which is what makes this console shareable the way an enterprise hands out an app URL:
+       one link, lands where it should, no clicking through a rail first.
+       PRECEDENCE IS DELIBERATE -- url beats remembered beats advisor beats first. The link is an
+       explicit instruction from whoever sent it, so it has to win over this browser's own
+       localStorage memory; without that, a shared link would silently open someone else's last
+       strain and look broken to the person who received it.
+       IT DOES NOT REWRITE THE URL. Stripping the parameter after reading it would make a reload
+       land somewhere different from the link, which is the bug this is trying not to have.
+       `agent` is accepted as a synonym because that is what the roster route calls the field.
+       An unknown id falls through to the normal order rather than erroring: a stale link should
+       open a working console, not a dead one. */
+    var _qs = {};
+    try { (location.search||'').replace(/^\?/,'').split('&').forEach(function(kv){
+        if(!kv) return; var i=kv.indexOf('='); var k=i<0?kv:kv.slice(0,i);
+        _qs[decodeURIComponent(k)] = i<0 ? '' : decodeURIComponent(kv.slice(i+1).replace(/\+/g,' '));
+      }); } catch(e) {}
+    try {
+      var _lp = String(_qs.provider||_qs.substrate||'').toLowerCase();
+      if(_lp==='ge'||_lp==='claude'||_lp==='gemini'){
+        for(var _g=0; _g<4 && PROVIDER!==_lp; _g++) pcToggleProvider();
+      }
+    } catch(e) {}
+    var _linked = String(_qs.strain||_qs.agent||'');
+    var _want=pcRemembered();
+    var _pick=(_linked && (AGENTS||[]).find(function(a){return a.id===_linked;}))
+           || (_want && (AGENTS||[]).find(function(a){return a.id===_want;}))
+           || (AGENTS||[]).find(function(a){return a.id==='fleet-advisor';})
+           || (AGENTS||[])[0];
+    if(_pick && !SEL) selectAgent(_pick.id);
+  }catch(e){} })();
 </script>
 <style id="pcfungi">
 :root{--g1:#5a2a8f;--g2:#3a1a63;--g3:#180c30}
 .agent .st{box-shadow:none!important}
 </style>
 <link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/icon.png"><link rel="apple-touch-icon" href="/icon.png">
-<style id="pclogo">.hdr img,.brand img,.empty img{border-radius:50%!important;box-shadow:0 0 13px 2px rgba(var(--acc-rgb),.5)!important}.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6) hue-rotate(5deg) brightness(1.05)!important}</style>
+<style id="pcminibrain">
+  /* THE STRAIN-ROW ICON IS THE FAVICON MARK WITH REAL ALPHA, and the CSS knockout is NOT used
+     here. The operator picked the asset -- "the tab fav icon is perfect put it next to strain
+     names" -- and then said "but transparent no black", which was correct: at 16px the CSS
+     knockout still left a dark ring. THE REASON is that downscaling 180px art blends the black
+     disc INTO the gold ring, and those blended pixels land mid-luminance, which is exactly where
+     the alpha curve keeps them. No curve fixes it, because the black is inside the pixel by then.
+     So the alpha is baked instead: icon-180.png was processed once (alpha from luminance, then
+     each pixel's value normalised back to full gold so a downscale cannot average it toward grey)
+     and inlined below at 64px as a data URI. Rendered at 16px against light, dark and a purple
+     theme: clean gold, no ring, on all three.
+     INLINE RATHER THAN A NEW ROUTE: 7.6KB of base64 against a page that is already ~195KB, and it
+     costs no request, no PC_SURFACE_MAP entry and no route-baseline churn for one icon. */
+  .st img.pcmini{width:16px;height:16px;object-fit:contain;display:block;
+    filter:drop-shadow(0 0 3px rgba(var(--acc-rgb),.55))}
+  .st{display:inline-flex;align-items:center;justify-content:center}
+</style>
+<style id="pcbrainstyle">
+  /* [HARNESSUI-GOLDBRAIN-V1] see pcThinkStart. Same gold chain as --logo-filter, animated. */
+  /* [HARNESSUI-GOLDBRAIN-SIZE-V1] BIG, AND RESPONSIVE RATHER THAN BIG-AND-SORRY-ON-MOBILE.
+     44px was legible but the operator's word for it was "real tiny" -- at that size the brain
+     folds in the cap are below the resolution of the artwork and it reads as a gold blob.
+     clamp() does the work: 26vw is the natural size, floored at 76px so a narrow phone still
+     shows the cap detail, and ceilinged at 156px so a wide desktop bubble does not turn into a
+     poster. On a 375px phone that resolves to ~97px; on desktop it pins at 156px.
+     aspect-ratio keeps it circular without hardcoding a height, so the two absolutely-positioned
+     copies inside still fill it exactly at every width. */
+  /* [HARNESSUI-THINKDOCK-V1] THE THINKING BUBBLE IS DOCKED, CENTRED, JUST ABOVE THE INPUT --
+     not centred inside the message column, which is what THINKCENTRE-V1 did and is not what was
+     asked for. The whole bubble sits at the bottom of the chat window while the turn is in
+     flight, and the moment the reply lands it is gone and the answer renders as an ordinary
+     left-aligned .msg.ag in the stream.
+     WHY IT HANGS OFF .composer AND NOT .chat: bottom:100% on a child of the composer is exactly
+     the composer's top edge, whatever height the textarea has grown to. Anchoring to .chat would
+     mean re-measuring the composer in script every time grow() resizes the textarea, and getting
+     it wrong by a few pixels on a phone where the composer is two lines tall.
+     pointer-events:none so the docked bubble never eats a click meant for the stream underneath;
+     the inner bubble re-enables nothing, there is nothing in it to click.
+     THE IN-STREAM PENDING BUBBLE IS HIDDEN, NOT REMOVED: send() pushes a real pending entry into
+     HIST and every later stream render depends on it being there. display:none on a class that
+     only exists between pcThinkStart and the next renderStream() keeps that contract and still
+     leaves the stream looking like nothing is pending. */
+  #pcthinkdock{position:absolute;left:0;right:0;bottom:100%;display:flex;justify-content:center;
+    pointer-events:none;z-index:6}
+  #pcthinkdock .msg{margin:0 0 .5rem;max-width:92%;text-align:center;align-self:flex-end;
+    background:rgba(var(--sunk-rgb),.42);border:1px solid var(--glass-line);border-radius:15px;
+    backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+  #pcthinkdock .nmtag{display:block;text-align:center}
+  #stream .msg.pcthinking{display:none}
+  /* [HARNESSUI-STOPBTN-V1] THE STOP IS ON THE THINKING BUBBLE, not in a menu and not at the top
+     of the page, because the moment the operator wants it is the moment he is already looking at
+     the brain. pointer-events has to be re-enabled on the button itself: the dock is
+     pointer-events:none so it never eats a click meant for the stream underneath it, and that
+     inherits down to every child unless a child opts back in. */
+  #pcthinkdock .msg{position:relative}
+  #pcthinkstop{pointer-events:auto;display:block;margin:.2rem auto 0;width:30px;height:30px;
+    padding:0;line-height:0;cursor:pointer;border-radius:9px;
+    border:1px solid var(--glass-line);background:rgba(var(--ink-rgb),.18);color:var(--ink)}
+  #pcthinkstop:hover{background:rgba(var(--ink-rgb),.30)}
+  #pcthinkstop:focus-visible{outline:2px solid rgba(var(--acc-rgb),.7);outline-offset:2px}
+  #pcthinkstop svg{display:block;margin:auto}
+  /* [HARNESSUI-QUEUE-V1] The queue bar sits INSIDE the composer, above the input, as a normal
+     flow element -- so it pushes the docked thinking bubble up by exactly its own height rather
+     than sliding underneath it, because the dock is anchored to bottom:100% of this same box. */
+  /* ONE LINE, ALWAYS. At 375px the first version wrapped to seven lines and squeezed the textarea
+     down to a vertical sliver of single letters -- caught in a phone-width render before it
+     shipped. nowrap plus an ellipsis on the text span keeps the bar the same height at every
+     width, and min-width:0 is what actually lets a flex child shrink enough to ellipsise. */
+  #pcqbar{display:none;align-items:center;gap:.5rem;margin:0 0 .45rem;padding:.38rem .6rem;
+    border:1px dashed var(--glass-line);border-radius:10px;white-space:nowrap;
+    background:rgba(var(--sunk-rgb),.30);font-size:.78rem;color:var(--ink-soft)}
+  #pcqtext{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #pcqbar.on{display:flex}
+  #pcqbar b{color:var(--ink);font-weight:700}
+  #pcqbar .qx{margin-left:auto;flex:0 0 auto;cursor:pointer;padding:.05rem .35rem;border-radius:6px;
+    color:var(--ink-dim);font-size:.9rem;line-height:1.2}
+  #pcqbar .qx:hover{color:var(--ink);background:rgba(var(--ink-rgb),.16)}
+  .pcbrain{position:relative;display:block;width:clamp(76px,26vw,156px);aspect-ratio:1;
+    margin:.3rem auto .25rem}
+  .pcbrain img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+  /* [HARNESSUI-GOLDBRAIN-KNOCKOUT-V1] THE BLACK DISC IS GONE, and the trick is that the artwork
+     knocks itself out. url(#pcbKnock) is an SVG filter that keeps RGB and REPLACES ALPHA with the
+     pixel's own luminance, then pushes that through a steep table so the low end lands on zero.
+     The dark disc is near-black, so it becomes fully transparent; the gold mark is bright, so it
+     stays solid. No second asset, no hand-cut mask, no per-theme branch.
+     WHY NOT mix-blend-mode:screen, which is the usual answer: it drops black only against a DARK
+     backdrop. This console has a light theme, where screen would wash the whole mark out. The
+     luminance-to-alpha route is background-independent, and was checked on both themes.
+     WHY THE CURVE IS STEEP AND NOT A GAMMA LIFT: the first attempt lifted alpha (gamma .5), which
+     made the artwork's dark striations semi-transparent rather than absent -- on white they read
+     as grey ghosting. tableValues drops everything below ~12% luminance to nothing and ramps hard,
+     so the darks disappear instead of going pale.
+     A CONSTANT-GOLD VARIANT WAS ALSO BUILT AND REJECTED. Replacing RGB with one gold and using
+     luminance only for alpha produces a flat, pale mark -- it loses the depth the sepia chain
+     gives the cap. Rendered side by side before choosing. The glow moved from a box-shadow on the
+     wrapper (which was a disc, and there is no disc now) into drop-shadow() at the end of the
+     chain, so it follows the mushroom's actual silhouette. */
+  .pcb-base{filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock)
+    drop-shadow(0 0 9px rgba(var(--acc-rgb),.45));
+    animation:pcb-tone 2.8s ease-in-out infinite}
+  .pcb-shine{filter:grayscale(1) sepia(1) saturate(9) hue-rotate(12deg) brightness(1.55) url(#pcbKnock);
+    -webkit-mask-image:linear-gradient(115deg,transparent 38%,#000 50%,transparent 62%);
+            mask-image:linear-gradient(115deg,transparent 38%,#000 50%,transparent 62%);
+    -webkit-mask-size:280% 280%; mask-size:280% 280%;
+    animation:pcb-sweep 1.9s linear infinite}
+  @keyframes pcb-tone{
+    0%,100%{filter:grayscale(1) sepia(1) saturate(5.5) hue-rotate(-7deg) brightness(1.06) url(#pcbKnock) drop-shadow(0 0 8px rgba(var(--acc-rgb),.4))}
+    50%    {filter:grayscale(1) sepia(1) saturate(8.5) hue-rotate(12deg) brightness(1.26) url(#pcbKnock) drop-shadow(0 0 13px rgba(var(--acc-rgb),.55))}}
+  @keyframes pcb-sweep{
+    from{-webkit-mask-position:130% 130%; mask-position:130% 130%}
+    to  {-webkit-mask-position:-50% -50%; mask-position:-50% -50%}}
+  @media (prefers-reduced-motion: reduce){
+    .pcb-base{animation-duration:7s}
+    .pcb-shine{animation-duration:5.4s}}
+</style>
+<style id="pclogo">/* [HARNESSUI-GOLDBRAIN-KNOCKOUT-V1] the box-shadow is gone on purpose: it
+  draws on the element BOX, and the box is transparent now, so it rendered as a glowing ring around
+  nothing. The glow is a drop-shadow() at the end of the filter chain instead, which follows the
+  mushroom's actual silhouette. */
+.hdr img,.brand img,.empty img{box-shadow:none!important}
+.hdr img,.brand img,.empty img{filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 11px rgba(var(--acc-rgb),.45))!important}</style>
 
 <script id="pcdecor">
 (function(){
@@ -738,16 +1276,44 @@ window.pcWhimsyOn = function(){
   function sc(id){id=String(id||'');var h=5381;for(var i=0;i<id.length;i++)h=((h*33)^id.charCodeAt(i))>>>0;return 'hsl('+(h%360)+',60%,63%)';}
   function mush(c){return '<svg viewBox="0 0 24 24" width="13" height="13" style="vertical-align:-2px"><path d="M12 3.5C7.3 3.5 4 6.4 4 9.3c0 .9.7 1.4 1.7 1.4h12.6c1 0 1.7-.5 1.7-1.4 0-2.9-3.3-5.8-8-5.8z" fill="'+c+'"/><path d="M10.4 10.7h3.2l-.4 6.6c-.1 1-.5 1.7-1.2 1.7s-1.1-.7-1.2-1.7z" fill="'+c+'" opacity=".6"/></svg>';}
   var FORK='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#c9a3ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.4"/><circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.5v9"/><path d="M18 9.3c0 3.4-3 3.6-6 5.1"/></svg>';
+  /* [HARNESSUI-GOLDBRAIN-KNOCKOUT-V1] the gold mark with baked alpha, 64px. Derived from
+     src/brand/icon-180.png, not redrawn. See the .pcmini rule for why it is baked and inlined. */
+  var PCMARK='data:image/png;base64,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';
   function setText(el,val){ if(el && el.textContent!==val) el.textContent=val; }
   function jp(u,b){return fetch(u,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){return r.json().catch(function(){return {};}).then(function(d){return {ok:r.ok,status:r.status,data:d};});});}
-  function rid(a){var rl=a.querySelector('.rl');var x=rl?rl.textContent.trim():'';return x.indexOf('fleet-')===0?x:('fleet-'+x);}
+  function rid(a){
+    /* [STRAINROW-ID-V1] data first; the text reconstruction is kept only for rows drawn by an
+       older render that had no attribute, and it is the fallback, not the path. */
+    var got=a&&a.getAttribute?String(a.getAttribute('data-strain-id')||''):'';
+    if(got) return got;
+    var rl=a.querySelector('.rl');var x=rl?rl.textContent.trim():'';return x.indexOf('fleet-')===0?x:('fleet-'+x);}
   window.delStrain=async function(a){
     var nm=a.querySelector('.nm');var name=nm?nm.textContent.trim():'strain';var id=rid(a);
     if(!confirm('Delete the '+name+'?\n\nIts history is backed up to the Mycelium, then removed. This cannot be undone.'))return;
+    /* [STRAINDEL-SILENT-V1] MEASURED, reported by the operator: "it pops up to confirm delete
+       but then nothing happens and it is still there."
+       THREE THINGS WERE WRONG AND ALL THREE LOOKED IDENTICAL FROM THE OUTSIDE.
+       (a) The outer catch was EMPTY. Any throw -- a dropped connection, a redirect to the unlock
+           page -- was swallowed whole, so the one case that most needs a message produced none.
+       (b) A delete that removed NOTHING returned ok:true and was treated as success. Deleting a
+           strain that is already gone is exactly that case, and it is the common one: this panel
+           is drawn once at load, so a tab left open for hours offers rows for strains that no
+           longer exist. Measured on a stale tab against a live roster of 18: two of the rows on
+           screen named strains the server does not return.
+       (c) The refresh was fire-and-forget, so the row stayed under the cursor while the new
+           roster was still in flight -- which reads as "nothing happened" even when it worked.
+       It is now awaited, the outcome is counted, and a no-op says so. */
     try{
-      var r=await jp('/api/strain/delete',{agentId:id});if(!r.ok){alert('Delete failed: '+(r.data.error||r.status));return;}
-      if(typeof loadFleet==='function')loadFleet();
-    }catch(e){}
+      var r=await jp('/api/strain/delete',{agentId:id});
+      if(!r.ok){alert('Delete failed: '+((r.data&&r.data.error)||r.status)+'\n\nid: '+id);return;}
+      var del=(r.data&&r.data.deleted)||{};
+      var removed=(del.chat_history||0)+(del.journal||0)+(del.work_items||0)+(del.strains_doc?1:0);
+      if(typeof loadFleet==='function'){ await loadFleet(); }
+      if(!removed){
+        alert('Nothing to delete: '+name+' ('+id+') is not on the fleet any more.\n\n'
+          +'The list you clicked was drawn when this page loaded. It has been refreshed.');
+      }
+    }catch(e){ alert('Delete failed before it reached the fleet: '+String((e&&e.message)||e)+'\n\nid: '+id); }
   };
   window.subStrain=async function(a){
     var nm=a.querySelector('.nm');var pname=nm?nm.textContent.trim():'strain';var pid=rid(a);
@@ -833,7 +1399,12 @@ window.pcWhimsyOn = function(){
          Stripping the "fleet-" prefix off the role line below is NOT lexicon -- it is dropping a
          redundant namespace off an identifier -- so it stays here and runs in both modes. */
       var rl=a.querySelector('.rl');if(rl){setText(rl,rl.textContent.replace(/^fleet-/,''));}
-      var st=a.querySelector('.st');if(st&&!st.querySelector('svg')){st.textContent='';st.innerHTML=mush(sc(rid(a)));}
+      /* [HARNESSUI-GOLDBRAIN-KNOCKOUT-V1] the icon beside each strain name was a drawn SVG
+         mushroom tinted per strain by sc(); the operator's words were "those ugly colored mushroom
+         icons". It is the real logo now, tiny, gold and transparent, through the same knockout. */
+      var st=a.querySelector('.st');if(st&&!st.querySelector('img.pcmini')){st.textContent='';
+        var mi=document.createElement('img');mi.className='pcmini';mi.src=PCMARK;mi.alt='';
+        st.innerHTML='';st.appendChild(mi);}
       var meta=a.querySelector('.meta')||a;
       if(!meta.querySelector('.pcsubx')){var fx=document.createElement('span');fx.className='pcsubx';/* [HARNESSUI-LEXICON-V1] was 'Subculture (clone this strain with its full history)' -- one
          mushroom word glossed with its professional one in the same breath, which the dictionary
@@ -930,7 +1501,10 @@ window.pcWhimsyOn = function(){
   html[data-theme="blue"]{--g1:#123a6a;--g2:#12306a;--g3:#0a1430;--gold:#9ec7ff}
   html[data-theme="dark"]{--g1:#26262c;--g2:#17171c;--g3:#0b0b0e;--gold:#cfd3da}
   /* mushroom OFF: drop the gold logo glow (plainer, professional look) */
-  body.nomush .brand img,body.nomush .hdr img,body.nomush .empty img{filter:none!important;box-shadow:none!important}
+  /* [HARNESSUI-GOLDBRAIN-KNOCKOUT-V1] was filter:none -- which is why professional mode showed
+     the raw blue-green asset on its black disc. The operator wants the gold mark in BOTH modes,
+     so this now sets the gold chain rather than removing it. box-shadow stays off: see #pclogo. */
+  body.nomush .brand img,body.nomush .hdr img,body.nomush .empty img{filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45))!important;box-shadow:none!important}
   /* floating theme control */
   #pcThemeBtn{position:fixed;right:12px;bottom:14px;z-index:200;width:44px;height:44px;border-radius:50%;border:1px solid rgba(var(--ink-rgb),.28);background:rgba(var(--ink-rgb),.16);backdrop-filter:blur(8px);color:var(--ink);font-size:1.2rem;line-height:1;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
   #pcThemePanel{position:fixed;right:12px;bottom:66px;z-index:201;display:none;flex-direction:column;gap:.7rem;padding:.85rem .9rem;border-radius:14px;border:1px solid rgba(var(--ink-rgb),.22);background:linear-gradient(150deg,var(--g1),var(--g2) 70%,var(--g3));backdrop-filter:blur(14px);box-shadow:0 16px 44px rgba(0,0,0,.55);min-width:212px}
@@ -1870,12 +2444,12 @@ window.pcWhimsyOn = function(){
    (2,186-2,616 pixels per render). filter and border-radius are safe as tokens because the base
    rules read them; box-shadow needs an element rule at matching specificity to reach the img. */
 body.nomush{
-  --logo-filter:none;
+  --logo-filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45));
   --logo-radius:10px;
   --logo-shadow-hdr:0 0 10px rgba(var(--acc-rgb),.35);
   --logo-shadow-empty:0 0 10px rgba(var(--acc-rgb),.35);}
-body.nomush .hdr img,body.nomush .brand img{box-shadow:var(--logo-shadow-hdr)!important}
-body.nomush .empty img{box-shadow:var(--logo-shadow-empty)!important}
+body.nomush .hdr img,body.nomush .brand img{box-shadow:none!important}
+body.nomush .empty img{box-shadow:none!important}
 
 /* ---------- composer: demo geometry, mic and attachment KEPT ---------- */
 .send{padding:.7rem 1.1rem!important;font-size:.95rem!important;border-radius:12px!important;
@@ -2099,7 +2673,20 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
      ids. code/pre and .mono are verbatim by definition. #pcmushrail is the toggle itself, which
      af-theme.js excludes for the same reason: a control that renames itself is unusable. */
   var SKIP_TAG={SCRIPT:1,STYLE:1,NOSCRIPT:1,TEXTAREA:1,INPUT:1,CODE:1,PRE:1,OPTION:1};
-  var SKIP_SEL='#pcmushrail,.msg,.mono,#pcps-text,#pcps-roles,#termout,.termout,.termin';
+  /* [LEXICON-NEVER-IDS-V1] .pcid IS AN IDENTIFIER, AND IDENTIFIERS ARE NOT TRANSLATED.
+     MEASURED, and it cost the operator an hour of not trusting the console. The dictionary
+     carries ['build','grow'] so mushroom mode can say "growing" instead of "building" -- fine
+     for prose. It was also being applied to the strain row's ROLE LINE, which is an id. So
+     fleet-courier rendered as "grow", the row read "Grow strain", and the operator saw a strain he
+     did not recognise sitting in his fleet -- his Cloud Build identity, renamed into something
+     that looked like junk, which he then quite reasonably tried to delete.
+     IT ALSO BROKE THE DELETE. rid() recovered the id by reading that same line back, so the
+     click POSTed agentId "fleet-herald", which does not exist: the server removed nothing,
+     answered ok:true, and the row stayed. "the example strain" deleted cleanly because no dictionary
+     rule touched its name -- which is exactly why only ONE row appeared to be undeletable.
+     A display language may rename anything a person reads. It may never rename a name the
+     software has to resolve. */
+  var SKIP_SEL='#pcmushrail,.msg,.mono,.pcid,#pcps-text,#pcps-roles,#termout,.termout,.termin';
   /* `self` is false for the attribute pass, and that distinction is load-bearing. A TEXTAREA's
      TEXT is its live value -- what the operator has typed -- and must never be rewritten, which
      is why TEXTAREA is in SKIP_TAG. Its PLACEHOLDER is chrome ("Message the selected agent…")

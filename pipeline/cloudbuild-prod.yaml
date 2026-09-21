@@ -603,6 +603,63 @@ steps:
       - |
         set -eu
         TAG="p${_SHORT}"
+
+        # [PROD-TAG-REAP-V1] A REFUSED REVISION KEPT A PUBLIC URL OF ITS OWN.
+        # The two deploy steps above hand each new revision a tag, p<short>, at
+        # deploy time -- before anything has been verified. A tag is a durable,
+        # addressable hostname, and NOTHING IN THIS FILE EVER REMOVED ONE: grepped
+        # the whole tree at this commit -- --tag= is created in exactly two places
+        # (deploy-console-notraffic, deploy-mcp-notraffic) and --remove-tags occurs
+        # ONLY in deploy/*.md runbooks, i.e. by hand, afterwards, if someone
+        # remembers.
+        #
+        # So every refusal below printed that both surfaces were untouched and
+        # meant it about TRAFFIC -- which is true -- while the revision it had just
+        # rejected stayed reachable at its tag URL indefinitely. On the MCP service
+        # that is not theoretical: devgate F6.7 REQUIRES allUsers -> run.invoker
+        # there (devgate/smoke.py), so that tag URL answers anonymously. The
+        # PC_SURFACE refusal one screen below exists precisely to stop a revision
+        # that registers the FULL console route table from reaching the public,
+        # IAP-free MCP surface -- and the tag was handing it exactly that surface
+        # anyway, just at a different hostname.
+        #
+        # WHY A TRAP AND NOT A LINE AT EACH REFUSAL: this step refuses in five
+        # places (three inside probe(), two around the PC_SURFACE check) plus every
+        # `set -e` abort, and the next refusal added would have been the one that
+        # forgot. The trap changes no refusal: each message still prints, and it
+        # re-exits with the exact code it caught, adding only the cleanup after it.
+        #
+        # THE CONSOLE TAG IS REAPED TOO, AND IT IS NOT THE SAME HAZARD. devgate
+        # F6.8 FAILS the build if allUsers holds run.invoker on the console, so the
+        # console tag URL is not anonymously reachable. It is removed for symmetry
+        # -- a rejected revision should hold no URL on either surface, and a
+        # *.run.app tag URL bypasses any load balancer in front of it -- and
+        # because a re-run of the same commit reuses the same tag name.
+        #
+        # A FAILED UNTAG IS SAID OUT LOUD, NEVER SWALLOWED. The build is already
+        # failing, so this cannot change the verdict; the only thing worse than a
+        # live tag is a live tag the log claims was removed.
+        reap_tags() {
+          echo ""
+          echo "REAPING tag $$TAG: the revisions it names were REFUSED above and"
+          echo "must not keep an addressable URL. Traffic is not touched here."
+          for S in ${_CP_SVC} ${_MC_SVC}; do
+            if gcloud run services update-traffic "$$S" --region=${_REGION} \
+                 --project=${_PROD_PROJECT} --remove-tags="$$TAG" --quiet \
+                 > /workspace/untag.txt 2>&1; then
+              echo "  UNTAGGED $$S: tag $$TAG is gone; the refused revision has no"
+              echo "           URL of its own on this surface."
+            else
+              echo "  UNTAG FAILED on $$S: tag $$TAG MAY STILL BE LIVE, and with it"
+              echo "           the refused revision. Remove it by hand:"
+              echo "             gcloud run services update-traffic $$S \\"
+              echo "               --region=${_REGION} --project=${_PROD_PROJECT} \\"
+              echo "               --remove-tags=$$TAG"
+              tail -n 3 /workspace/untag.txt || true
+            fi
+          done
+        }
+        trap 'rc=$$?; [ "$$rc" -eq 0 ] || reap_tags; exit $$rc' EXIT
         CP_REV=$$(cat /workspace/cp.rev)
         MC_REV=$$(cat /workspace/mc.rev)
         test -n "$$CP_REV"

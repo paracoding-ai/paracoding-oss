@@ -45,6 +45,12 @@ export type ErrorCode =
   | 'NOT_DURABLE'
   /** Something tried to write a ref through the fs seam. Always a bug. */
   | 'REF_WRITE_FORBIDDEN'
+  /**
+   * The ref is PROTECTED and the push was not authorised. Raised by ops.ts;
+   * it was missing from this union, so tsc refused the throw and any consumer
+   * switching exhaustively on ErrorCode had no branch for it and fell through.
+   */
+  | 'PROTECTED_REF'
   | 'INTERNAL';
 
 export class ToolError extends Error {

@@ -493,7 +493,7 @@ cannot burn a real approval.
 | 0 | **arming gate**: `PC_EXEC_BUCKET` set AND `APPROVAL_REQUIRE_SIGNED=1` | 503, naming which variable | no |
 | 1 | `job_id` present | 400 | no |
 | 2 | the body carries an `approval` object | 400 | no |
-| 3 | the executor's own per-job operator assertion, **only if** `PC_REQUIRE_ASSERTION=1`; the installer ships it `0` and the control plane forwards none | 428 missing / 403 unbound / 403 no creds / 403 refused | no |
+| 3 | **not implemented**: whenever `PC_REQUIRE_ASSERTION=1` the operator-assertion path refuses by name, because nothing mints the per-job challenge, nothing forwards an assertion and no credential is enrolled; the installer ships it `0` | 501, naming the flag and telling you to set it back to `0` ([SEC-ASSERT-UNIMPL-V1]) | no |
 | 4 | sha256 of the presented script equals the approved command's | 400 bad base64 / 403 no approved command / 403 mismatch | no |
 | 5 | `approved_sha256`, stamped at approval time, matches the live command | 403 absent / 403 unreadable / 403 changed-after-approval | no |
 | 6 | KMS approval signature | 403 bad / 403 unverifiable / 403 unsigned-when-required / 403 V1 stamp on a non-local job | no |
@@ -608,11 +608,15 @@ variable assignment -- fails the same way. It defaults to observe and journals e
 so a skip can never look like a pass.
 
 **Do not set `PC_REQUIRE_ASSERTION=1` on this build.** Rung 3 requires *two* body fields,
-an assertion and an expected challenge; the control plane sends five fields --
-`script_b64`, `access_token`, `job_id`, `assertion` and `approval` -- and the challenge is
-not among them. `expected_challenge` does not occur in the control plane's source at all;
-measured, it appears zero times. Every job would return 428. The installer writes `=0` for
-that reason.
+an assertion and an expected challenge; the control plane sends four -- `script_b64`,
+`access_token`, `job_id` and `approval` -- and neither of the two is among them. The
+`assertion` member is written into that body but is always `undefined`, because the only
+function that can supply one has no call sites, and `JSON.stringify` drops it.
+`expected_challenge` does not occur in the control plane's source at all; measured, it
+appears zero times, as do `webauthn` and `navigator.credentials`. Rung 3 therefore now
+refuses **501 Not Implemented** and names the flag ([SEC-ASSERT-UNIMPL-V1]); it used to
+answer 428, which reads as "supply the precondition" for a precondition nothing in this
+tree can produce. The installer writes `=0` for that reason.
 
 **One approval is one run, and the claim is now an object rather than a transaction.**
 Rung 11 creates `claims/<job-id>-<digest>` in `PC_EXEC_BUCKET` with
@@ -751,8 +755,11 @@ second account **in your domain** with its own key.
 **The session check is the inner one and it is this application's.** `waSessionOk` admits
 a verified IAP identity on `WA_APPROVER_EMAILS` -- it verifies the assertion IAP attaches
 against Google's published keys and its own audience, `PC_IAP_AUD`, on every request and
-trusts no bare header -- or a `gate_session` cookie it minted itself: an HMAC under
-`WA_SESSION_SECRET` over `{ user, expiry }`, honoured for `WA_SESSION_MIN` minutes. There is
+trusts no bare header -- or a `gate_session` cookie: an HMAC under `WA_SESSION_SECRET` over
+`{ user, expiry }`, honoured for `WA_SESSION_MIN` minutes. It did NOT mint that cookie, and
+this page used to say it did. `waMakeSession()` is called from nowhere, so the console issues
+no session to anybody; the cookie branch admits only a holder of `WA_SESSION_SECRET`, in
+practice the dev evidence collector, which mints one from Secret Manager with IAP off. There is
 nothing to enrol and nothing to unlock. A caller carrying no IAP identity at all gets
 **401 with `control-plane/src/login.html` served in place**, at the URL it asked for -- a
 page that names the Google sign-in and polls `GET /api/auth/status` while the IAP key cache

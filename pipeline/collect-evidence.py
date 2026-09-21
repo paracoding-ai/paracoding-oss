@@ -1092,6 +1092,27 @@ ENV_READ_DYNAMIC = {
 }
 
 RE_ENV_TS = re.compile(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)")
+# [CE-ENV-PAREN-FALLBACK-V1] TWO SPELLINGS THE OLD PATTERN COULD NOT SEE, and both
+# of them are everywhere in this tree.
+#
+# TAIL: a run of CLOSING brackets may sit between the read and its operator --
+#   Number(process.env.PC_READ_MAX_PATHS) || PC_READ_MAX_PATHS_DEFAULT
+# is a default by any reading, and an unset name makes Number(undefined) NaN,
+# which is falsy, so the right operand is genuinely taken. Only ')' and ']' are
+# allowed through: nothing that could separate the read from an unrelated
+# expression and make an unguarded read look guarded.
+#
+# HEAD: a read that sits directly to the RIGHT of || or ?? IS the fallback --
+#   `inst:${process.env.K_REVISION || process.env.HOSTNAME}`
+# HOSTNAME here is what the code falls back TO. Reporting it as a variable the
+# deployment must supply is backwards, and Cloud Run supplies K_REVISION anyway.
+#
+# NEITHER CHANGES THE RULE ABOVE: a name is still required only when NO
+# occurrence anywhere carries a fallback. These two only stop a real fallback
+# from being missed, which is the direction that invents findings and blocks a
+# correct deploy.
+RE_ENV_TAIL_FALLBACK = re.compile(r"\s*[)\]]*\s*(\|\||\?\?|\?[^?.])")
+RE_ENV_HEAD_FALLBACK = re.compile(r"(\|\||\?\?)\s*$")
 
 
 def scan_env_ts(index_ts):
@@ -1118,9 +1139,11 @@ def scan_env_ts(index_ts):
     captured and then tested on the NEXT line. Every entry carries its reason."""
     occ = {}
     for m in RE_ENV_TS.finditer(index_ts):
+        head = index_ts[max(0, m.start() - 40):m.start()]
         tail = index_ts[m.end():m.end() + 60]
         occ.setdefault(m.group(1), []).append(
-            bool(re.match(r"\s*(\|\||\?\?|\?[^?.])", tail)))
+            bool(RE_ENV_TAIL_FALLBACK.match(tail))
+            or bool(RE_ENV_HEAD_FALLBACK.search(head)))
     return (sorted(occ),
             sorted(n for n, v in occ.items()
                    if not any(v) and n not in ENV_OPTIONAL_REVIEWED))
@@ -1889,11 +1912,24 @@ def named_secret_names(*envmaps):
     for env in envmaps:
         for v in (env or {}).values():
             v = str(v or "")
-            if v.startswith("<secret:") and v.endswith(">"):
-                out.add(v[8:-1])
-            m = re.search(r"projects/[^/]+/secrets/([A-Za-z0-9_-]+)", v)
+            # [CE-SECRET-CROSSPROJECT-V1] KEEP THE PROJECT WHEN THE NAME CARRIES ONE,
+            # AND EMIT ONE ENTRY PER SECRET RATHER THAN TWO.
+            # This used to record the bare name from the path AND, separately, whatever
+            # the <secret:...> spelling held -- so a single cross-project mount arrived
+            # as two names, and the bare one was then looked for in the LANE's project,
+            # where a secret belonging to another project can never appear. Both halves
+            # of the pair then read as "does not exist" about a secret that does.
+            tagged = v.startswith("<secret:") and v.endswith(">")
+            if tagged:
+                v = v[8:-1]
+            m = re.search(r"projects/([^/]+)/secrets/([A-Za-z0-9_-]+)", v)
             if m:
-                out.add(m.group(1))
+                out.add("projects/%s/secrets/%s" % (m.group(1), m.group(2)))
+            elif tagged and v:
+                # A BARE name only from the tagged spelling. `elif` on purpose: an
+                # untagged env value that is not a secret path is not a secret name,
+                # and adding it here would invent one out of every deployed variable.
+                out.add(v)
     out.discard("?")
     return sorted(out)
 
@@ -2096,10 +2132,20 @@ def collect_cloud(a, ev):
     idx = jbody(ip) if ip.get("_http") == 200 else None
     if idx is None:
         ev["firestore_indexes"] = None
+        # NAME THE DATABASE AND QUOTE GOOGLE. This refusal has been read three times as a
+        # bare "HTTP 404", and a status alone cannot tell a permission refusal from a wrong
+        # database path -- the two want opposite fixes. MEASURED 2026-09-19: replaying this
+        # exact URL as the build service account's own metadata token returns 200 with six
+        # indexes, so the permission is held and the 404 is something else. The database
+        # this build resolved and Google's own message are therefore recorded rather than
+        # inferred a fourth time.
+        _fb = jbody(ip)
         ev["firestore_indexes_error"] = (
-            "indexes list -> HTTP %s. Recorded as ABSENT EVIDENCE, never as an "
-            "empty index set: a refused request says nothing about which indexes "
-            "exist." % ip.get("_http"))
+            "indexes list -> HTTP %s for database %r. Recorded as ABSENT EVIDENCE, "
+            "never as an empty index set: a refused request says nothing about which "
+            "indexes exist. Google's own answer, verbatim and truncated: %s"
+            % (ip.get("_http"), fdb,
+               json.dumps((_fb or {}).get("error") or _fb or {})[:400]))
     else:
         out = []
         for ix in idx.get("indexes", []) or []:
@@ -2145,15 +2191,53 @@ def collect_cloud(a, ev):
     want = named_secret_names(cpenv, gxenv)
     sp = http("GET", "https://secretmanager.googleapis.com/v1/projects/%s/secrets"
               "?pageSize=300" % P, token=at)
+    listed = sp.get("_http") == 200
     have = {s.get("name", "").split("/")[-1]
             for s in (jbody(sp) or {}).get("secrets", []) or []}
-    ev["named_secrets"] = {n: (n in have) for n in want}
+    # [CE-SECRET-CROSSPROJECT-V1] THREE STATES, NOT TWO: True exists, False does not,
+    # None WAS NOT MEASURED. A qualified name is fetched from ITS OWN project rather
+    # than looked for in this lane's list -- a secret in another project is not absent
+    # here, it is elsewhere -- and the STATUS decides: 200 exists, 404 does not, and
+    # anything else (403 above all) means we were refused and therefore know nothing
+    # about it in either direction. Same rule the Firestore index read already applies,
+    # and the same one _starved() applies to service reads.
+    named, unmeasured = {}, {}
+    for n in want:
+        qm = re.match(r"^projects/([^/]+)/secrets/([A-Za-z0-9_-]+)$", n)
+        if qm:
+            # Qualified names are ALWAYS fetched, including ones in this same project:
+            # the path may carry a project NUMBER where P is an ID, so comparing the
+            # two strings would mis-route a local secret to the cross-project branch
+            # and back again. One GET is cheaper than that ambiguity.
+            gp = http("GET", "https://secretmanager.googleapis.com/v1/" + n, token=at)
+            code = gp.get("_http")
+            if code == 200:
+                named[n] = True
+            elif code == 404:
+                named[n] = False
+            else:
+                named[n] = None
+                unmeasured[n] = (
+                    "GET secretmanager/v1/%s -> HTTP %s. NOT MEASURED: a refusal says "
+                    "nothing about whether the secret exists. Grant the collector "
+                    "metadata read (roles/secretmanager.viewer on that secret -- NOT "
+                    "versions.access) to turn this into a measurement." % (n, code))
+        elif listed:
+            named[n] = n in have
+        else:
+            named[n] = None
+            unmeasured[n] = (
+                "secretmanager list in %s -> HTTP %s, so no name could be checked "
+                "against it. NOT MEASURED." % (P, sp.get("_http")))
+    ev["named_secrets"] = named
+    if unmeasured:
+        ev["named_secrets_unmeasured"] = unmeasured
     ev["named_secrets_channel"] = (
-        "secretmanager list -> %d secret(s)" % len(have) if sp.get("_http") == 200
-        else "secretmanager list FAILED HTTP %s -- every name below reads as absent, "
-             "so F3.3 fails on a read error rather than on a missing secret. That is "
-             "fail-closed, and this line is how a reader tells the two apart."
-             % sp.get("_http"))
+        ("secretmanager list -> %d secret(s)" % len(have) if listed
+         else "secretmanager list FAILED HTTP %s" % sp.get("_http"))
+        + ("; %d name(s) fetched from their own project"
+           % sum(1 for n in want if n.startswith("projects/")))
+        + ("; %d NOT MEASURED" % len(unmeasured) if unmeasured else ""))
     # THE SURFACE READ HAPPENS HERE, NOT IN collect_app, AND THE ORDER IS THE POINT.
     # collect_app toggles IAP OFF around its probes; F6.2 asserts that the console is
     # IAP-fronted and reads the header IAP generates. Probing the console inside that
@@ -2427,8 +2511,21 @@ def collect_app(a, ev, cpenv, base, target):
     # recorded refusal. The consequence is not hidden: with IAP still in front,
     # F1.4/F1.5/F2.2 answer against IAP and are judged on what they actually saw.
     allowed = [x.strip() for x in (a.iap_toggle_projects or "").split(",") if x.strip()]
-    iap_fenced = a.iap_toggle and P not in allowed
-    if iap_fenced:
+    # [SEC-IAP-PRODNAME-V1] AN UNSET FENCE IS NOT PERMISSION. The deny list read here
+    # is the same one main() refuses on; if a caller empties it, the collector has no
+    # list of consoles it must never mutate, and the toggle is refused rather than
+    # performed. Empty must never be the permissive value -- that is the shape that
+    # made --iap-toggle-projects's own default a live project id once.
+    prod_denied = [x.strip() for x in (a.prod_console_services or "").split(",")
+                   if x.strip()]
+    iap_fenced = a.iap_toggle and (P not in allowed or not prod_denied)
+    if a.iap_toggle and not prod_denied:
+        ev["iap_toggle_refused"] = (
+            "the IAP toggle was NOT performed: --prod-console-services is EMPTY, so "
+            "this collector carries no list of console services it must never touch. "
+            "An unset fence is not permission and the toggle is refused until one is "
+            "named. Probes below ran with IAP still in front.")
+    elif iap_fenced:
         ev["iap_toggle_refused"] = (
             "the IAP toggle was NOT performed: project %s is not in "
             "--iap-toggle-projects (%s). Disabling IAP is a live config change and "
@@ -2569,7 +2666,17 @@ def collect_app(a, ev, cpenv, base, target):
         # `gcloud storage cp` would store PLAINTEXT, and F1.5 would then report
         # "listed size == plaintext size -- the headline defect" over an object THIS
         # COLLECTOR wrote in the clear. That is a FALSE RED, so it is not done.
-        # No key => roundtrip stays null => F1.4/F1.5 FAIL honestly. Never faked.
+        # [DEVGATE-OIDC-ROUNDTRIP-V1] NO KEY IS NO LONGER NO ROUND TRIP, AND THE
+        # REASON IS NOT A RELAXATION. This collector already authenticates every
+        # leg with a Google-signed ID token for its own service account, and
+        # [STRAIN-OIDC-IDENTITY-V128] admits exactly that bearer with no paste when
+        # sa_email maps to an ACTIVE strain -- through the SAME
+        # buildMcpServerAdmitted path as a minted key, tool_classes and all.
+        # MEASURED 2026-09-19T01:20:21Z against prod: a keyless tools/call carrying
+        # only the metadata ID token (aud = MCP_PUBLIC_URL) returned 200 and a real
+        # result. So the round trip below is attempted with whichever identity is
+        # available, and is still NEVER faked: a refused write leg is recorded as
+        # a refusal and F1.4/F1.5 still fail on it.
         key = os.environ.get("PC_SMOKE_SESSION_KEY", "").strip()
         chan = "PC_SMOKE_SESSION_KEY"
         minted = None
@@ -2583,16 +2690,26 @@ def collect_app(a, ev, cpenv, base, target):
             else:
                 ev["session_key_mint_error"] = ("POST /api/sessions/mint -> HTTP %s %s"
                                                 % (mp.get("_http"), str(mj)[:200]))
-        ev["roundtrip_channel"] = chan if key else "NONE"
+        # A PASTED KEY STILL WINS. The attested identity is the FALLBACK, not the
+        # preference: where an operator has deliberately scoped a smoke key, that
+        # scoping is the thing under test and must not be silently widened to
+        # whatever strain the build identity happens to hold.
+        ev["roundtrip_channel"] = chan if key else (
+            "attested service-account identity -- no key presented "
+            "[STRAIN-OIDC-IDENTITY-V128]")
         if not key:
             ev["roundtrip_note"] = (
-                "No session key was obtained, so NO round-trip was performed and "
-                "roundtrip/mcp_roundtrip are null. F1.4 and F1.5 will FAIL. That is "
-                "correct and deliberate: the only writer that SEALS is the control "
-                "plane's harWriteLake(), so a round-trip done any other way would "
-                "prove the opposite of what F1.5 asserts.")
+                "No session key was presented, so the round trip was attempted with "
+                "this collector's OWN Google-signed service-account token. That is "
+                "not a weaker credential: [STRAIN-OIDC-IDENTITY-V128] admits an "
+                "attested SA bearer with no paste when sa_email maps to an active "
+                "strain, through the same admission path as a minted key. The write "
+                "still goes through the control plane, so harWriteLake() is still "
+                "the only writer and F1.5 still measures a SEALED object. If this "
+                "fleet has not registered the collector's identity, the write leg is "
+                "refused and the refusal is recorded below.")
         try:
-            if key:
+            if key or tok_mcp:
                 path = a.probe_path
                 blob = "devgate smoke probe %s\n%s" % (ev.get("collected_at", ""),
                                                        "x" * 1024)
@@ -2931,6 +3048,71 @@ def main(argv):
     # refused everywhere until an operator names their own. pipeline/cloudbuild-dev.yaml
     # now passes ${_DEV_PROJECT} explicitly, so THIS fleet's behaviour is unchanged.
     p.add_argument("--iap-toggle-projects", default="")
+    # [SEC-IAP-PRODNAME-V1] THE FENCE ABOVE ASKS THE WRONG QUESTION AND THE PIPELINE
+    # ANSWERS IT WITH ITS OWN SUBJECT. --iap-toggle-projects fences the ONE mutation
+    # this collector makes -- `gcloud beta run services update --no-iap` on --service
+    # -- by PROJECT, and pipeline/cloudbuild-dev.yaml passed the project it was
+    # collecting in AS the allowlist, so `P not in allowed` was false by construction
+    # and the fence could not fire once. Under the single-project layout dev and prod
+    # are LANES OF ONE PROJECT, which is exactly the case the block in collect_app
+    # says the project question "no longer answers"; meanwhile --service comes from
+    # an OVERRIDABLE trigger substitution (_CP_SVC), so a trigger naming the live
+    # console took IAP off the live console for the probe window with no refusal
+    # anywhere in the chain.
+    #
+    # SO THE FENCE MOVES ONTO THE NAME OF THE THING THAT GETS MUTATED. This is a DENY
+    # list of console service names, checked in main() BEFORE any read, any probe and
+    # any update, and a match is a hard refusal with its own exit code (4) rather than
+    # a skipped toggle: a collector pointed at the production console is not a
+    # collection with one step left out, it is the wrong subject entirely.
+    #
+    # MEASURED IN THIS TREE, NOT GUESSED. The production console service is
+    # `paracoding-control-plane`: pipeline/cloudbuild-prod.yaml:58 `_CP_SVC:
+    # paracoding-control-plane` is the service prod deploys and moves traffic onto,
+    # pipeline/home-deploy.sh:77 passes the same literal, and devgate/smoke.py:418
+    # labels the console surface with it. It is also THIS parser's own --service
+    # default eleven lines up -- so a run with --service omitted aimed at prod, and
+    # now refuses instead of toggling it.
+    #
+    # THE DEV LANE IS UNTOUCHED, CHECKED BEFORE THIS WAS WRITTEN. resolve-lane
+    # composes the lane console as paracoding-<lane>-<infix>control-plane
+    # (cloudbuild-dev.yaml:266), e.g. paracoding-dev-control-plane, which is not this
+    # name and cannot become it: the derivation always carries the lane segment.
+    #
+    # A DEFAULT HERE IS SAFE IN THE DIRECTION [SEC-NODEFAULTPROJ-V1] CARES ABOUT. That
+    # rule killed defaults that GRANT -- a fence naming a stranger's project. Every
+    # name on this list only ever REFUSES, so a default that is wrong for an adopter
+    # costs them a refused collection and a flag to set, never a live config change.
+    p.add_argument("--prod-console-services", default="paracoding-control-plane")
+    # [SEC-IAP-PRODNAME-V2] SUPERSEDES THE BLANKET REFUSAL IN V1, WHICH WOULD HAVE
+    # REFUSED THIS FLEET'S OWN RELEASE PIPELINE ON ITS NEXT RUN. V1 was written from
+    # the finding's wording -- "a trigger naming the production console would take IAP
+    # off the live console with no refusal anywhere" -- and that sentence reads as a
+    # hypothetical. IT IS NOT ONE. MEASURED at integration, against the real builds:
+    # every promotion run of this pipeline carries _LANE=home with
+    # _CP_SVC=paracoding-control-plane (builds f6d29cfb at 55d12120 and b246fe00 at
+    # b13bac78 both show exactly those substitutions), and pipeline/home-deploy.sh
+    # passes the same literal. The home lane IS the lane that probes the live console,
+    # which is why wave 1 added F6.IAP_RESTORED_AFTER_PROBES to assert IAP comes back.
+    # A blanket refusal would have turned collect rc into 4, promote-gate condition 0
+    # into 64, and every future promotion red.
+    #
+    # SO THE FENCE STAYS AND BECOMES AN ACKNOWLEDGEMENT INSTEAD OF A WALL. Naming a
+    # production console still refuses BY DEFAULT -- that is the accidental case the
+    # finding is about, an overridden _CP_SVC on a lane build -- and it proceeds ONLY
+    # when the caller says so in a separate argument. The deliberate case then has to
+    # be written down twice, in two different words, by someone who meant it.
+    #
+    # THE ACKNOWLEDGEMENT IS NOT A SUBSTITUTION EITHER. cloudbuild-dev.yaml passes it
+    # only inside `test "$LANE" = home`, so a dev-lane trigger that overrides _CP_SVC
+    # to the production console still refuses: it would have to override the LANE as
+    # well, and a build declaring itself the home lane is a build that has said what it
+    # is. That is the whole of the property V1 was reaching for, kept, at the cost of
+    # one flag instead of the pipeline.
+    p.add_argument("--allow-prod-iap-toggle", action="store_true",
+                   help="Deliberately permit this collector to run against a service "
+                        "named in --prod-console-services. The home lane sets it; a "
+                        "lane build must not.")
     p.add_argument("--tag", default="")
     p.add_argument("--tree", default="/workspace/work")
     # [SEC-NODEFAULTPROJ-V1] NOT A PROJECT ID, AND STILL ONE OPERATOR'S LIVE RESOURCE.
@@ -3003,6 +3185,64 @@ def main(argv):
     ev = {"collected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
           "collector": "pipeline/collect-evidence.py",
           "project": a.project, "region": a.region, "service_name": a.service}
+    # [SEC-IAP-PRODNAME-V1] REFUSE BY NAME, BEFORE ANYTHING IS READ OR TOUCHED. This
+    # sits above the try block on purpose: no service read, no probe and above all no
+    # `--no-iap` update has happened yet when it fires, so the refusal costs the live
+    # console nothing at all. Exit 4 is distinct from the codes already in use here --
+    # 0 collected, 1 died, 2 ran and was refused, 3 the --selftest failure -- because
+    # "this collector was aimed at production" is a different fact from "this bundle
+    # is thin", and the reader at 2am needs to be told which one happened.
+    #
+    # NOTHING DOWNSTREAM HAD TO CHANGE FOR IT, AND THAT WAS CHECKED. promote-gate.sh
+    # condition 0 refuses ANY non-zero collect rc (64, and its default case says so in
+    # as many words), and the bundle written below carries _collect_refused, so sink 2
+    # fires independently exactly as [SEC-CI-COLLECTRC-V1] intends. The bundle is still
+    # written, so cloudbuild-dev.yaml step 5a's `test -s evidence.json` holds and the
+    # refusal survives as an artifact instead of aborting the step and leaving none.
+    # devgate/smoke.py renders every finding over it NOT-EXERCISED and exits 12; no
+    # F6.IAP_RESTORED_AFTER_PROBES verdict is manufactured, because no disable ever
+    # happened and none is recorded.
+    prod_denied = [x.strip().lower()
+                   for x in (a.prod_console_services or "").split(",") if x.strip()]
+    # [SEC-IAP-PRODNAME-V2] The acknowledgement is RECORDED, not just honoured. A run
+    # that took IAP off the live console on purpose must leave that sentence in the
+    # bundle, where the judge and a human reading the transcript both see it, or the
+    # deliberate case becomes indistinguishable from the accidental one after the fact.
+    if a.service.strip().lower() in prod_denied and a.allow_prod_iap_toggle:
+        ev["prod_iap_toggle_acknowledged"] = (
+            "--service %s IS a production console and --allow-prod-iap-toggle was "
+            "passed, so this run was permitted to take IAP off it for the probe "
+            "window. This is the home lane's normal operation; F6.IAP_RESTORED_AFTER_"
+            "PROBES is what asserts IAP came back." % a.service)
+    if a.service.strip().lower() in prod_denied and not a.allow_prod_iap_toggle:
+        ev["_collect_refused"] = {
+            "reason": ("REFUSED BY NAME: --service %r IS A PRODUCTION CONSOLE "
+                       "(--prod-console-services %s). This collector's one mutation "
+                       "is `gcloud beta run services update --no-iap` on --service, "
+                       "which would take IAP off the LIVE console for the length of "
+                       "the probe window, and --allow-prod-iap-toggle was NOT passed. "
+                       "Nothing was read, nothing was probed and nothing was changed. "
+                       "If this IS the home lane, pass --allow-prod-iap-toggle; if it "
+                       "is a lane build, fix the _CP_SVC it was given."
+                       % (a.service, prod_denied)),
+            "refused_reads": {},
+            "starved_sections": ["EVERY section: this collector refused to run at "
+                                 "all against %s" % a.service],
+            "what_to_check_first": ("the --service this run was given. In the dev "
+                                    "pipeline it comes from _CP_SVC, an overridable "
+                                    "trigger substitution, and resolve-lane composes "
+                                    "a LANE console name -- a lane build must never "
+                                    "carry the production one. The home lane carries "
+                                    "it deliberately and says so with "
+                                    "--allow-prod-iap-toggle."),
+            "exit": 4}
+        print("COLLECTION REFUSED -- PRODUCTION CONSOLE NAMED AS --service: %s"
+              % a.service)
+        print(ev["_collect_refused"]["reason"])
+        with open(a.out, "w") as f:
+            json.dump(ev, f, indent=1, sort_keys=True, default=str)
+        return 4
+
     rc = 0
     try:
         ev.update(collect_source(a.tree))

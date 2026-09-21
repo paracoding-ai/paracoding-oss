@@ -1,35 +1,38 @@
-# release manifest v14.0
-# generated from source commit 3b1c9d4982e15145e4413d79fb575df395c2bd80
+# release manifest v15.0
+# generated from source commit d8f9332eb9baa69705143d949863ed79a80429fe
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
-d63d2d77df2f9872     17310  FEATURES.md
+83fafd64143d817f     18204  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 78cc7525c53ed734      4150  NOTICE
-8ed8bfbe99133af3     23961  README.md
-653a6bd17c610f23     17376  SECURITY.md
-2bec13c40a70827f    412307  install.sh
+79fce121e052ddae     23961  README.md
+1d752abfd1b3f320     21995  SECURITY.md
+b4dbb3a2637a0d60    419974  install.sh
 a9692055a950925d     45532  uninstall.sh
-b153361a389b2ef8     14689  upgrade.sh
+d0d809c334337ff8     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-d1c688303915043d       639  agent-plugin/plugin.json
-b1c0d9a4fc853fbf     12415  control-plane/Dockerfile
+17d1299a7eadbabf       639  agent-plugin/plugin.json
+1e4cfede9711fa16     16929  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
-eb686039b4985d17      1064  control-plane/package.json
+52f0780ce069ca9a      1361  control-plane/package.json
 1a35e4cba08a9aee     39055  control-plane/route-audit.mjs
-07a3cafe6de1a67f     28258  control-plane/route-baseline.json
+efed8f83051914f4     29613  control-plane/route-baseline.json
 06552f3a3ea14007       257  control-plane/tsconfig.json
 0185af4b61634a5a     67494  control-plane/mcp2026/CONFORMANCE.md
 1bab196d54cf5c38     34947  control-plane/mcp2026/DUAL-ERA.md
 415023a6d54977cf     74093  control-plane/mcp2026/conformance.mjs
+cf5636127a752a5e     14659  control-plane/src/anchor-run.ts
+4cc6c1cd071b60d6     18389  control-plane/src/anchor.ts
 e3f26784f73fc8fe     14216  control-plane/src/dash.html
+b71cedbd78b0573c     15713  control-plane/src/evidence.ts
 a945184f44c56f9f     38888  control-plane/src/ghtools.ts
-9acbd4f2f63777e4    134701  control-plane/src/gittools.ts
+7c1b13b26ded89c4    157129  control-plane/src/gittools.ts
 5abc7fca2f7f1ff2     36113  control-plane/src/gppatch.ts
-a320968b22599bcf    176186  control-plane/src/harness.html
-81f734cf483f82b6    881775  control-plane/src/index.ts
+7aca246a8abd50e5    229608  control-plane/src/harness.html
+1e9483d0eb8d2572   1177496  control-plane/src/index.ts
 22db75f0e21c8e3d      9314  control-plane/src/login.html
 6926cf386e336cfd      2180  control-plane/src/mcp2.ts
 3788869547c9b7ce     33245  control-plane/src/mcp2026.ts
@@ -55,7 +58,7 @@ ecdc94f12edde025     16261  control-plane/src/pcgit/07-refs/src/push.ts
 0ea7d0836faa96fb     10062  control-plane/src/pcgit/09-mcp/src/config.ts
 c5b69b06cd702d38      8049  control-plane/src/pcgit/09-mcp/src/context.ts
 e277961bba823332     10114  control-plane/src/pcgit/09-mcp/src/diff.ts
-a2bb5727fe6a17e2      4182  control-plane/src/pcgit/09-mcp/src/errors.ts
+61247b910105e11f      4450  control-plane/src/pcgit/09-mcp/src/errors.ts
 ec06793c3d85dd2f     64333  control-plane/src/pcgit/09-mcp/src/ops.ts
 406ae47e0d07f066      9957  control-plane/src/pcgit/09-mcp/src/ref-gate.ts
 60370c546b9f94fc     16661  control-plane/src/pcgit/09-mcp/src/tree.ts
@@ -65,7 +68,7 @@ ec06793c3d85dd2f     64333  control-plane/src/pcgit/09-mcp/src/ops.ts
 c524258454ff625b    100615  control-plane/src/wiki-assets/04-job-end-to-end.png
 35f3d015dcb55c41     71006  control-plane/src/wiki-assets/05-deploy.png
 6cc36c8b24fb878e     23474  devgate/RUNBOOK.md
-8bc17c265e755616    160754  devgate/smoke.py
+6cd0770522d27812    178305  devgate/smoke.py
 42d0543fa6d16d01     11864  fleet/BOOTSTRAP.md
 d117ed209be1573c      6654  fleet/apis.txt
 5337e239d6214e18      4486  fleet/cowork-prompts.md
@@ -74,22 +77,23 @@ c6196041bd1b1197      3761  fleet/strains/fleet-gcp.md
 fe171d74c51201c5      3886  fleet/strains/fleet-security.md
 c2093ccdc4e329d2      4732  gate-exec/Dockerfile
 6ef9e06a954341f2      2741  gate-exec/README.md
-94f383e2235b86d9    115091  gate-exec/exec_server.py
+2a68e4801e500d1f    132041  gate-exec/exec_server.py
 81e34ca907624804     17624  gate-exec/lockout_check.py
 d4341eb82c9d234d      3138  gate-exec/pcmint.py
-bed7eaa575af395f      3003  gate-exec/pcwebauthn.py
+481693e252ea76cd      9755  gate-exec/pcwebauthn.py
 12410a692cfa06ed      9664  pipeline/BUILD-REQUEST-PUBLISHING.md
 53795dbc02168414     10805  pipeline/CI-PUBLISH-WIRING.md
 62d115d2450583df      6721  pipeline/check-apis.py
 e894207ba55ef7ad      5660  pipeline/check-no-embedded-assets.py
 9421142614dee360     10610  pipeline/check-python-names.py
-5479693b48b77417     51528  pipeline/cloudbuild-dev.yaml
-8b0bae1904d2b72e     49882  pipeline/cloudbuild-prod.yaml
+69449855399608c7     59788  pipeline/cloudbuild-dev.yaml
+2d3d450242101957     53468  pipeline/cloudbuild-prod.yaml
 42f76a3cde69c2b4     33397  pipeline/cloudbuild-release-check.yaml
-37debdd74ab45a7c    173282  pipeline/collect-evidence.py
-0b3c129d1a72f624     31477  pipeline/promote-gate.sh
+5a8d3a74624879d6    189698  pipeline/collect-evidence.py
+0fc1f39c5dfa2973     38336  pipeline/promote-gate.sh
 88c59067a7c7a72f     12105  pipeline/publish-build-request.sh
 deaedc0365f054b4     32484  pipeline/secret-destroy-preflight.py
+fdb55dd0f42d3bfd      9772  pipeline/verify-serving.py
 319af1a238df57a3      2839  wiki/_index.json
 71b8aebd9209c5b6      1198  wiki/_release.txt
 9732414ce3d3e1c0     15401  wiki/_shell.html
@@ -98,9 +102,9 @@ cce72ff58c8bd5e7     22635  wiki/pages/change-the-code.md
 f3496ca8575c8564     14361  wiki/pages/connect-an-agent.md
 d4d388134ba2bed0     12635  wiki/pages/index.md
 2306c08ec22937a4      9819  wiki/pages/model-config.md
-8091381e6f769fbf     37419  wiki/pages/operators-guide.md
-b6682517c9491921     73478  wiki/pages/systems-manual.md
-dbc9e137e73dfa0a     22730  wiki/pages/the-gate.md
+3a1980d9f851ae5e     37682  wiki/pages/operators-guide.md
+46e4fd689917b489     74264  wiki/pages/systems-manual.md
+dbd384262239da3b     23176  wiki/pages/the-gate.md
 7fc2397636565bc8      4514  wiki/pages/the-strains.md
 c3d0f08c1d9acea1     21142  wiki/pages/troubleshooting.md
 91b35e4c38d836df     11002  wiki/pages/working-with-agents.md

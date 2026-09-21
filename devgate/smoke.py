@@ -151,8 +151,16 @@ TOOL_CLASSES = [
     # the check weaker, never stronger. Verified by running the judge both ways
     # over the same bundles -- byte-identical report on a tree without dev_api,
     # and F2.1 PASS -> FAIL on a bundle where dev_api is registered.
+    # [GE-DETERMINISTIC-DISPATCH-V1] deterministic_dispatch ADDED, and "approval" is
+    # the honest class: it resolves a tool name against the caller's own admitted
+    # registry and forwards, so it can reach stage_privileged_job and run_command --
+    # the two names already in this set. Classifying it anywhere weaker would put a
+    # wrapper for those two in a class this file backs with weaker evidence.
+    # NOTE the two tables. PC_TOOL_CLASS in index.ts governs what the RUNTIME admits
+    # and annotates; THIS one is the judge's own coverage list, and smoke.py never
+    # reads the source tree, so setting one does not set the other.
     ("approval", {"stage_privileged_job", "list_pending_confirm", "run_command",
-                  "gcp_api", "read_job_log"}),
+                  "gcp_api", "read_job_log", "deterministic_dispatch"}),
     ("core",     {"whoami", "refresh", "append_journal", "read_journal",
                   "post_work_item", "list_work_items", "complete_work_item",
                   "cancel_work_item", "ask_agent", "list_my_messages",
@@ -385,6 +393,22 @@ UNEXERCISABLE.update({
     "F6.7.MCP_PUBLIC_INVOKER":          SINGLE_SERVICE_REASON + " " + ORG_POLICY_REASON,
     "F6.8.CONSOLE_INVOKER_NOT_PUBLIC":  SINGLE_SERVICE_REASON,
     "F6.9.REQUIRED_ENV_ON_BOTH":        SINGLE_SERVICE_REASON,
+    # [SEC-DEVGATE-IAP-RESTORE-V1] The collector's IAP toggle is OPTIONAL and
+    # project-fenced (--iap-toggle-projects). Where it did not run there is no
+    # config change to undo, so there is nothing to blame -- and nothing was
+    # demonstrated either, which is why this is NOT-EXERCISED and never PASS.
+    # THE EXCUSE IS NOT BLANKET: the skip is reachable ONLY on a bundle carrying
+    # no trace of a disable at all. One trace -- the config_changes record, the
+    # propagation wait, the post-restore read or the post-restore probe -- and a
+    # CONFIRMED restore is required or the finding FAILS.
+    "F6.IAP_RESTORED_AFTER_PROBES":
+        "The collector did not take IAP off this console: the bundle carries no "
+        "record of a disable and none of the fields the toggle leaves behind. "
+        "--iap-toggle-projects fences the toggle to named projects and it is "
+        "skipped everywhere else, so there is no config change to restore. "
+        "NOT-EXERCISED rather than PASS because nothing was demonstrated. The "
+        "moment the bundle shows the disable DID happen this skip is no longer "
+        "reachable and an unconfirmed restore is a FAIL.",
 })
 
 # The two service names the installer deploys. Only used to LABEL the report --
@@ -1141,13 +1165,28 @@ def judge(ev):
                 "installer once wrote PC_CREDS_SECRET=.../<credential store> onto "
                 "gate-exec and never created that secret.")
     named = ev.get("named_secrets", {}) or {}
-    absent = sorted(k for k, v in named.items() if not v)
+    # [CE-SECRET-CROSSPROJECT-V1] `is False`, NOT `not v`. The collector now reports a
+    # third state -- None, meaning the read that would have answered was refused -- and
+    # `not v` would fold that back into "absent", which is the exact lie this replaced.
+    # Old bundles carry only True/False and are judged identically.
+    absent = sorted(k for k, v in named.items() if v is False)
+    unmeasured = sorted(k for k, v in named.items() if v is None)
+    _why = ev.get("named_secrets_unmeasured", {}) or {}
     if _starve(f, st, "cp", "gx"):
         pass
     elif not named:
         f.bad("no secret existence evidence captured")
     elif absent:
         f.bad("named by a revision but does not exist: %s" % ",".join(absent))
+    elif unmeasured:
+        # A KNOWN ABSENCE OUTRANKS AN UNREAD ONE, which is why this sits BELOW the
+        # branch above: a secret we know is missing is a defect, a secret we could not
+        # ask about is a hole in the evidence. This is NOT on the reviewed-unexercisable
+        # list, so it still refuses promotion -- it only stops the report asserting a
+        # fact it never checked.
+        f.skip("NOT MEASURED, and not unexercisable: %d secret name(s) could not be "
+               "read. %s" % (len(unmeasured),
+                             " ".join(_why.get(k, k) for k in unmeasured)[:400]))
     else:
         f.ok("%d named secret(s) all exist" % len(named))
     F.append(f)
@@ -1610,6 +1649,76 @@ def judge(ev):
                 f.ok("%d required variable(s) present on both surfaces" % len(req))
     F.append(f)
 
+    # ====== [SEC-DEVGATE-IAP-RESTORE-V1] THE COLLECTOR'S OWN CONFIG CHANGE =====
+    # collect_app DISABLES IAP on the console for the length of its anonymous
+    # probe window and re-enables it in a finally block WHOSE RETURN VALUE IS
+    # DISCARDED. It then proves the restore properly -- re-reads the service AND
+    # re-probes anonymously for IAP's own header -- and writes the answer to
+    # ev["iap_restore_confirmed"]. NOBODY HAS EVER READ IT.
+    #
+    # MEASURED, NOT ASSUMED. An exhaustive grep of this tree finds
+    # "iap_restore_confirmed" exactly TWICE: the write in
+    # pipeline/collect-evidence.py and its generated copy under oss/release/.
+    # iap_enabled_after_restore, iap_disable_never_propagated and
+    # iap_toggle_refused score 2 apiece for the same reason, and config_changes
+    # is read by nothing in devgate/ either. So a restore that FAILED left the
+    # console with no IAP in front of it, the collector still exited 0, this
+    # judge still printed VERDICT 0 and promote-gate.sh still moved traffic --
+    # with the proof sitting unread in the bundle the whole time.
+    #
+    # WHY THE TEST IS "DID IT COME BACK", NOT "WAS IT EVER OFF". The toggle is
+    # optional, so a bundle that never toggled is a SKIP on the reviewed list:
+    # absence of evidence that a config change happened is not a defect. The
+    # moment the bundle carries ANY trace of the disable, a confirmed restore is
+    # required. Keying on the TRACES as well as the config_changes record is
+    # deliberate -- deleting the append must not be a way to switch this off.
+    #
+    # NOT GATED ON _skip_or. The toggle is performed on the console service and
+    # happens on a single-service install exactly as on a split one, so "there is
+    # no second surface" is no excuse here.
+    f = Finding("F6.IAP_RESTORED_AFTER_PROBES", "EXERCISED",
+                "If the collector took IAP off the console to run its anonymous "
+                "probes, IAP IS BACK -- proven by re-reading the service AND by "
+                "an anonymous probe that IAP itself refuses with its own header. "
+                "The restore command's exit code is a claim, not evidence, and "
+                "the collector discards it anyway. A restore that quietly failed "
+                "leaves the bootstrap console with nothing in front of it and "
+                "nothing else in this report would notice.")
+    _iap_disabled = [c for c in (ev.get("config_changes") or [])
+                     if "iapenabled" in str((c or {}).get("what", "")).lower()]
+    _iap_traces = [k for k in ("iap_disable_propagation_s",
+                               "iap_disable_never_propagated",
+                               "iap_enabled_after_restore",
+                               "probe_unauth_after_restore",
+                               "iap_restore_confirmed") if k in ev]
+    if not _iap_disabled and not _iap_traces:
+        f.skip(UNEXERCISABLE["F6.IAP_RESTORED_AFTER_PROBES"]
+               + (" Recorded refusal: %s"
+                  % str(ev.get("iap_toggle_refused"))[:200]
+                  if ev.get("iap_toggle_refused") else ""))
+    elif ev.get("iap_restore_confirmed") is True:
+        f.ok("IAP re-enabled and CONFIRMED TWICE OVER: the service re-read "
+             "reports iapEnabled=%r and the post-restore anonymous probe came "
+             "back HTTP %s carrying x-goog-iap-generated-response"
+             % (ev.get("iap_enabled_after_restore"),
+                (ev.get("probe_unauth_after_restore") or {}).get("_http")))
+    else:
+        f.bad("IAP WAS NOT CONFIRMED RESTORED. The collector took IAP off the "
+              "console for its anonymous probes (%s) and could not prove it came "
+              "back: iap_restore_confirmed=%r, service re-read iapEnabled=%r, "
+              "post-restore anonymous probe HTTP %s.%s Either the re-enable did "
+              "not take, or it had not reached the Google Frontend when the "
+              "probe ran -- in BOTH cases the console was answering with no IAP "
+              "in front of it at that moment. Read the service and probe it "
+              "again before anything is promoted."
+              % (", ".join(sorted(_iap_traces)) or "config_changes record",
+                 ev.get("iap_restore_confirmed"),
+                 ev.get("iap_enabled_after_restore"),
+                 (ev.get("probe_unauth_after_restore") or {}).get("_http"),
+                 (" Propagation of the DISABLE never completed either."
+                  if ev.get("iap_disable_never_propagated") else "")))
+    F.append(f)
+
     # ================= F7  THE ROUTE TABLE THE SPLIT IS BUILT ON ==============
     # route-audit.mjs runs as a BUILD STEP and hard-fails on a NEW public route.
     # It does NOT fail when a route DISAPPEARS: indenting one registration hides
@@ -2005,6 +2114,21 @@ def seeds():
         _healthy_surfaces(ev)
         return _surfenv_set(ev, "mcp", "DATA_LAKE_BUCKET", None)
 
+    def s_iap_left_off(ev):
+        # [SEC-DEVGATE-IAP-RESTORE-V1] THE PRECONDITION IS SYNTHESISED, the way
+        # _healthy_surfaces() synthesises a split. On a bundle where the collector
+        # never toggled IAP this finding correctly SKIPS, and a seed that only
+        # flipped the confirmation flag would prove nothing there -- it would go
+        # DEAD on exactly the installs the fence protects.
+        ev["config_changes"] = list(ev.get("config_changes") or []) + [
+            {"what": "iapEnabled true -> false on the dev control plane",
+             "disable_rc": 0, "why": "SEED"}]
+        ev["iap_enabled_after_restore"] = False
+        ev["probe_unauth_after_restore"] = {"_http": 200, "headers": {
+            "x-powered-by": "Express"}}
+        ev["iap_restore_confirmed"] = False
+        return ev
+
     def s_route_vanished(ev):
         # Indent one registration into an if: 87/70/17 becomes 86/69/17 and the
         # real route-audit.mjs still exits 0.
@@ -2057,6 +2181,7 @@ def seeds():
         "F6.7.MCP_PUBLIC_INVOKER":         ("allUsers invoker absent with NO recorded org-policy refusal", s_invoker_missing_unexplained),
         "F6.8.CONSOLE_INVOKER_NOT_PUBLIC": ("allUsers granted run.invoker on the console", s_console_public),
         "F6.9.REQUIRED_ENV_ON_BOTH":       ("DATA_LAKE_BUCKET set on console, missing on mcp", s_env_missing_on_mcp_only),
+        "F6.IAP_RESTORED_AFTER_PROBES":    ("IAP disabled for the probes and never confirmed back", s_iap_left_off),
         "F7.1.ROUTE_TABLE_UNCHANGED":      ("a route vanished: 87/70/17 -> 86/69/17", s_route_vanished),
         "F7.2.SURFACE_PARTITION_TOTAL":    ("a dead PC_SURFACE_MAP entry", s_dead_map_entry),
         "F7.3.AUDIT_SEES_EVERY_REGISTRATION": ("a registration indented out of the audit's reach", s_hidden_registration),
@@ -2287,6 +2412,38 @@ def controls():
         ev["bucket_perms"] = {"permissions": [], "measured": True, "_http": 200}
         return ev
 
+    def c_iap_restore_unrecorded(ev):
+        # [SEC-DEVGATE-IAP-RESTORE-V1] THE CRASH SHAPE, AND IT IS THE ONE THE
+        # SEED CANNOT REACH. The disable is on the record and NO confirmation
+        # field was ever written -- which is exactly what a collector that died
+        # inside its own finally leaves behind. An ABSENT proof must be as red as
+        # a false one, or "the field is missing" becomes the way through.
+        ev["config_changes"] = list(ev.get("config_changes") or []) + [
+            {"what": "iapEnabled true -> false on the dev control plane",
+             "disable_rc": 0, "why": "CONTROL"}]
+        for k in ("iap_restore_confirmed", "iap_enabled_after_restore",
+                  "probe_unauth_after_restore", "iap_disable_propagation_s",
+                  "iap_disable_never_propagated"):
+            ev.pop(k, None)
+        return ev
+
+    def c_iap_toggle_fenced(ev):
+        # THE OTHER HALF, AND THE ONE THAT KEEPS THE CHECK USABLE. The toggle was
+        # FENCED OFF, so there is no config change to restore: this must render
+        # NOT-EXERCISED. "must not FAIL" would accept PASS, which for a restore
+        # nobody performed is precisely the unearned green this file exists to
+        # refuse -- so the row names the status outright.
+        ev["config_changes"] = [c for c in (ev.get("config_changes") or [])
+                                if "iapenabled" not in
+                                str((c or {}).get("what", "")).lower()]
+        for k in ("iap_restore_confirmed", "iap_enabled_after_restore",
+                  "probe_unauth_after_restore", "iap_disable_propagation_s",
+                  "iap_disable_never_propagated"):
+            ev.pop(k, None)
+        ev["iap_toggle_refused"] = ("CONTROL: the project is not in "
+                                    "--iap-toggle-projects, so IAP was left on")
+        return ev
+
     return [
         ("F2.2[bare-401-no-challenge]", "F2.2.MCP_SURFACE_ANSWERS",
          "401 with NO WWW-Authenticate header", c_bare_401),
@@ -2351,6 +2508,14 @@ def controls():
         ("F2.4[registration-not-recorded]", "F2.4.GITVAULT_BUCKET_BACKED",
          "the bundle records the bucket but nothing about whether the seven tools "
          "registered", c_gitvault_not_recorded),
+        ("F6.IAP[restore-never-recorded]", "F6.IAP_RESTORED_AFTER_PROBES",
+         "IAP was disabled and the bundle carries NO confirmation field at all "
+         "-- the shape a collector that died in its finally leaves behind",
+         c_iap_restore_unrecorded, "FAIL"),
+        ("F6.IAP[toggle-fenced]", "F6.IAP_RESTORED_AFTER_PROBES",
+         "the toggle was fenced off and IAP was never disabled -- must render "
+         "NOT-EXERCISED, never a PASS and never a FAIL",
+         c_iap_toggle_fenced, "NOT-EXERCISED"),
     ]
 
 
@@ -2748,11 +2913,48 @@ def render(findings, st_rows, st_dead, ev, install_exit, sp_rows=None):
     n_seed = sum(1 for r in st_rows if r.get("kind", "seed") == "seed")
     n_ctl = sum(1 for r in st_rows if r.get("kind") == "control")
     n_cov = sum(1 for r in st_rows if r.get("kind") == "coverage")
+    # [SEC-DEVGATE-VACUOUS-V1] A VACUOUS CONTROL IS NOT PROOF, AND IT WAS BEING
+    # COUNTED AS PROOF. `vacuous` says the finding was ALREADY at the status the
+    # seeded defect was supposed to produce, so the mutation flipped nothing --
+    # and yet _row() still reported BITE, the row still landed in the numerator
+    # below, and the ratio still read N/N. Nothing downstream looked at the count
+    # either: the verdict chain branches on st_dead and never on this, and
+    # promote-gate.sh had no scrape for it at all. So a control that proves
+    # nothing was scored as one that does, and such a run could still reach
+    # VERDICT 0 and promote -- the exact shape this self-test exists to catch.
+    #
+    # THE FIX IS THE ONE STRV ALREADY GETS. A vacuous row that reported BITE is
+    # removed from BOTH sides of the ratio instead of being counted as proof. Not
+    # from the numerator alone: that would print N-1/N and refuse builds on a
+    # number nobody has read yet. It is NOT counted DEAD either -- "already at
+    # that status" is not "cannot fail" -- so a vacuous row that went DEAD stays
+    # dead and still forces 11 exactly as before.
+    #
+    # THE COUNT IS MEASURED AND PRINTED UNCONDITIONALLY; THE REFUSAL IS THRESHOLDED.
+    # WHAT I COULD MEASURE FROM THE SOURCE: on any run that could reach VERDICT 0,
+    # at most THREE rows can be vacuous -- the three controls that name an expected
+    # status other than FAIL (F1.3[unmeasured-null], F1.3[unmeasured-flag],
+    # F6[iap-toggle-fenced]). Every other row expects FAIL, and a row expecting
+    # FAIL can only be vacuous on a bundle that ALREADY has a FAIL finding, which
+    # is verdict 10 and never promotes. WHAT I COULD NOT MEASURE: how many of those
+    # three are vacuous in this tree today -- the judge needs a collected bundle to
+    # say, and no transcript in the tree records the number. Refusing on the first
+    # vacuous row would therefore turn the gate red on a deploy landing now, on a
+    # figure nobody has read. So the budget ships UNARMED: today's verdict is
+    # unchanged, and every transcript from here on prints the honest count.
+    # TO ARM IT, once a green run has shown that count: VACUOUS_BUDGET = 0.
+    VACUOUS_BUDGET = None
     n_vac = sum(1 for r in st_rows if r.get("vacuous"))
     n_strv = sum(1 for r in st_rows if r.get("starved"))
+    # Excluded from the ratio: vacuous rows that reported BITE and are not already
+    # excluded as unmeasurable. A vacuous AND starved row is subtracted once, by
+    # n_strv; a vacuous AND dead row is left to st_dead. No row is counted twice.
+    n_vac_ex = sum(1 for r in st_rows
+                   if r.get("vacuous") and r.get("bites") and not r.get("starved"))
     W("")
     W("   %d/%d proved they can fail -- %d assertion seed(s), %d extra control(s)%s."
-      % (len(st_rows) - st_dead - n_strv, len(st_rows) - n_strv, n_seed, n_ctl,
+      % (len(st_rows) - st_dead - n_strv - n_vac_ex,
+         len(st_rows) - n_strv - n_vac_ex, n_seed, n_ctl,
          ", %d assertion(s) with NO SEED" % n_cov if n_cov else ""))
     if n_strv:
         W("   %d control(s) were UNMEASURABLE: the assertion's INPUT was REFUSED by"
@@ -2760,10 +2962,21 @@ def render(findings, st_rows, st_dead, ev, install_exit, sp_rows=None):
         W("   the collector, so the seeded defect never reached it. That is not a")
         W("   dead check -- it is an unread one -- and it is excluded from the")
         W("   ratio above rather than counted as proof of anything.")
-    if n_vac:
-        W("   %d control(s) were VACUOUS: their assertion was already failing on the"
-          % n_vac)
-        W("   real evidence, so flipping it to FAIL proved nothing this run.")
+    # [SEC-DEVGATE-VACUOUS-V1] PRINTED EVERY RUN, INCLUDING ZERO, and shaped like
+    # the DID-NOT-BITE line below it so promote-gate.sh can scrape the number with
+    # the same kind of sed. The line used to appear only when the count was
+    # non-zero, and a line that only appears when it is non-zero cannot be told
+    # apart from a judge that has stopped counting -- which is the silent-pass
+    # direction THE COUPLING CHECK in the gate was written about.
+    W("   %d control(s) were VACUOUS: their assertion was already at the status the"
+      % n_vac)
+    W("   seeded defect was supposed to produce, so the row flipped nothing and")
+    W("   proved nothing this run. Vacuous rows are excluded from the ratio above")
+    W("   rather than counted as proof, exactly as an UNMEASURABLE one is.")
+    if VACUOUS_BUDGET is not None and n_vac > VACUOUS_BUDGET:
+        W("   %d VACUOUS CONTROL(S) PROVED NOTHING, over a budget of %d. This run is"
+          % (n_vac, VACUOUS_BUDGET))
+        W("   NOT a pass regardless of what those rows reported.")
     if st_dead:
         W("   %d CHECK(S) DID NOT BITE. Those checks are worthless and this run is" % st_dead)
         W("   NOT a pass regardless of what they reported.")
@@ -2873,6 +3086,16 @@ def render(findings, st_rows, st_dead, ev, install_exit, sp_rows=None):
         code, name = 11, "FUNCTIONAL-COVERAGE-LOST (a check could not fail)"
     elif [r for r in (sp_rows or []) if not r["ok"]]:
         code, name = 11, "FUNCTIONAL-COVERAGE-LOST (a skip could read as green)"
+    elif VACUOUS_BUDGET is not None and n_vac > VACUOUS_BUDGET:
+        # [SEC-DEVGATE-VACUOUS-V1] THE VACUOUS COUNT IS A VERDICT INPUT, not just a
+        # note in the transcript. It ranks here, with the other two coverage
+        # losses, because it is the same kind of fact: the self-test did not
+        # establish that these checks can fail. It ranks BELOW them because a dead
+        # check is a stronger statement than an unproven one. The branch is inert
+        # while VACUOUS_BUDGET is None -- see the budget's own comment above for
+        # why it ships unarmed and what arms it.
+        code, name = 11, ("FUNCTIONAL-COVERAGE-LOST (%d control(s) proved nothing: "
+                          "the assertion was already at the seeded status)" % n_vac)
     elif starved:
         # [SEC-DEVGATE-STARVED-V1] 12, NOT 11, AND THE ARGUMENT IS THE POINT.
         #
@@ -2933,6 +3156,23 @@ def render(findings, st_rows, st_dead, ev, install_exit, sp_rows=None):
         code, name = 12, ("FUNCTIONAL-EVIDENCE-MISSING (the collector RECORDED a "
                           "refused read and no assertion was attributed to it; "
                           "that disagreement is itself missing evidence)")
+    elif install_exit is None:
+        # [SEC-CI-INSTALLEXIT-NOTMEASURED-V1] NO INSTALL EXIT, SO NO INSTALL
+        # CLAIM. Verdict 0 was a conjunction -- the installer at the 9/10
+        # boundary AND every exercisable assertion green -- but the only witness
+        # for the first half is SMOKE_INSTALL_EXIT, and the dev lane handed that
+        # over as the literal 20 without running an installer. A caller that ran
+        # none now says so by passing none, and this branch reports the half that
+        # was actually measured instead of inventing the other.
+        # IT IS STILL A 0, AND THAT IS DELIBERATE. Every exercisable functional
+        # assertion passed, which is a true and complete statement about a
+        # functional smoke run; a run that measured nothing wrong must not be
+        # made red for a question nobody asked it. What changes is the WORDING:
+        # the name and the lines below state the missing half in plain words, so
+        # a reader -- and promote-gate.sh, which promotes on this report -- is
+        # never sold a boundary nobody walked.
+        code, name = 0, ("FUNCTIONAL-COMPLETE (FUNCTION ONLY -- INSTALL PHASE "
+                         "NOT MEASURED)")
     elif install_exit == 20:
         code, name = 0, "COMPLETE-NEEDS-HUMAN-AT-9 (install AND function)"
     elif install_exit == 0:
@@ -2941,9 +3181,16 @@ def render(findings, st_rows, st_dead, ev, install_exit, sp_rows=None):
         code, name = 3, "STEP-GENUINELY-FAILED"
     W("=" * 78)
     W("VERDICT %d  %s" % (code, name))
-    W("   install phase exit=%s" % install_exit)
-    W("   0 now requires BOTH: the installer reached the 9/10 boundary AND every")
-    W("   exercisable functional assertion passed.")
+    if install_exit is None:
+        W("   install phase exit=NOT MEASURED -- no installer ran in this run,")
+        W("   and none was reported to this judge.")
+        W("   This verdict says ONE thing: every exercisable functional")
+        W("   assertion passed. It does NOT say the installer reaches the 9/10")
+        W("   boundary. That half was not tested here and is not claimed.")
+    else:
+        W("   install phase exit=%s" % install_exit)
+        W("   0 here requires BOTH: the installer reached the 9/10 boundary AND")
+        W("   every exercisable functional assertion passed.")
     W("=" * 78)
     return "\n".join(L), code
 
@@ -2964,7 +3211,18 @@ def _wrap(s, w):
 def main(argv):
     ev_path = os.environ.get("SMOKE_EVIDENCE", "/workspace/evidence.json")
     out_path = os.environ.get("SMOKE_REPORT", "/workspace/smoke-report.txt")
-    install_exit = int(os.environ.get("SMOKE_INSTALL_EXIT", "20"))
+    # [SEC-CI-INSTALLEXIT-NOTMEASURED-V1] ABSENT IS NOT 20. The default here was
+    # 20 -- the code meaning "the installer reached the 9/10 boundary and
+    # stopped" -- so a caller that ran no installer at all still satisfied the
+    # install half of verdict 0 by defaulting, silently.
+    # pipeline/cloudbuild-dev.yaml did exactly that, passing 20 as a literal
+    # while running no installer, and every build's "0 requires BOTH" line was
+    # half unearned. An unset or empty variable is now None, which render()
+    # prints as NOT MEASURED and scores on the functional half alone. A real
+    # exit code passed in is parsed exactly as before, so a rehearsal that DOES
+    # run the installer still gets the full conjunction.
+    _ie = os.environ.get("SMOKE_INSTALL_EXIT", "").strip()
+    install_exit = int(_ie) if _ie else None
     text, code = "", 12
     try:
         with open(ev_path) as fh:

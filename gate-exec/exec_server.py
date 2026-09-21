@@ -61,11 +61,16 @@
 #  directory of symlinks to the permitted binaries, so an unlisted binary does not resolve.
 #  Builtins and keywords do not use PATH, so `set -uo pipefail` -- the line that broke
 #  production last time -- cannot be affected. Disable with EXEC_BIN_JAIL=0.
-#  KNOWN GAP, MEASURED NOT ASSUMED: an ABSOLUTE PATH still runs. This is a real control,
-#  not a sandbox.
+#  WHAT IT ACTUALLY DOES, AND IT IS SMALLER THAN THE WORD "boundary": it narrows BARE-NAME
+#  lookup for a script that was ALREADY approved. TWO THINGS LEAVE IT, BOTH BY DESIGN. An
+#  ABSOLUTE PATH never consults PATH -- /usr/bin/env still runs, measured. And the permitted
+#  set ITSELF names python3, python, bash, sh, env, xargs and find: each of those runs an
+#  arbitrary binary, so `python3 -c` with subprocess is not a bypass somebody found, it is a
+#  listed entry doing exactly what it is on the list to do. IT IS NOT A SANDBOX AND IT
+#  CONFINES NOTHING. Full accounting at [EXEC-BIN-JAIL-HONEST-V1] further down this file.
 # ----------------------------------------------------------------------------------
 import os, subprocess, tempfile, json, base64, hashlib, hmac
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, after_this_request
 
 # ---- [SEC-EXEC-NO-DATASTORE-V1] NO FIRESTORE CLIENT, AND NO FIRESTORE IMPORT ----
 # THE GRANT IS GONE. roles/datastore.user -- read AND write on every document in every
@@ -1121,13 +1126,35 @@ def healthz():
 # "not allowlisted (observe-only, executing anyway)" and then ran.
 #
 # THE GAP, STATED RATHER THAN PAPERED OVER. An ABSOLUTE PATH bypasses PATH resolution:
-# /usr/bin/env still runs, measured in the same job. So this raises the floor from "no
-# boundary at all" to "an enumerated set, unless the script names a full path". It is a real
-# control and it is not a sandbox. Closing that needs an execution-layer change -- an image
-# containing only the permitted binaries, or a seccomp/container boundary -- and is
-# deliberately NOT attempted here. The primary controls remain what they always were: a human
-# approved this exact command, and the executor refuses any script whose sha256 does not match
-# the approval-time hash.
+# /usr/bin/env still runs, measured in the same job. Closing that needs an execution-layer
+# change -- an image containing only the permitted binaries, or a seccomp/container boundary
+# -- and is deliberately NOT attempted here. The primary controls remain what they always
+# were: a human approved this exact command, and the executor refuses any script whose sha256
+# does not match the approval-time hash.
+#
+# [EXEC-BIN-JAIL-HONEST-V1] THE SECOND GAP, WHICH THIS COMMENT USED TO LEAVE OUT -- AND
+# LEAVING IT OUT IS THE ACTUAL DEFECT. The paragraph above conceded the absolute path and then
+# called the jail "a real control", which reads as "one known hole, otherwise a fence". It is
+# not a fence. COUNTED FROM THE LITERAL DIRECTLY ABOVE: EXEC_BIN_ALLOWED has 76 entries, and
+# seven of them -- python3, python, bash, sh, env, xargs, find -- each run an ARBITRARY binary
+# on their own. `python3 -c` with subprocess runs anything on the image. `env PATH=/usr/bin
+# gsutil ...` re-points the very variable the jail set. (awk's system() and pip's setup.py
+# make it more than seven; seven is the floor, not the total.) So this jail is not evaded by
+# cleverness -- it is WALKED OUT OF, through the front door, by entries that are on the list
+# on purpose.
+#
+# WHAT IT HONESTLY IS: it narrows BARE-NAME lookup for an ALREADY-APPROVED script. That is
+# worth having and is not nothing -- a habit-typed `gsutil ls` stops instead of running, and
+# that exact line is on record having run here before. But IT IS NOT A SANDBOX, it confines
+# nothing, and no description of it anywhere may say otherwise. A control described more
+# strongly than it is implemented is worse than no control at all, because the overclaim is
+# what stops the next person looking.
+#
+# THE INTERPRETERS STAY ON THE LIST. Staged jobs run python3 and bash today; removing them
+# would refuse the operator's own work in order to make this paragraph shorter, and that trade
+# is the operator's to make, not this change's. What is fixed here is the DESCRIPTION -- in
+# this file, in the run_command tool description, and in the shipped security prose -- so that
+# what is claimed and what is implemented are finally the same thing.
 #
 # NOTE ALSO MEASURED: node, npm and firebase are NOT ON THIS IMAGE. The old allowlist named
 # all three, so a third of what it claimed to permit did not exist.
@@ -1240,11 +1267,67 @@ def run():
     # what makes any of it true. Before [SEC-EXEC-NO-DATASTORE-V1] the same sentence read
     # "everything above this line trusts Firestore", and it was the same weakness wearing a
     # database: the control plane could write Firestore, so a compromised one approved anything
-    # by setting status=confirmed and calling us. With PC_REQUIRE_ASSERTION=1 the caller must
-    # ALSO present the operator's WebAuthn assertion, verified HERE against credentials the
-    # control plane cannot write. It cannot forge one -- forging requires the operator's
-    # device, not database access and not a request body.
+    # by setting status=confirmed and calling us. The INTENDED answer was PC_REQUIRE_ASSERTION=1:
+    # the caller would ALSO present the operator's WebAuthn assertion, verified HERE against
+    # credentials the control plane cannot write, which it could not forge -- forging requires the
+    # operator's device, not database access and not a request body. THAT ANSWER WAS NEVER FINISHED,
+    # and the four lines above used to describe it in the present tense. See below.
     if os.environ.get("PC_REQUIRE_ASSERTION", "0") == "1":
+        # [SEC-ASSERT-UNIMPL-V1] THE FLAG REFUSES BY NAME INSTEAD OF PRETENDING TO BE A CONTROL.
+        #
+        # WHAT THE DEFECT WAS, IN PLAIN WORDS: the block below needs two fields out of the request
+        # body, `assertion` and `expected_challenge`, and NOTHING IN THIS FLEET MINTS EITHER. So
+        # arming the one control that is genuinely independent of a compromised control plane
+        # answered 428 "assertion required" to every job forever -- including the job that would
+        # disarm it -- and the operator rolled it back. A switch that can only brick the install is
+        # not a control; it is a control-shaped hole with a label on it.
+        #
+        # WHAT I MEASURED, at this ref, with grep:
+        #   * "expected_challenge" appears ZERO times in control-plane/src. It exists only in this
+        #     file and in pcwebauthn.py.
+        #   * "webauthn" and "navigator.credentials" each appear ZERO times in control-plane/src.
+        #     There is no enrolment page and no browser ceremony to produce an assertion with.
+        #   * waCallExec() forwards `assertion` only when a caller passes one. The only function
+        #     that can, waRunGodmode(), has NO CALL SITES -- 2 occurrences in index.ts, its own
+        #     signature and a mention inside a comment. The three live waExecuteApproved() calls
+        #     (index.ts 1758, 5479, 6098) pass none, so the field is always undefined and
+        #     JSON.stringify drops it.
+        #   * the enrolment secret is created by the installer holding the literal '{}' and nothing
+        #     in the tree ever adds a version, so load_creds() returns {} and rung 3 would 403 even
+        #     if the first two fields ever arrived.
+        # Three independent reasons, any one of which alone is fatal to the path.
+        #
+        # WHY THIS FIX AND NOT THE CHALLENGE MINTER. Minting a server-side, single-use, TTL-bounded
+        # challenge in the control plane is easy and BUYS NOTHING ON ITS OWN: `not _assn` below is
+        # still true, so every job still 428s. Turning this flag into a switch that works needs a
+        # WebAuthn ceremony in the console, an enrolment path that writes a secret the control plane
+        # is DELIBERATELY not granted (that grant is what makes verification here mean anything),
+        # and a rehearsed disarm. That is a feature across three services, not a minimal edit, and
+        # shipping the minter alone would leave the same brick wearing fresh paint. So the honest
+        # state is said in its own words: NOT IMPLEMENTED. 501 and not 428, because 428 means
+        # "retry with the precondition" and there is no precondition anyone can fetch.
+        #
+        # WHAT THIS DOES NOT TOUCH, AND I CHECKED IT: PC_REQUIRE_ASSERTION is read in exactly ONE
+        # place in this file, this line, and every byte I added is inside the == "1" branch. With
+        # the shipped default and live setting of 0 -- which is what install.sh writes -- execution
+        # never enters here, so the serving posture is byte-identical and no staged job is stopped.
+        #
+        # THE VERIFIER BELOW IS LEFT IN PLACE ON PURPOSE AND IS NOW UNREACHABLE. pcwebauthn.py is
+        # being hardened separately; deleting its only call site would strand that work, and the
+        # call site is the seam the real ceremony has to land on. Unreachable-with-a-sign is the
+        # point of this change: a half-built control must not be able to look armed.
+        log_journal("exec_assertion_unimplemented",
+                    "REFUSED job %s: PC_REQUIRE_ASSERTION=1, but the operator-assertion path is NOT "
+                    "IMPLEMENTED on this build -- nothing mints expected_challenge, nothing forwards "
+                    "an assertion, and no credential is enrolled. Set PC_REQUIRE_ASSERTION=0 on the "
+                    "executor to restore service. Nothing ran." % job_id,
+                    job_id)
+        return jsonify({"error": "refused: PC_REQUIRE_ASSERTION=1 is not implemented on this build "
+                                 "-- the per-job operator challenge is never minted and no assertion "
+                                 "is ever forwarded, so this flag can only refuse",
+                        "detail": "set PC_REQUIRE_ASSERTION=0 on the executor to restore service; "
+                                  "arming it needs a console WebAuthn ceremony and an enrolled "
+                                  "credential, and neither exists yet [SEC-ASSERT-UNIMPL-V1]"}), 501
         try:
             import pcwebauthn as _W
             import pcmint as _M
@@ -1613,24 +1696,43 @@ def run():
                             "detail": type(_lc_err).__name__}), 403
     if _lc_hits:
         _lc_ids = [rid for rid, _ in _lc_hits]
-        # THE OPERATOR'S ACKNOWLEDGEMENT RIDES INSIDE `arguments`, AND THAT IS THE WHOLE
-        # POINT OF PUTTING IT THERE. arguments is covered by asha -- field 5 of
-        # PC-APPROVAL-CANON-V2 -- so adding or flipping lockout_ack in transit changes the
-        # canonical arguments hash and the approval signature verified ABOVE this line
-        # fails. A header, a query parameter or a top-level body field would all have been
-        # forgeable by whoever could reach this endpoint; this one cannot be.
+        # [SEC-CALLER-ACK-NOT-OPERATOR-V1] THIS BRANCH USED TO CALL AN AGENT-SET BOOLEAN AN
+        # OPERATOR ACKNOWLEDGEMENT, AND THAT WAS THE DEFECT. The flag originates in
+        # run_command's `confirm` input -- the CALLING AGENT fills it in -- and the control
+        # plane copied it into arguments as lockout_ack before signing. This line then wrote
+        # "carried a signed operator acknowledgement, so it RAN" into the journal for a body
+        # no human is known to have seen. MEASURED across the whole tree before the rename:
+        # lockout_ack was written in exactly ONE place (control-plane/src/index.ts, from
+        # a.confirm) and read in exactly one -- here. No console, no pending_confirms approval
+        # route and no session check ever set it, so no human ever could be its source.
+        # The field is now caller_ack and this entry names who actually set it.
         #
-        # WITH THE GATE CONSOLE REMOVED, THE HUMAN PATH IS CHAT. The operator no longer
-        # approves by tapping a page, so a refusal here is relayed upward as a question and
-        # comes back, if they say yes, as a re-issued job carrying this ack. The decision is
-        # still a human's; only the channel changed. It is journalled under its own action
-        # so that "a human said yes to a lockout-class change" can never be confused in the
-        # transcript with "the checker found nothing".
-        if args.get("lockout_ack") is True:
+        # THE SIGNATURE ARGUMENT IS UNCHANGED AND STILL TRUE -- it was simply never the
+        # question. caller_ack rides inside `arguments`, which is covered by asha -- field 5
+        # of PC-APPROVAL-CANON-V2 -- so adding or flipping it IN TRANSIT changes the canonical
+        # arguments hash and the approval signature verified ABOVE this line fails. A header,
+        # a query parameter or a top-level body field would all have been forgeable by whoever
+        # could reach this endpoint; this one cannot be. That proves the flag is the one the
+        # control plane signed. It says nothing about who chose it.
+        #
+        # THE HUMAN PATH IS CHAT, AND IT IS NOT VERIFIABLE FROM HERE. An operator may well have
+        # said yes in the transcript before the agent re-issued with confirm=true, but nothing
+        # in the job carries evidence of that. So the journal records the fact and not the
+        # inference. If a real operator channel is ever added, it must set its OWN field and
+        # journal under its own action -- otherwise this ambiguity comes straight back.
+        #
+        # lockout_ack IS STILL ACCEPTED, FOR DEPLOY SKEW ONLY. A job staged and signed before
+        # this change carries the old key inside its signed arguments; dropping it would move
+        # such a job onto the un-acked branch, which under PC_GUARDRAILS=1 is a 403 on work
+        # that ran yesterday. Both keys carry the same meaning: the caller asked for the
+        # override. Retire the old key once no pre-change job can still be pending.
+        if args.get("caller_ack") is True or args.get("lockout_ack") is True:
             log_journal("exec_lockout_acked",
-                        "job %s matched lockout-class rule(s) %s and carried a signed operator "
-                        "acknowledgement, so it RAN. This is the deliberate override path, not "
-                        "a checker miss." % (job_id, ",".join(_lc_ids)),
+                        "job %s matched lockout-class rule(s) %s and carried a signed "
+                        "caller_ack, so it RAN. This is the deliberate override path, not a "
+                        "checker miss. The ack is the CALLING AGENT's assertion -- signed, so "
+                        "it was not added in transit, but NOT evidence that a human saw this "
+                        "body." % (job_id, ",".join(_lc_ids)),
                         job_id)
         elif not _lc_guard:
             log_journal("exec_lockout_class_ran",
@@ -1671,6 +1773,77 @@ def run():
 
     access_token = body.get("access_token")
 
+    # ---- [SEC-EXEC-TOKEN-APPROVER-BIND-V1] THE IDENTITY THE JOB RUNS AS IS NOW HELD
+    # AGAINST THE APPROVER INSIDE THE VERIFIED SIGNATURE ----
+    # THE DEFECT, PLAINLY. access_token arrives in the REQUEST BODY and is covered by NEITHER
+    # canon: V1 signs alg/jid/csha/appr/kver/iat/exp and V2 adds ctyp/asha, and no field of
+    # either names a credential. So the two halves of "who approved this" and "whose identity
+    # it runs as" were never tied together. Whoever could reach /run could take a genuinely
+    # signed approval naming someone and pair it with ANY token they held; the job ran as that
+    # token's principal, and exec_start below wrote "with approver-scoped creds" over the
+    # result. The journal then read as though the named approver had run it. Nothing in this
+    # file noticed, because nothing in this file ever compared the two.
+    #
+    # WHAT THE APPROVER FIELD ACTUALLY SAYS ON THIS FLEET -- MEASURED, NOT ASSUMED. At this
+    # ref, approval_sig_approver is written in EXACTLY ONE place in the entire control plane
+    # (control-plane/src/index.ts, the auto-run signer) and the value it writes is ALWAYS the
+    # literal 'auto:lockout-check'. There is no writer anywhere that puts a human address in
+    # it. Under the shipped PC_AUTO_APPROVE=1 posture, therefore, every signed approval names
+    # a SYNTHETIC approver -- which is a positive statement that NO human is in this path --
+    # and both callers that run such a job (the auto-runner itself, and /api/jobs/fire)
+    # deliberately forward an EMPTY access_token so gate-exec runs under its own scoped
+    # identity. That is the same fact [SEC-EXEC-TOKEN-V90] below is built on.
+    #
+    # SO THE COMPARISON THAT CAN ACTUALLY RUN HERE IS THE auto: ONE, AND IT COSTS NO NETWORK.
+    # A synthetic approver authorises exactly one identity: this service's own. A NON-EMPTY
+    # token presented against it is a disagreement visible without resolving anything, and it
+    # is precisely the substitution described above. It is refused, naming both sides.
+    #
+    # THIS CANNOT REFUSE A STAGED JOB, WHICH IS THE CONSTRAINT THAT MATTERS MORE THAN THE FIX.
+    # The auto-approve and pre-approve paths forward '', so this branch is unreachable for
+    # them and auto-approve keeps running exactly as it does today. The one honest cost is a
+    # recovery shape: a job the auto-runner stamped and then failed to run reverts to
+    # 'pending' still carrying its auto: stamp, and a human approving it in the console
+    # forwards THEIR token. From here that is byte-for-byte the attack shape and this service
+    # cannot tell the two apart, so it refuses and says what to do -- re-stage the job, and it
+    # is signed for the path it will actually run on. Nothing is dropped: the refusal is
+    # routed, and it is placed ABOVE approval_staleness_refusal and claim_job_for_execution,
+    # so it burns no approval and the job stays approvable.
+    #
+    # THE HUMAN-NAMED CASE IS NOT CHECKED, AND PRETENDING OTHERWISE WOULD BE WORSE THAN SAYING
+    # SO. Resolving an opaque access token to an identity means an outbound tokeninfo call on
+    # every job, in the run critical path, with no honest failure mode: fail open and the check
+    # is theatre, fail closed and one egress blip takes out the operator's only way back in.
+    # This service makes no such call and should not acquire one for a defence-in-depth
+    # control. The fix belongs one rung up, in the canon: the control plane ALREADY resolves
+    # tokens (waGoogleIdentity) for its own session checks, so it should resolve the token it
+    # is about to forward and write THAT address into appr before signing -- then this
+    # comparison is a string compare with no network at all. Until then the shape is recorded
+    # rather than guessed at, and a human-named approver is unreachable anyway: nothing writes one.
+    if access_token and _sig_outcome in ("ok", "ok_v1"):
+        _appr_signed = str(job.get("approval_sig_approver") or "")
+        if _appr_signed.startswith("auto:"):
+            log_journal("exec_refused_token_approver_mismatch",
+                        "REFUSED job %s: the verified approval names the SYNTHETIC approver "
+                        "%r, which authorises this service's own scoped identity and no "
+                        "human's, but the request body carried a non-empty access_token "
+                        "(%d chars). The approval canon covers no credential, so running "
+                        "under a token nothing signed would have been journalled as %r "
+                        "having run it. NOTHING RAN, and no approval was spent. Re-stage the "
+                        "job so it is signed for the path it will actually run on."
+                        % (job_id, _appr_signed, len(str(access_token)), _appr_signed),
+                        job_id)
+            return jsonify({"error": "refused: the supplied access_token does not match the "
+                                     "approver named in the verified approval",
+                            "approver": _appr_signed}), 403
+        log_journal("exec_token_approver_unverified",
+                    "job %s: the verified approval names approver %r and the body carried a "
+                    "token (%d chars), but this service cannot resolve a token to an identity "
+                    "without an outbound call it does not make. The binding between the two "
+                    "is NOT established -- this line is the evidence of that, not a pass."
+                    % (job_id, _appr_signed[:80], len(str(access_token))),
+                    job_id)
+
     env = dict(os.environ)
     env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
     # [EXEC-BIN-JAIL-V82] Restrict PATH to the permitted binaries. Built per request so a
@@ -1697,8 +1870,50 @@ def run():
         env["PATH"] = _jail_dir
         log_journal("exec_bin_jail",
                     "job %s: PATH restricted to %d permitted binaries (%d of the named set are "
-                    "not on this image). Absolute paths are NOT blocked by this control."
+                    "not on this image). This narrows BARE-NAME lookup ONLY: an absolute path "
+                    "never consults PATH, and python3/python/bash/sh/env/xargs/find are ON the "
+                    "list and each runs an arbitrary binary. Not a sandbox, confines nothing."
                     % (job_id, len(_jail_linked), len(_jail_missing)), job_id)
+        # [EXEC-BIN-JAIL-CLEANUP-V1] THE JAIL WAS BUILT PER REQUEST AND NEVER REMOVED. Every
+        # /run left a pcbinjail.* directory behind in the container's temp space. COUNTED FROM
+        # THE CODE, not assumed: pc_build_bin_jail() calls mkdtemp on every request and there
+        # was no rmtree anywhere in this file, so the growth is one directory of up to 76
+        # symlinks per job for the whole life of the revision. Nothing ever read them again --
+        # they were pure litter, and litter on a long-lived instance eventually fills a disk.
+        #
+        # WHY IT IS REGISTERED HERE AND NOT IN A `finally`. Between this line and the bash
+        # subprocess there are three refusals that RETURN -- a stale approval, an unknown claim
+        # outcome and a replayed approval -- so a finally wrapped round the subprocess would
+        # miss all three, which is to say it would keep leaking on exactly the paths that repeat
+        # under load. after_this_request fires on every exit from this handler, those returns
+        # and an error response included.
+        #
+        # WHY RENAME AND THEN REMOVE, RATHER THAN REMOVE. os.rename is atomic, so the tree is
+        # only ever whole under the live name, or whole-then-shrinking under a name nothing
+        # consults. An rmtree interrupted half way therefore CANNOT leave a partially stripped
+        # jail sitting at the path PATH was pointed at. If the rename itself fails, nothing is
+        # deleted at all, which is the safe end of that trade.
+        #
+        # IT CANNOT FAIL THE RUN. The job has finished by the time this fires; the entire body
+        # is inside try/except and the response is handed back unchanged whatever happens,
+        # because losing a completed job's only result to a housekeeping error would be a far
+        # worse bug than the litter this removes.
+        @after_this_request
+        def _pc_drop_bin_jail(_resp, _d=_jail_dir, _jid=job_id):
+            try:
+                import shutil as _sh
+                _dead = _d + ".dead"
+                os.rename(_d, _dead)
+                _sh.rmtree(_dead, ignore_errors=True)
+            except Exception as _jce:
+                try:
+                    log_journal("exec_bin_jail_not_removed",
+                                "job %s: the per-request jail directory %s could not be removed "
+                                "(%r). The job itself is unaffected -- this is litter, not a "
+                                "failure." % (_jid, _d, _jce), _jid)
+                except Exception:
+                    pass
+            return _resp
     if access_token:
         # Bind gcloud/gsutil/bq to the approver's identity
         env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = access_token

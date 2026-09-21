@@ -1,6 +1,6 @@
 # Security
 
-**Paracoding — v14.0**
+**Paracoding — v15.0**
 An agent platform that installs into your own Google Cloud project. Agents propose; you commit.
 
 This document describes what this release enforces and how to report a problem. Every claim
@@ -68,21 +68,46 @@ opt-in. What is enforced:
   
   Both switches default to `0`, ensuring an `install.sh` adopter inherits the protection cards and this exposure requires a deliberate act.
 
+## What the signature does not prove
+
+The section above is easy to read as more than it says, so this states the limit plainly.
+
+**Under `PC_AUTO_APPROVE=1` the approval is minted by the control plane out of the caller's own
+command, in the same request that fires the job.** `pcAutoRun()` in `control-plane/src/index.ts`
+hashes the command it was just handed, writes that hash as both `cmd_sha` and `approved_sha256`,
+signs a canonical message over it, and posts the job to the executor. No party other than the
+caller sees the command between the agent choosing it and the executor running it. The executor
+then checks the presented script against the pin, and the pin against the signature. Both checks
+pass, and neither of them asked anyone.
+
+So the chain proves exactly two things: the bytes the executor ran are the bytes the control
+plane signed, and the signer is who it says it is. Integrity in transit, and the identity of the
+signer. **It does not prove that any party other than the caller authorised the command.** The
+verification chain in `gate-exec/exec_server.py` is a transport-integrity control, not an
+authorisation control, and if you are counting controls, count it under that heading.
+
+The authorisation boundary on a stock install sits upstream of all of it: the `stage` tool class,
+and who holds a session key carrying it. A key with `stage` is a key that runs commands in your
+project. Everything after that point is about getting those commands to the executor unaltered.
+Read "KMS-signed and verified" as "unaltered since the control plane signed it", never as
+"someone approved it".
+
 ## The Keyless GE Chat Composition (Exposure and Posture)
 
 This release supports a keyless connector configuration (`PC_NOCARD_EXEC=1` and `PC_NOCARD_ALL=1`) specifically optimized for flat-rate chat interfaces such as Gemini Enterprise. When active, this creates a specific, highly permissive four-layer composition on the production environment:
 
-1. **Keyless Identity Resolution:** Strains resolve keylessly from the connector binding (`oauth_client_id` + `oauth_email`). Rather than validating the individual end-user executing a turn, identity resolution maps to the single Google account that consented to the connector (`rec.email`). This means *every* user added to the Gemini Enterprise application inherits and executes under the single bound `fleet-courier` strain.
-2. **Unrestricted Surface Area:** The keyless `fleet-courier` strain defaults to carrying NO explicit `tool_classes` restrictions. Under the control plane, absence of constraints translates to full, unrestricted access to all 59 platform tools (including `run_command`, `stage_privileged_job`, `gcp_api`, and `run_roll`).
+1. **Keyless Identity Resolution:** Strains resolve keylessly from the connector binding (`oauth_client_id` + `oauth_email`). Rather than validating the individual end-user executing a turn, identity resolution maps to the single Google account that consented to the connector (`rec.email`). This means *every* user added to the Gemini Enterprise application inherits and executes under the single bound `fleet-curator` strain.
+2. **Unrestricted Surface Area:** The keyless `fleet-curator` strain defaults to carrying NO explicit `tool_classes` restrictions. Under the control plane, absence of constraints translates to full, unrestricted access to all 59 platform tools (including `run_command`, `stage_privileged_job`, `gcp_api`, and `run_roll`).
 3. **Disabled Refusal Guardrails:** `PC_GUARDRAILS=0` is set across the control plane, MCP, and the gate executor. Platform-level destructive command and lockout-class checks classify and journal actions but do not block execution.
 4. **Suppressed Confirmation Cards:** `PC_NOCARD_EXEC=1` and `PC_NOCARD_ALL=1` are active on the serving MCP container, which advertises `readOnlyHint:true` for all classified tools. This suppresses all client-side review and confirmation cards.
 
 The composition of these four layers results in an unauthenticated-to-the-user, unreviewed, and unrefused shell directly integrated with the GCP REST surface for whoever accesses the Gemini Enterprise custom connector. While designed to accelerate engineering loops for a single-operator environment, this posture bypasses all human-in-the-loop validation gates. The active defenses for this environment comprise four layers:
 1. **`strains.tool_classes` restrictions**: Restricting the strain to a safe set of tools (e.g., `['read']`) directly inside Firestore.
-2. **KMS-signed command pins**: The executor strictly refuses any script whose sha256 does not match what was KMS-signed.
-3. **IAM ceiling**: The executor service account (`fleet-gate-exec-sa`) lacks permissions to read or redeploy its parent (`fleet-gate-exec`), preventing circular privilege escalation (see `deploy/LOCKOUT-CLASS.md` "THE SECOND ARM").
+2. **KMS-signed command pins**: The executor strictly refuses any script whose sha256 does not match what was KMS-signed. Under `PC_AUTO_APPROVE=1` the command that was signed is the caller's own, so this holds the executor to what the control plane sent it — it is not a check on what the caller asked for. See **What the signature does not prove** above.
+3. **IAM ceiling — this project only, and narrower than the name suggests** (`[SEC-RUNADMIN-BOUND-V1]`): On the fleet's own prod, the executor service account (`fleet-gate-exec-sa`) cannot read or redeploy its parent (`fleet-gate-exec`), so no job can rewrite the code and env that verify approvals — measured 2026-08-14, see `deploy/LOCKOUT-CLASS.md` "THE SECOND ARM". Two limits, stated here because a ceiling counted wider than it is would be exactly the defect this document exists to avoid. **It has never covered the control plane**: the same identity can build and deploy `paracoding-control-plane`, which is the service that signs approvals, and `deploy/BUILD-FROM-THE-STORE.md` records it doing so with no new grant. And **on a stock install it does not exist at all** — the installer grants the executor `roles/run.admin` at PROJECT scope (`[GCP-RUN-DEPLOY-GRANT-V76]`), because `run.services.create` cannot be scoped to a service that does not exist yet and agent-built services are named at run time; `roles/run.developer` would not help, as it carries `run.services.update` too. On an adopter's project the executor can therefore redeploy or delete both surfaces, and only the shipped prompt tells it not to. Whether an IAM condition can fence `run.services.create` is an open question with a written-down experiment, `EXP-RUN-CREATE-COND-1` in `deploy/LOCKOUT-CLASS.md`; until someone runs it, an adopter should count three layers in this list, not four.
 4. **Git compare-and-swap mechanics**: Prevent blind overrides of repository states by requiring an explicit base OID assertion without force pushes, keeping previous revisions recoverable.
-**Operator Ruling (2026-09-07):** The recommendation to restrict this specific strain is withdrawn; as the primary engineering surface, `fleet-courier` retains all 59 tools. The designated mitigation for multi-user exposure is to explicitly bind additional users to their own individual strains (mapping their Google accounts under `strains.oauth_email`), rather than restricting the primary engineering strain.
+
+**Operator Ruling (2026-09-07):** The recommendation to restrict this specific strain is withdrawn; as the primary engineering surface, `fleet-curator` retains all 59 tools. The designated mitigation for multi-user exposure is to explicitly bind additional users to their own individual strains (mapping their Google accounts under `strains.oauth_email`), rather than restricting the primary engineering strain.
 
 ## Who can reach the console
 
@@ -96,13 +121,21 @@ credential of its own and asks for none. Put a hardware security key on the Goog
 itself and the outer door costs a physical touch — that protection is IAP's, and it is the
 one in the path on a stock install.
 
-The console also honours a session cookie with a TTL. `gate_session` is an HMAC under
-`WA_SESSION_SECRET` over `{ user, expiry }` and is accepted for `WA_SESSION_MIN` minutes; a
-missing or short secret means the control plane neither issues nor verifies one, so the gate
-stays closed rather than degrading. A session is worth exactly what the sign-in behind it
-was worth: it opens the console, and nothing in it approves a job — approval is the KMS
-signature described above, and a stock install produces that signature without a person in
-the loop.
+The console **verifies** a session cookie with a TTL and **issues none.** `gate_session` is an
+HMAC under `WA_SESSION_SECRET` over `{ user, expiry }` and is accepted for `WA_SESSION_MIN`
+minutes; without a strong secret it is never accepted, so the gate stays closed rather than
+degrading. **No route in the control plane sets that cookie** — `waMakeSession()` is called
+from nowhere — so there is no sign-in that hands one to a person, and no lesser tier of console
+user. The only minter in this repository is `pipeline/collect-evidence.py`, which reads
+`WA_SESSION_SECRET` from Secret Manager during a dev evidence run, with IAP switched off so
+that the IAP branch is unreachable. Read the cookie as a build-time credential, and read the
+secret accordingly: **whoever holds `WA_SESSION_SECRET` opens the console without an IAP
+identity.** Such a session resolves to no per-person address, so every ownership and approver
+check keyed on the IAP identity refuses it — it is strictly weaker than an approver, not a
+second kind of user. Everyone admitted by signing in is on `WA_APPROVER_EMAILS`. A session is
+worth exactly what the sign-in behind it was worth: it opens the console, and nothing in it
+approves a job — approval is the KMS signature described above, and a stock install produces
+that signature without a person in the loop.
 
 ---
 
@@ -111,15 +144,27 @@ the loop.
 Covered above, and repeated here as the short form: the signature covers
 the job id and the digest of the command as signed, the executor verifies with the public
 half only, edit the command afterwards and the digest no longer matches, and a claim is
-single-use.
+single-use. None of that is an authorisation step on the shipped default — see **What the
+signature does not prove**.
 
 ## The binary jail
 
 An approved script runs with `PATH` restricted to a jail directory built from an enumerated set
-of binaries, so an unlisted command does not resolve. The jail is constructed before the request
-handler runs and its state is journalled. What authorises the work in the first place is a valid
-signature over that exact command, and the executor refuses any script whose hash does not match
-the approval — the jail narrows what an approved script can reach for. With `PC_AUTO_APPROVE=1`
+of binaries, so a **bare name** that is not on the list does not resolve. The jail is built per
+request inside the handler, its state is journalled, and it is removed again when the request
+ends.
+
+**Read what that does, and what it does not.** It narrows bare-name lookup for a script that was
+already approved. It is **not a sandbox** and it confines nothing. Two things leave it, both by
+design: an absolute path never consults `PATH` at all, and the permitted set itself names
+`python3`, `python`, `bash`, `sh`, `env`, `xargs` and `find` — each of which will run an
+arbitrary binary for you. Those interpreters are on the list because real staged jobs need them,
+and the consequence is worth stating plainly: the jail stops a mistyped `gsutil ls`, not a
+determined script.
+
+What the executor checks before it runs anything is a
+valid signature over that exact command, and it refuses any script whose hash does not match
+the approval — that pin, not the jail, is the control here. With `PC_AUTO_APPROVE=1`
 the signer is the control plane acting for you, not a person at a keyboard; the approver field
 inside the signed bytes records that, so the audit trail does not claim a human it did not have.
 

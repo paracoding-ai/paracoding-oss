@@ -50,17 +50,22 @@ the auth they require.
   `WA_APPROVER_EMAILS` — seeded with the installing account — is what satisfies the
   application's own session check, on every request. Two independent doors, no enrolment step,
   no credential of the console's own to register.
-- **A session cookie with a TTL.** `gate_session` is an HMAC over `{ user, expiry }` under
-  `WA_SESSION_SECRET` and is honoured for `WA_SESSION_MIN` minutes. **A weak
-  `WA_SESSION_SECRET` means *no valid sessions at all***, because an empty-key HMAC is
-  forgeable. The session layer fails closed rather than degrading.
+- **A session cookie with a TTL — verified, never issued.** `gate_session` is an HMAC over
+  `{ user, expiry }` under `WA_SESSION_SECRET` and is honoured for `WA_SESSION_MIN` minutes.
+  **A weak `WA_SESSION_SECRET` means *no valid sessions at all***, because an empty-key HMAC is
+  forgeable. The session layer fails closed rather than degrading. **No route mints one** — it
+  is a build-time credential for the dev evidence run, not a second tier of console user, so
+  holding `WA_SESSION_SECRET` is console access and everyone who signs in is an approver.
 - **Org policy** (`allowedPolicyMemberDomains`) makes out-of-domain access *impossible to
   grant*, not merely discouraged — enforced when the binding is written.
 - **401 served in place**, at the URL you asked for. No `?next=` redirect, so no enumeration
   oracle and no browser credential dialog.
 - **An approval is bound to *one job id and one command digest*** — the KMS signature covers
-  both, and an edited command is refused by the executor. A generic "this browser
-  authenticated recently" has never been enough to authorise a command.
+  both, and an edited command is refused by the executor. That binding is integrity, not
+  authorisation: on the shipped `PC_AUTO_APPROVE=1` the control plane signs the command the
+  caller just supplied, in the same request that fires it, so it proves the executor ran what
+  was signed and nothing about who wanted it run. `SECURITY.md`, *What the signature does not
+  prove*.
 
 ## 4. Agent identity — strains
 
@@ -179,6 +184,11 @@ so agent clients other than this project's own console can reach the control pla
 - The approval arrives in the request body and is trusted **exactly as far as its KMS
   signature covers**: job id, command digest recomputed from the arguments about to run, a
   hash of the canonical JSON of the whole argument object, approver, key version, expiry.
+- **What that signature does not establish is authorisation.** On the shipped
+  `PC_AUTO_APPROVE=1` the control plane mints and signs the approval from the caller's own
+  command, in the request that fires the job, and the `approver` field inside the signed bytes
+  says `auto:lockout-check` rather than naming a person. The chain is transport integrity; the
+  boundary is the `stage` tool class and who holds a key carrying it.
 - **One approval is one run**, consumed atomically. A failed substitution can't burn a real
   approval, and an *unknown* claim outcome means the job does not run.
 - **Lockout classes** — nine categories of change that destroy the way back in (service

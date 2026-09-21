@@ -2,6 +2,8 @@ import { loadConfig } from './pcgit/09-mcp/src/config.js';
 import { getContext } from './pcgit/09-mcp/src/context.js';
 import { gitDiff, gitList, gitLog, gitPropose, gitPush, gitRead, gitUploadBlob } from './pcgit/09-mcp/src/ops.js';
 import { gitProposePatch } from './gppatch.js';
+import { PassThrough } from 'node:stream';
+import * as git from 'isomorphic-git';
 // [GIT-READ-MULTIPATH-V146] ToolError and badRequest join toFailure on this import: the batch
 // branch refuses with TOO_MANY_FILES and BAD_REQUEST, both already members of the shared
 // ErrorCode union in errors.ts, so a batch refusal reads like every other refusal on this
@@ -373,7 +375,66 @@ function archiveCtx(): any {
 // is oldest-first (a Map iterates in insertion order), which is enough: the working set is one
 // repository tree and the point is surviving between greps in a turn, not competing with a real
 // LRU. Nothing here survives a cold start or reaches another instance, and it does not need to.
-const PC_BLOB_CACHE_MAX_BYTES = Math.max(0, Math.floor(Number(process.env.PC_BLOB_CACHE_BYTES) || (192 * 1024 * 1024)));
+//
+// [GIT-BLOB-CACHE-CEILING-V1] THE CEILING IS A FRACTION OF THE CONTAINER, NOT A FLAT NUMBER,
+// and it is a fraction because the flat number killed prod.
+//
+// MEASURED 2026-09-12, prod paracoding-control-plane (512 MiB): three Gemini Enterprise seat
+// turns in three minutes asked for a whole-tree grep. Each one ended the same way --
+//     Memory limit of 512 MiB exceeded with 571 MiB used
+//     Memory limit of 512 MiB exceeded with 517 MiB used
+//     Memory limit of 512 MiB exceeded with 518 MiB used
+// -- and the operator got three 503s from the edge, at 25s, 30s and 20s. Nothing else in the
+// preceding two weeks of logs OOM'd. A cold whole-tree grep was the only new thing.
+//
+// THE FLAT 192 MiB WAS THE BUG, not the concurrency and not the seat. 192 MiB is 37% of a
+// 512 MiB container, held indefinitely, on top of the Node baseline, the bundle, and the twelve
+// concurrent decrypt/inflate buffers the read window has in flight. There is no arithmetic in
+// which that fits, and the number was chosen when nobody was looking at the container limit.
+//
+// SO THE LIMIT IS READ FROM THE CONTAINER, from cgroup v2 then v1, and the cache takes a
+// quarter of it. On a 512 MiB box that is 128 MiB; on 1 GiB, 256 MiB. If neither cgroup file
+// is readable -- not Linux, or a sandbox that hides them -- the fallback is 64 MiB, which is
+// small enough to be safe on the smallest box anyone runs this on. An explicit
+// PC_BLOB_CACHE_BYTES still wins over all of it, because an operator who has measured their
+// own box should not have to argue with a heuristic.
+// [GIT-BLOB-CACHE-CEILING-V1 -- CORRECTION, same day, from the line this change added]
+// The paragraph above blames the 192 MiB ceiling for the OOM. THE LOG LINE SAYS OTHERWISE, and
+// the log line wins. First two whole-tree greps on the fixed revision:
+//     [gittools] grep ref=main files=324/409 miss=307 hit=102
+//                rss=349MiB heap=85MiB ext=13MiB cache=8/256MiB entries=307
+// The cache holds EIGHT MiB. The entire repository's text does not come close to 192 MiB, so
+// that ceiling was never reached and cannot have been what filled the container. What actually
+// costs is the walk itself: rss 349 MiB against a heap of 85 MiB means ~260 MiB lives OUTSIDE
+// the JS heap -- the fetch, decrypt and inflate buffers for 307 cold blobs, plus Node's own
+// floor. On a 512 MiB box that is fine right up until it is not.
+// SO: the memory limit was the fix (512 MiB -> 1 GiB, where 349 MiB is comfortable), and this
+// ceiling is a latent hazard closed on the way past -- 192 MiB of cache WOULD have been 37% of
+// that box if a bigger repository ever filled it. Both changes are worth keeping. Only the
+// attribution was wrong, and it was wrong because it was written before the line below existed.
+function pcContainerMemoryBytes(): number {
+  const fs = require('fs');
+  const tries: Array<[string, (t: string) => number]> = [
+    ['/sys/fs/cgroup/memory.max', (t: string) => (t.trim() === 'max' ? 0 : Number(t.trim()))],
+    ['/sys/fs/cgroup/memory/memory.limit_in_bytes', (t: string) => Number(t.trim())],
+  ];
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      const n = tries[i][1](String(fs.readFileSync(tries[i][0], 'utf8')));
+      // cgroup reports "no limit" as a number near 2^63; anything absurd is not a limit.
+      if (isFinite(n) && n > 64 * 1024 * 1024 && n < 64 * 1024 * 1024 * 1024) return Math.floor(n);
+    } catch (e) {}
+  }
+  return 0;
+}
+const PC_BLOB_CACHE_MAX_BYTES = (() => {
+  const explicit = Number(process.env.PC_BLOB_CACHE_BYTES);
+  if (isFinite(explicit) && explicit >= 0 && String(process.env.PC_BLOB_CACHE_BYTES || '').trim() !== '') {
+    return Math.max(0, Math.floor(explicit));
+  }
+  const box = pcContainerMemoryBytes();
+  return box ? Math.floor(box / 4) : 64 * 1024 * 1024;
+})();
 const pcBlobCache: Map<string, string | null> = new Map();
 let pcBlobCacheBytes = 0;
 
@@ -524,7 +585,28 @@ export async function readForPublish(path: string, ref: string): Promise<any> {
 function pcGlobToRegex(glob: string): RegExp {
   const g = String(glob || '').trim();
   if (!g) return /.*/;
-  let reStr = '^';
+  // [GIT-GREP-BARE-GLOB-MATCHES-BASENAME-V1] A GLOB WITH NO SLASH IN IT MATCHES THE BASENAME
+  // ANYWHERE IN THE TREE, WHICH IS WHAT EVERY OTHER SEARCH TOOL DOES AND WHAT THIS ONE ALREADY
+  // PROMISED IN THREE PLACES.
+  //
+  // MEASURED 2026-09-13, and it is the worst shape of bug this file recognises -- a confident
+  // wrong answer. `*` compiles to `[^/]*`, which cannot cross a directory, and the pattern is
+  // anchored at ^. So glob="*.html" could only ever match a .html file sitting at the repository
+  // ROOT. There are none. The call returned zero matches across zero files and reported, in its
+  // own words: "COMPLETE. All 1 queries were searched exhaustively ... Every per_query count is
+  // exact, including any zero." A model reading that concludes the string is not in the tree.
+  // The same search with "**/*.html" found 37 files and 4 matches.
+  //
+  // THE DOCUMENTATION WAS NOT THE PART THAT WAS WRONG. git_grep's own schema says glob="*.ts",
+  // and two separate capping hints inside this file tell the caller to narrow with glob="*.ts".
+  // Three places promise basename matching; the compiler delivered root-only matching. Fixing the
+  // three strings would have been the cheaper change and the worse one: it would have made the
+  // tool harder to use in order to keep an implementation detail nobody wants.
+  //
+  // A PATTERN THAT CONTAINS A SLASH IS LEFT EXACTLY AS IT WAS, because at that point the caller
+  // is talking about position and should get what they wrote: "control-plane/*.ts" still means
+  // that one directory, and "**/*.ts" still means anywhere. Only the bare form changes.
+  let reStr = (g.indexOf('/') === -1) ? '^(?:.*/)?' : '^';
   let i = 0;
   while (i < g.length) {
     const c = g[i];
@@ -611,7 +693,8 @@ const PC_GREP_MAX_QUERIES = 32;
 // capped result that "failed in the most expensive way: SILENTLY, LOOKING LIKE SUCCESS."
 
 export interface GitGrepOptions {
-  ref: string;
+  // [GIT-GREP-REF-DEFAULTS-TO-MAIN-V1] Optional: omitted means main. See gitGrep() for why.
+  ref?: string;
   // [GIT-GREP-MULTIQUERY-V146] EXACTLY ONE OF `query` OR `queries`. `query` is optional in
   // TypeScript terms now only so that `queries` can be the one supplied; omitting BOTH is the
   // same thrown error it has always been. Supplying BOTH is a REFUSAL rather than a merge: the
@@ -686,8 +769,17 @@ export interface GitGrepResult {
 }
 
 export async function gitGrep(opts: GitGrepOptions): Promise<GitGrepResult> {
-  const ref = String(opts.ref || '').trim();
-  if (!ref) throw new Error('git_grep: ref is required');
+  // [GIT-GREP-REF-DEFAULTS-TO-MAIN-V1] AN OMITTED ref USED TO THROW, AND IT COST A ROUND EVERY
+  // TIME. MEASURED 2026-09-12 on the Gemini Enterprise seat: a turn spent one of its ~14 Assistant
+  // queries on `git_grep: ref is required` and then simply re-issued the identical call with
+  // ref:"main". That is a whole round -- one query out of a 160-per-seat daily pool -- bought
+  // nothing. Nobody searches a repository hoping to search no particular ref; when it is omitted
+  // the caller means the branch, and the branch here is main.
+  //
+  // THE DEFAULT CANNOT BE SILENT, which is the only thing that makes it safe: the result echoes
+  // `ref` back, so a caller who meant a different ref sees main in the response rather than
+  // getting mystery matches. gitLaneSyncFromUpstream already defaults the same way.
+  const ref = String(opts.ref || '').trim() || 'main';
 
   // [GIT-GREP-MULTIQUERY-V146] MODE IS DECIDED ONCE, HERE, AND LOUDLY. A non-empty `queries`
   // selects multi-query mode; otherwise this is the single-query call it has always been.
@@ -959,6 +1051,23 @@ export async function gitGrep(opts: GitGrepOptions): Promise<GitGrepResult> {
     cache_hits: cacheHits,
     cache_misses: cacheMisses,
   };
+
+  // [GIT-BLOB-CACHE-CEILING-V1] ONE LINE PER GREP, SO THE NEXT OOM IS DATA AND NOT A GUESS.
+  // When prod died above, there was nothing in the logs that said how much memory the process
+  // was holding or how full the cache was -- only Cloud Run's post-mortem, which names the
+  // container total and nothing inside it. Diagnosing it cost an hour of inference that one
+  // printed line would have answered. It is printed after the walk, so it reports the peak
+  // state of the thing that just ran.
+  try {
+    const mu: any = process.memoryUsage();
+    console.log('[gittools] grep ref=' + ref + ' files=' + filesSearched + '/' + candidates.length
+      + ' miss=' + cacheMisses + ' hit=' + cacheHits
+      + ' rss=' + Math.round(mu.rss / 1048576) + 'MiB'
+      + ' heap=' + Math.round(mu.heapUsed / 1048576) + 'MiB'
+      + ' ext=' + Math.round((mu.external || 0) / 1048576) + 'MiB'
+      + ' cache=' + Math.round(pcBlobCacheBytes / 1048576) + '/' + Math.round(PC_BLOB_CACHE_MAX_BYTES / 1048576) + 'MiB'
+      + ' entries=' + pcBlobCache.size);
+  } catch (e) {}
 
   if (hasQueries) {
     // [GIT-GREP-MULTIQUERY-V146] THE NOTE NAMES INDICES. "capped: true" on a twelve-pattern
@@ -1575,6 +1684,97 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
       ...(a.expected_blob_sha ? { expected_blob_sha: a.expected_blob_sha } : {}),
       ...(agentId ? { author: { name: agentId, email: agentId + '@' + ctx().cfg.authorEmailDomain } } : {}),
     })));
+  // [PCGIT-REPLACE-V1] THE WHOLE-FILE EDIT, DONE SERVER-SIDE, BECAUSE THE MODEL CANNOT HOLD THE
+  // FILE AND CANNOT RELIABLY WRITE A DIFF.
+  //
+  // MEASURED 2026-09-12 across an evening of real work: git_propose_patch failed THREE TO FIVE
+  // TIMES on every single code change before one applied -- '+++ header with no preceding ---',
+  // then '1 hunk(s) did not apply. NOTHING WAS COMMITTED', repeatedly. A GE seat spent two full
+  // turns and 49 tool calls on a THREE-LINE edit and landed nothing. Whole-file git_propose, by
+  // contrast, worked first time every time -- but only when a human uploaded the bytes, because
+  // harness.html is 225KB and emitting it as a tool argument is ~60K output tokens, which no
+  // model does reliably and several cannot do at all.
+  //
+  // SO NEITHER EXISTING PATH WORKS FOR A SMALL EDIT TO A LARGE FILE. A diff is small enough to
+  // send and too fragile to apply; a whole file applies perfectly and is too big to send. This
+  // tool is the missing third option: the model sends the OLD TEXT and the NEW TEXT -- a few
+  // dozen characters -- and THE SERVER does the read, the replacement and the whole-file write.
+  // The bytes never cross the model's context in either direction, and there are no line numbers,
+  // no @@ headers and no context lines, so both observed failure modes are structurally absent.
+  //
+  // EXACTLY ONE MATCH, OR NOTHING IS COMMITTED. An old_str that matches twice is the dangerous
+  // case -- the model meant one site and would silently get another -- so it is REFUSED and the
+  // count is reported, rather than resolved by picking the first. replace_all is the explicit
+  // opt-in for the sweep, and it reports how many it changed. This is the same contract that
+  // makes str_replace safe in every editor that has one, and it is the reason this is not simply
+  // "sed, over HTTP".
+  //
+  // IT IS NOT A NEW PRIVILEGE. It reads what git_read reads and writes what git_propose writes,
+  // through gitPropose itself, so the ref gate, the path rules, the author stamp and the CAS on
+  // git_push are all unchanged. Mode is left alone, exactly as a content entry does, so editing
+  // an executable does not disarm it. Nothing becomes visible until git_push.
+  server.registerTool('git_propose_replace',
+    { description: 'Change ONE file by replacing an exact piece of its text, WITHOUT sending the file and WITHOUT writing a diff. The server reads the file at `branch`, replaces `old_str` with `new_str`, and commits the whole resulting file. USE THIS INSTEAD OF git_propose_patch FOR ANY SMALL EDIT: a unified diff carries line numbers and context lines that must match the current bytes exactly, and in practice it takes several attempts to get right; this carries neither, so it cannot fail for either reason. USE git_propose (content or uploaded) when you are writing a file from scratch or replacing most of it. old_str MUST APPEAR EXACTLY ONCE: if it appears more than once the call is REFUSED with the count and NOTHING is committed, because a model that meant one site would otherwise silently edit another -- pass replace_all:true to change every occurrence deliberately, and the result reports how many it changed. old_str must be copied verbatim from git_read output, including indentation; include enough surrounding text to be unique rather than trimming it to the shortest thing that matches. Optional expected_blob_oid is a compare-and-swap against the blob the file currently holds, so a file that moved under you refuses instead of overwriting. Refused on binary files, on an empty old_str, and when old_str and new_str are identical. The file mode is left unchanged. Returns commitOid, baseOid, the new blobOid, previousBlobOid, occurrences and replaced. Nothing becomes visible until git_push.',
+      inputSchema: {
+        branch: z.string().describe('Branch to read the file from and commit onto, e.g. "main".'),
+        path: z.string().describe('Repository path of the ONE file to change.'),
+        old_str: z.string().describe('Exact text to find, copied verbatim from git_read including indentation. Must occur exactly once unless replace_all is true.'),
+        new_str: z.string().describe('Text to put in its place. May be empty to delete old_str.'),
+        replace_all: z.boolean().optional().describe('Replace EVERY occurrence instead of requiring exactly one. The result reports how many were changed.'),
+        expected_blob_oid: z.string().optional().describe('Compare-and-swap: the 40-hex blob oid the file must currently hold. A mismatch refuses the call and commits nothing.'),
+        message: z.string().describe('Commit message.'),
+        ...AG } },
+    async (a: any) => {
+      try {
+        const c: any = ctx();
+        const branch = String(a.branch || '');
+        const path = String(a.path || '');
+        const oldS = String(a.old_str === undefined || a.old_str === null ? '' : a.old_str);
+        const newS = String(a.new_str === undefined || a.new_str === null ? '' : a.new_str);
+        if (!oldS) throw badRequest('old_str is empty, so there is nothing to find. To write a file from scratch use git_propose with content, or upload it and use an uploaded entry.');
+        if (oldS === newS) throw badRequest('old_str and new_str are identical, so this commit would change nothing. Nothing was committed.');
+        const cur: any = await gitRead(c, { path: path, ref: branch });
+        if (!cur || cur.ok === false) return { content: [{ type: 'text', text: JSON.stringify(cur, null, 2) }], isError: true };
+        if (String(cur.encoding || '') !== 'utf-8') {
+          throw badRequest('control-plane refuses to text-replace a binary file (' + path + ' reads back as ' + String(cur.encoding) + '). Replace it whole with an uploaded entry on git_propose.');
+        }
+        const text = String(cur.content === undefined || cur.content === null ? '' : cur.content);
+        if (a.expected_blob_oid && String(a.expected_blob_oid) !== String(cur.blobOid || '')) {
+          throw badRequest('expected_blob_oid ' + String(a.expected_blob_oid) + ' does not match the blob ' + path + ' holds at ' + branch + ' (' + String(cur.blobOid) + '). The file moved under you; re-read it and redo the edit. Nothing was committed.');
+        }
+        let n = 0, at = 0, first = -1;
+        for (;;) {
+          const i = text.indexOf(oldS, at);
+          if (i < 0) break;
+          if (first < 0) first = i;
+          n++; at = i + oldS.length;
+        }
+        if (n === 0) {
+          throw badRequest('old_str does not appear in ' + path + ' at ' + branch + '. It must be copied VERBATIM from git_read, including indentation and line breaks -- a retyped or re-indented copy will not match. Nothing was committed.');
+        }
+        if (n > 1 && a.replace_all !== true) {
+          throw badRequest('old_str appears ' + n + ' times in ' + path + ', and this tool refuses an ambiguous edit rather than picking one: the site you meant and the site you would get are not the same thing. Include more surrounding text to make it unique, or pass replace_all:true to change all ' + n + ' deliberately. NOTHING WAS COMMITTED.');
+        }
+        const next = (a.replace_all === true)
+          ? text.split(oldS).join(newS)
+          : (text.slice(0, first) + newS + text.slice(first + oldS.length));
+        const r: any = await gitPropose(c, {
+          branch: branch,
+          files: [{ path: path, content: next }],
+          message: String(a.message || ''),
+          ...(agentId ? { author: { name: agentId, email: agentId + '@' + ctx().cfg.authorEmailDomain } } : {}),
+          ...(agentId ? { uploader: agentId } : {}),
+        } as any);
+        if (r && typeof r === 'object') {
+          r.occurrences = n;
+          r.replaced = (a.replace_all === true) ? n : 1;
+          r.previousBlobOid = String(cur.blobOid || '');
+          r.bytesBefore = text.length;
+          r.bytesAfter = next.length;
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }], ...(r && r.ok ? {} : { isError: true }) };
+      } catch (e) { return failr(e); }
+    });
   server.registerTool('git_push',
     { description: 'Move a branch by compare-and-swap. expected_oid is required: the baseOid from git_propose, or null to create. A lost race returns ok:false code:STALE and does NOT retry. There is no force push.',
       inputSchema: { branch: z.string(), expected_oid: z.string().nullable(), commit_oid: z.string(), ...AG } },
@@ -1605,11 +1805,11 @@ export function registerGitTools(server: any, z: any, AG: any, agentId?: string)
   // the tool description itself and not left to be discovered in a parameter blurb: the 189-call
   // turn measured on 2026-09-07 was made of calls that each looked individually reasonable.
   server.registerTool('git_grep',
-    { description: 'Search repository files at a ref for a regex pattern or fixed string. Returns matching file paths, 1-based line numbers, matching lines, and optional surrounding context lines. Supports path prefix narrowing, glob filtering, regex or literal search, and reports honest match counts and capping rather than silent truncation. SEARCHING FOR SEVERAL PATTERNS? Pass them all at once in `queries` (up to ' + PC_GREP_MAX_QUERIES + ') instead of calling this tool once per pattern: one call walks the tree, fetches and decrypts each file ONCE and tests every pattern against it, so N patterns cost about the same as one. Each match then carries `q`, the index of the pattern that produced it, and `per_query` reports every pattern\'s count and whether it was capped.',
+    { description: 'Search repository files at a ref for a regex pattern or fixed string. `ref` is OPTIONAL and defaults to main. Returns matching file paths, 1-based line numbers, matching lines, and optional surrounding context lines. Supports path prefix narrowing, glob filtering, regex or literal search, and reports honest match counts and capping rather than silent truncation. SEARCHING FOR SEVERAL PATTERNS? Pass them all at once in `queries` (up to ' + PC_GREP_MAX_QUERIES + ') instead of calling this tool once per pattern: one call walks the tree, fetches and decrypts each file ONCE and tests every pattern against it, so N patterns cost about the same as one. Each match then carries `q`, the index of the pattern that produced it, and `per_query` reports every pattern\'s count and whether it was capped.',
       inputSchema: {
         query: z.string().optional().describe('Search regex pattern or literal string to find. Exactly one of query or queries -- supplying both is refused.'),
         queries: z.array(z.string()).min(1).max(PC_GREP_MAX_QUERIES).optional().describe('Up to ' + PC_GREP_MAX_QUERIES + ' patterns evaluated in ONE call over ONE tree walk. Prefer this over N separate git_grep calls: the walk, the blob fetch and the decrypt are paid once and each extra pattern costs only regex time. Every match carries `q`, a 0-based index into this array; `per_query` gives each pattern its own count, capped flag and reason; `walk_complete` says whether the walk reached every file. A pattern that is NOT flagged in per_query was searched exhaustively and its count is exact, including a count of zero. Exactly one of query or queries. An invalid regex anywhere in this array refuses the WHOLE call rather than silently searching that one pattern literally.'),
-        ref: z.string().describe('Git ref to search (branch, tag, or commit hash, e.g. "main").'),
+        ref: z.string().optional().describe('Git ref to search (branch, tag, or commit hash, e.g. "main"). OPTIONAL -- omitted means main, and the ref actually searched is echoed back in the result.'),
         path: z.string().optional().describe('Optional file path or directory prefix to restrict the search to.'),
         glob: z.string().optional().describe('Optional glob pattern to filter file paths (e.g. "*.ts", "**/*.py").'),
         context: z.union([z.number().int().min(0).max(20), z.string().regex(/^\d+$/)]).optional().describe('Number of lines of context before and after each match (0-20, default 0).'),
@@ -2087,4 +2287,186 @@ export async function gitResolveCommitForEvidence(oid: string): Promise<any> {
     author: String(au.name || au.email || ''),
     timestamp: Number(cm.timestamp || 0),
   };
+}
+
+function pktLine(str: string | null): Buffer {
+  if (str === null) return Buffer.from('0000');
+  const len = Buffer.byteLength(str) + 4;
+  const hex = len.toString(16).padStart(4, '0');
+  return Buffer.concat([Buffer.from(hex), Buffer.from(str)]);
+}
+
+export async function gitUploadPackAdvertisement(): Promise<Buffer> {
+  const c = archiveCtx();
+  const listed: any = await gitList(c, { path: '', ref: 'main' });
+  const commit = String((listed && listed.commit) || '');
+  const chunks: Buffer[] = [];
+  chunks.push(pktLine('# service=git-upload-pack\n'));
+  chunks.push(pktLine(null));
+  chunks.push(pktLine(commit + ' HEAD\0multi_ack side-band side-band-64k ofs-delta thin-pack\n'));
+  chunks.push(pktLine(commit + ' refs/heads/main\n'));
+  chunks.push(pktLine(null));
+  return Buffer.concat(chunks);
+}
+
+function parsePktLines(buf: Buffer): string[] {
+  const lines: string[] = [];
+  let offset = 0;
+  while (offset + 4 <= buf.length) {
+    const lenHex = buf.subarray(offset, offset + 4).toString('ascii');
+    const len = parseInt(lenHex, 16);
+    if (isNaN(len)) break;
+    if (len === 0) {
+      lines.push('');
+      offset += 4;
+      continue;
+    }
+    if (len < 4 || offset + len > buf.length) break;
+    const payload = buf.subarray(offset + 4, offset + len).toString('utf8');
+    lines.push(payload);
+    offset += len;
+  }
+  return lines;
+}
+
+export async function gitUploadPack(body: Buffer): Promise<Buffer> {
+  const lines = parsePktLines(body);
+  const wants: string[] = [];
+  const haves: string[] = [];
+  let useSideband64k = false;
+  let useSideband = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('want ')) {
+      const parts = trimmed.split(/\s+/);
+      if (parts[1] && /^[0-9a-f]{40}$/i.test(parts[1])) {
+        wants.push(parts[1].toLowerCase());
+      }
+      if (line.includes('side-band-64k')) {
+        useSideband64k = true;
+      } else if (line.includes('side-band')) {
+        useSideband = true;
+      }
+    } else if (trimmed.startsWith('have ')) {
+      const parts = trimmed.split(/\s+/);
+      if (parts[1] && /^[0-9a-f]{40}$/i.test(parts[1])) {
+        haves.push(parts[1].toLowerCase());
+      }
+    }
+  }
+
+  if (wants.length === 0) {
+    throw new Error('git-upload-pack: no want lines in request');
+  }
+
+  const c = archiveCtx();
+  const cache: object = {};
+  const stopSet = new Set<string>();
+  const haveStack = [...haves];
+  while (haveStack.length > 0) {
+    const oid = haveStack.pop()!;
+    if (stopSet.has(oid)) continue;
+    stopSet.add(oid);
+    try {
+      const obj: any = await git.readObject({ fs: c.fs, gitdir: c.gitdir, cache, oid, format: 'parsed' });
+      if (obj && obj.type === 'commit') {
+        const commit = obj.object;
+        if (commit.tree) stopSet.add(commit.tree);
+        for (const p of commit.parent || []) haveStack.push(p);
+      }
+    } catch (e) {}
+  }
+
+  const reachable = new Set<string>();
+  const stack = [...wants];
+  while (stack.length > 0) {
+    const oid = stack.pop()!;
+    if (reachable.has(oid) || stopSet.has(oid)) continue;
+    reachable.add(oid);
+    let obj: any;
+    try {
+      obj = await git.readObject({ fs: c.fs, gitdir: c.gitdir, cache, oid, format: 'parsed' });
+    } catch (e) { continue; }
+    if (obj.format !== 'parsed') continue;
+    switch (obj.type) {
+      case 'commit': {
+        const commit = obj.object;
+        if (commit.tree) stack.push(commit.tree);
+        for (const p of commit.parent || []) stack.push(p);
+        break;
+      }
+      case 'tree': {
+        const tree = obj.object;
+        for (const entry of tree) {
+          if (entry.mode === '160000') continue;
+          stack.push(entry.oid);
+        }
+        break;
+      }
+      case 'tag': {
+        const tag = obj.object;
+        if (tag.object) stack.push(tag.object);
+        break;
+      }
+      case 'blob': break;
+    }
+  }
+
+  const pt = new PassThrough();
+  const packChunks: Buffer[] = [];
+  pt.on('data', (d: Buffer) => packChunks.push(Buffer.from(d)));
+  const streamDone = new Promise<Buffer>((resolve, reject) => {
+    pt.on('end', () => resolve(Buffer.concat(packChunks)));
+    pt.on('error', reject);
+  });
+
+  const packRes: any = await git.packObjects({
+    fs: c.fs, gitdir: c.gitdir, cache: c.cache,
+    oids: [...reachable], outputStream: pt, write: false,
+  });
+  // [PACK-FALLBACK-MUST-NOT-HANG-2026-09-14] This fallback awaits a PassThrough that only
+  // ends if the installed isomorphic-git honours the `outputStream` option passed above --
+  // and that option is NOT in its declared options type. Whether it is honoured CANNOT be
+  // settled from this repository: package.json asks for "^1.40.0", NO LOCKFILE IS COMMITTED,
+  // and Dockerfile:42 runs an unpinned `npm install`, so the resolved version is whatever the
+  // image build happens to fetch -- reading the copy in one container proves nothing about the
+  // copy in another. So rather than reason about a dependency this tree does not pin, BOUND
+  // THE WAIT. A version that never writes the stream now fails loudly and diagnosably instead
+  // of hanging a git fetch forever. `outputStream` is deliberately still passed: it is inert
+  // if ignored and correct if honoured, and removing it would be a bet in the other direction.
+  const PACK_STREAM_TIMEOUT_MS = 30000;
+  let packTimer: any = null;
+  const packfileBuffer: Buffer = (packRes && packRes.packfile)
+    ? Buffer.from(packRes.packfile)
+    : await Promise.race([
+        streamDone,
+        new Promise<Buffer>((_resolve, reject) => {
+          packTimer = setTimeout(() => reject(new Error(
+            'PACK_STREAM_TIMEOUT: packObjects returned no packfile and the outputStream stream '
+            + 'never ended within ' + PACK_STREAM_TIMEOUT_MS + 'ms. The installed isomorphic-git '
+            + 'most likely ignores the outputStream option. Nothing was sent to the client.')),
+            PACK_STREAM_TIMEOUT_MS);
+        }),
+      ]).finally(() => { if (packTimer) clearTimeout(packTimer); });
+
+  const responseChunks: Buffer[] = [];
+  responseChunks.push(pktLine('NAK\n'));
+  const isSideband = useSideband64k || useSideband;
+  if (isSideband) {
+    const maxChunk = useSideband64k ? 65515 : 995;
+    let offset = 0;
+    while (offset < packfileBuffer.length) {
+      const end = Math.min(offset + maxChunk, packfileBuffer.length);
+      const slice = packfileBuffer.subarray(offset, end);
+      const len = slice.length + 5;
+      const hex = len.toString(16).padStart(4, '0');
+      responseChunks.push(Buffer.concat([Buffer.from(hex, 'ascii'), Buffer.from([1]), slice]));
+      offset = end;
+    }
+    responseChunks.push(Buffer.from('0000'));
+  } else {
+    responseChunks.push(packfileBuffer);
+  }
+  return Buffer.concat(responseChunks);
 }

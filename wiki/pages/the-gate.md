@@ -91,10 +91,15 @@ installing account, and the application's own check is satisfied by a verified I
 on that list -- the control plane verifies the assertion IAP attaches against Google's
 published keys and its own audience (`PC_IAP_AUD`) on every request, and never trusts the
 bare identity header. There is no enrolment and no credential of the console's own to
-register. The one thing the console issues is a session cookie, `gate_session`, signed under
-`WA_SESSION_SECRET` and honoured for `WA_SESSION_MIN` minutes (`install.sh` writes 240, four
-hours); a missing or short secret means no session is ever issued or accepted, so the gate
-fails closed rather than open. An anonymous caller, who carries no IAP identity at all, gets
+register, and **the console issues nothing either** -- not even the session cookie this page
+used to credit it with. It VERIFIES one: `gate_session`, signed under `WA_SESSION_SECRET` and
+honoured for `WA_SESSION_MIN` minutes (`install.sh` writes 240, four hours); a missing or short
+secret means none is ever accepted, so the gate fails closed rather than open. But no route
+mints one, so no person is ever handed a session and there is no lesser tier of console user:
+everyone who gets in is on `WA_APPROVER_EMAILS`. The only minter in the tree is the dev
+evidence collector, which reads `WA_SESSION_SECRET` out of Secret Manager with IAP switched
+off -- so that secret is console access on its own, and belongs in the same drawer as the
+approver list. An anonymous caller, who carries no IAP identity at all, gets
 the 401 with the locked document served in place, at the URL asked for.
 
 ## What is refused at runtime: by default, nothing

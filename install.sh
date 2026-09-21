@@ -1006,8 +1006,8 @@ echo "  enabled (propagation is absorbed by retry below, not by a fixed sleep)"
 say "1b/10 occupancy and version skew -- what is already here, before anything is created"
 PC_SKEW_EXIT=30
 PC_MARK_SEC="pc-${PC_LP}install-marker"
-PC_RELEASE="3b1c9d4982e15145e4413d79fb575df395c2bd80"
-PC_VERSION="14.0"
+PC_RELEASE="d8f9332eb9baa69705143d949863ed79a80429fe"
+PC_VERSION="15.0"
 PC_ADOPT_UNMARKED="${PC_ADOPT_UNMARKED:-0}"
 # [SEC-GATEREMOVAL-V1] THE APPROVAL CLICK IS OFF BY DEFAULT, AND THIS IS THE LINE THAT
 # DECIDES IT FOR EVERY INSTALL. Until now PC_AUTO_APPROVE appeared NOWHERE in this
@@ -2086,6 +2086,33 @@ echo "    roles/artifactregistry.writer (so an agent on this install can build a
 # shipped prompt forbids exactly that; nothing but the prompt enforces it. If that trade is
 # unacceptable for a given deployment, remove this binding and deploy demo services by hand --
 # the rest of the install is unaffected.
+#
+# [SEC-RUNADMIN-BOUND-V1] THE DEFECT WAS NOT THE GRANT. IT WAS THAT THE GRANT WAS ONLY EVER
+# EXPLAINED IN THIS FILE, WHICH NOBODY INSTALLING READS, WHILE SECURITY.md COUNTED THE EXACT
+# OPPOSITE AS A LIVE DEFENCE. SECURITY.md's "active defenses" list said the executor "lacks
+# permissions to read or redeploy its parent". That is a MEASURED property of the fleet's own
+# prod project (deploy/LOCKOUT-CLASS.md, THE SECOND ARM, 2026-08-14) and this binding is
+# precisely what removes it on a fresh install -- so the shipped document described a ceiling
+# an adopter does not have. A control described more strongly than it is implemented is the
+# defect class this project treats as a security finding (CONTRIBUTING.md), so SECURITY.md is
+# corrected in the same change and the echo lines below say the same sentence in the
+# operator's terminal, at the moment the binding is made.
+#
+# WHY THE GRANT IS NOT NARROWED HERE, checked rather than assumed, so it is not re-derived a
+# third time:
+#   * a PER-SERVICE binding cannot carry run.services.create -- there is no resource to bind it
+#     to before the service exists -- and the control plane's shipped BUILD AND DEPLOY prompt
+#     (HAR_LAW_BUILD in control-plane/src/index.ts) deploys services whose names this installer
+#     never knows. Project scope is forced by a real requirement, not by laziness.
+#   * roles/run.developer IS NOT A FENCE. The describe recorded above puts run.services.update
+#     in BOTH roles, and update on this install's own control-plane service is the escalation
+#     anyone would be demoting to prevent. Demoting costs --allow-unauthenticated and buys
+#     nothing, which is the worst of both.
+#   * AN IAM CONDITION ON run.services.create IS THE ONE FENCE NOBODY HERE HAS MEASURED, and an
+#     unverified fence across the product's core loop is worse than a grant that is written
+#     down. It is recorded as EXP-RUN-CREATE-COND-1 in deploy/LOCKOUT-CLASS.md, with its
+#     procedure and its outcomes fixed in advance. RUN IT before proposing any narrowing of
+#     this line; do not narrow it on an argument.
 retry gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$GX_SA" \
   --role=roles/run.admin --condition=None >/dev/null \
   || die "could not grant $GX_SA roles/run.admin on $PROJECT. Without it an agent on this
@@ -2093,6 +2120,11 @@ install can build a container image and then cannot deploy it -- 'gcloud run dep
 PERMISSION_DENIED on run.services.get/create/list."
 echo "  $GX_SA -> roles/run.admin (deploy Cloud Run services, and make them public;"
 echo "    project-level because 'create' cannot be scoped to a service that does not exist)"
+echo "    READ THIS ONE RATHER THAN SKIMMING IT: the same binding lets the executor redeploy"
+echo "    or delete THIS INSTALL'S OWN control plane and executor services. Only the shipped"
+echo "    prompt forbids that; no IAM boundary does, and none can while agent-named services"
+echo "    must be creatable. See the 'IAM ceiling' item in SECURITY.md before you count one,"
+echo "    and EXP-RUN-CREATE-COND-1 in deploy/LOCKOUT-CLASS.md before you narrow this."
 # [SEC-EXEC-NO-DATASTORE-V1] THE DESTINATION THE NOTE ABOVE KEPT PROMISING, ARRIVED.
 # [SEC-GENV21-V1-V6-V7] granted the executor roles/datastore.user here and said withholding
 # it was still the right destination. It is withheld now, and this block REMOVES it rather
@@ -2357,7 +2389,36 @@ mk() {
   gcloud secrets describe "$1" --project "$PROJECT" >/dev/null 2>&1 && { echo "  $1 exists, left alone"; return; }
   rm -f "$HERE/.s.tmp"
   PC_MK_RC=0
-  openssl rand -base64 32 | tr -d '\n' > "$HERE/.s.tmp" || PC_MK_RC=$?
+  # [SEC-MKSECRET-PERMS-V1] THIS FILE HELD WA_SESSION_SECRET AT WHATEVER THE AMBIENT UMASK
+  # SAID, and on a stock shell that is 022 -- world-readable. The value that mints console
+  # sessions sat in the unpacked release directory at 0644, and the only thing that removed it
+  # was an unchecked python3 -c one-liner: it needs python3 on PATH, and it breaks outright if
+  # the unpack path contains an apostrophe, because that path is interpolated straight into a
+  # Python string literal. Both failures are SILENT -- the helper printed "created" either way,
+  # and the key stayed on disk for as long as the directory did.
+  #
+  # THREE CHANGES, EACH FOR A DIFFERENT FAILURE.
+  #   1. THE MODE IS DECIDED BEFORE THE BYTES LAND -- umask, not chmod. The redirection is what
+  #      CREATES the file, so a chmod can only run after openssl has already written into it;
+  #      to chmod first you must create the file first with `: >`, which adds a second command
+  #      status to a helper whose whole point is that every status is read. umask sets the mode
+  #      AT creation and needs nothing read back. It is scoped to a SUBSHELL because mk() runs
+  #      in the installer's top-level shell, and a bare umask 077 here would silently retighten
+  #      every file the remaining nine steps create. The `rm -f` on the line above is what makes
+  #      umask decisive: truncating an existing file keeps the OLD mode, creating one takes the
+  #      umask, and that rm guarantees this is a creation. Measured with umask 022 in the
+  #      calling shell: the file lands 0600, and the create still reads it fine.
+  #      The status capture is unchanged -- a subshell exits with the status of the last command
+  #      it ran, which is still this pipeline, so both checks below keep the meanings the
+  #      [SEC-MKSECRET-CHECK-V1] note above measured: tr masks a failing openssl and the
+  #      EMPTINESS check catches it; an uncreatable redirection gives 1 and the STATUS check does.
+  #   2. THE REMOVAL IS `rm -f`, below. It exists in every shell this script already requires, no
+  #      quote in $HERE can break it, and it is what the rest of this installer uses.
+  #   3. A REMOVAL THAT DID NOT REMOVE IS FATAL, below. "created" is never again printed over a
+  #      live session secret still sitting in the release directory.
+  # Nothing added here echoes, logs or redirects the value: both die messages name $1 (a secret
+  # NAME) and the temp path, never the bytes.
+  ( umask 077; openssl rand -base64 32 | tr -d '\n' > "$HERE/.s.tmp" ) || PC_MK_RC=$?
   [ "$PC_MK_RC" -eq 0 ] || die "could not generate the value for secret $1 (exit $PC_MK_RC).
 The generator writes to $HERE/.s.tmp, so the usual cause is that the directory this release was
 unpacked into is not writable, or the disk is full. Fix that and re-run: nothing was created."
@@ -2367,10 +2428,14 @@ empty one is not a weak secret, it is no secret at all -- and it would have been
 until somebody looked."
   PC_MK_RC=0
   retry gcloud secrets create "$1" --replication-policy=automatic --data-file="$HERE/.s.tmp" --project "$PROJECT" >/dev/null || PC_MK_RC=$?
-  python3 -c "import os;os.remove('$HERE/.s.tmp')"
+  rm -f "$HERE/.s.tmp"
   [ "$PC_MK_RC" -eq 0 ] || die "could not create the secret $1 (exit $PC_MK_RC).
 6/10 deploys both services with --set-secrets naming it, so leaving it absent produces a
 'console deploy failed' twenty minutes from now that blames the deploy for this."
+  [ ! -e "$HERE/.s.tmp" ] || die "the secret $1 was created, but $HERE/.s.tmp could NOT be removed.
+A copy of that secret's value is still in that file. It was written owner-only, so nobody else
+can read it yet, and this install stops here rather than print 'created' over a live key left on
+disk. Delete $HERE/.s.tmp by hand, then re-run: the secret exists and a re-run leaves it alone."
   echo "  $1 created"
 }
 mk "$PC_SEC_SESSION"
@@ -4047,8 +4112,10 @@ fi
 say "7/10 gated executor (private) "
 # [SEC-ASSERTION-NOT-YET-V1] Ships DISARMED on purpose. gate-exec demands a per-job
 # operator assertion when PC_REQUIRE_ASSERTION is 1 -- a facility of the executor's own
-# release -- and the control plane forwards none, so arming it refuses EVERY approval with
-# HTTP 428 -- a gate that can never run anything. Proven end-to-end 2026-08-05.
+# release -- and the control plane forwards none and mints no challenge, so arming it refuses
+# EVERY approval: a gate that can never run anything. Proven end-to-end 2026-08-05. As of
+# [SEC-ASSERT-UNIMPL-V1] that refusal is HTTP 501 NOT IMPLEMENTED naming the flag, not the
+# old 428 -- 428 invited the operator to go and fetch a credential that cannot be produced.
 #
 # [SEC-INSTALL-STEP7-V1] THIS COMMENT LIVES ABOVE THE COMMAND, NOT INSIDE IT. It used to sit
 # between two backslash-continued argument lines. The continuation joined the comment line,
@@ -4088,9 +4155,38 @@ say "7/10 gated executor (private) "
 # Firestore client and no Firestore role -- the exact residue that makes a future reader
 # think the dependency is still there and reach for it. The control plane and the MCP surface
 # still set it, because they still hold the read.
+#
+# [SEC-EXEC-GUARDRAILS-INSTALL-V1] PC_GUARDRAILS IS HANDED TO THE EXECUTOR HERE, AND IT WAS
+# NOT. 1b/10 reads the operator's PC_GUARDRAILS, defaults it to 0 and refuses anything that
+# is not 0 or 1 -- and then both deploys above fold it into their environment, the console
+# at PC_SURFACE=console and the MCP surface at PC_SURFACE=mcp. This line, the one that gives
+# gate-exec its environment, left it out. exec_server.py reads the variable at its
+# lockout-checker gate with a DEFAULT OF "0", and an unset variable is indistinguishable from
+# a deliberate 0, so the omission was silent: an operator who installed with
+# PC_GUARDRAILS=1 got brakes on the two services that only talk and NO brakes on the one
+# service that actually runs privileged commands. The lockout checker would match a
+# lockout-class body, journal it, and run it anyway -- on the single box that was explicitly
+# asked to refuse. A switch that reaches two of three services is worse than no switch,
+# because the operator believes it is on.
+#
+# MEASURED at this ref: PC_GUARDRAILS=$PC_GUARDRAILS appears in the console --set-env-vars
+# and the MCP --set-env-vars and in neither line of this step; gate-exec/exec_server.py
+# reads os.environ.get("PC_GUARDRAILS", "0") and nothing else in the tree writes that
+# variable onto $GX_SVC.
+#
+# IT IS PASSED THROUGH, NOT PINNED ON. The value stays $PC_GUARDRAILS, still 0 by default
+# from 1b/10. This makes the operator's existing switch deliverable to the third service; it
+# arms nothing. Writing a literal 1 here would start refusing the operator's own destructive
+# and lockout-class jobs on the very next revision, which is exactly the trade
+# [SEC-NOBRAKES-V1] declines to make on their behalf.
+#
+# POSITION IS DELIBERATE: it goes next to PC_REQUIRE_ASSERTION at the FRONT, not appended,
+# because PC_LOCKOUT_SERVICES must stay LAST -- its value carries spaces, and keeping the
+# only space-bearing value at the end of the comma-delimited string is the shape this line
+# has always had.
 retry gcloud run deploy "$GX_SVC" --source "$HERE/gate-exec" --region "$REGION" --project "$PROJECT" \
   --service-account "$GX_SA" --no-allow-unauthenticated --quiet \
-  --set-env-vars "PC_REQUIRE_ASSERTION=0,PC_RP_ID=$CP_HOST,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,PC_CREDS_SECRET=projects/$PROJECT/secrets/$PC_SEC_CREDS,PC_LOCKOUT_CP_SVC=$CP_SVC,PC_LOCKOUT_MC_SVC=$MC_SVC,PC_LOCKOUT_SERVICES=$CP_SVC $MC_SVC $GX_SVC" \
+  --set-env-vars "PC_REQUIRE_ASSERTION=0,PC_GUARDRAILS=$PC_GUARDRAILS,PC_RP_ID=$CP_HOST,PC_EXEC_BUCKET=$PC_EXEC_BUCKET,PC_CREDS_SECRET=projects/$PROJECT/secrets/$PC_SEC_CREDS,PC_LOCKOUT_CP_SVC=$CP_SVC,PC_LOCKOUT_MC_SVC=$MC_SVC,PC_LOCKOUT_SERVICES=$CP_SVC $MC_SVC $GX_SVC" \
   >/dev/null || die "gate-exec deploy failed"
 # [GCP-LOCKOUT-CHECK-V1] THE LOCKOUT CHECKER IS CONFIGURED HERE, FOR THE REASON THE
 # PARAGRAPH BELOW GIVES ABOUT PC_REQUIRE_ASSERTION. gate-exec/lockout_check.py runs

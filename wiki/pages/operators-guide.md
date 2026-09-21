@@ -420,8 +420,10 @@ add a box and you do not point `vm_*` tools at one -- those tools are not on thi
 
 Connect an MCP client (Claude is the reference cockpit, not a dependency; Grok and any
 client that can pass a session key as the `agent` argument also work) and mint a paste from
-the harness header. Work items, the memory graph and the journal stay as a shared list and
-shared memory a human or an agent reads and writes -- not a queue anything claims.
+the harness header. Work items stay as a shared list a human or an agent reads and writes --
+not a queue anything claims. THE JOURNAL AND THE FLEET MEMORY GRAPH ARE NOT SHARED THAT WAY:
+the journal is partitioned per strain, so an agent reads only its own entries, and fleet
+scope in the memory graph is a read-only seed -- agents write observations to their own scope.
 
 If an earlier release left a workstation instance in the project, `uninstall.sh` still
 deletes it and says so first, because deleting an instance destroys its boot disk.
@@ -636,8 +638,9 @@ is never reported as clean.
 ## Things not to do
 
 **Do not set `PC_REQUIRE_ASSERTION=1`.** It reads like hardening and it is not usable on this
-build: every approval would return 428 and you would have a console that can never approve
-anything, including the job that would turn it off. The installer writes `=0` for that reason.
+build: the path is not implemented, so every approval is refused **501 Not Implemented**
+naming the flag, and you would have a console that can never approve anything, including the
+job that would turn it off. The installer writes `=0` for that reason.
 The manual has the mechanism.
 
 **Do not delete `APPROVAL_REQUIRE_SIGNED` in order to tighten it.** A fresh install already
