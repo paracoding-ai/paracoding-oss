@@ -2,6 +2,12 @@
 
 **An MCP connector that gives a chat hands on your own Google Cloud project.**
 
+[![Paracoding architecture](docs/architecture.png)](docs/architecture.png)
+
+*The whole system at a glance: the console and MCP surfaces split off one image, the
+encrypted git store and data lake, where the keys live, and the models you can wire in.
+[Full-size diagram](docs/architecture.png) &middot; [release + architecture PDF](docs/release-architecture.pdf) &middot; [security review PDF](docs/security-review.pdf).*
+
 Point any MCP client at it -- Claude, Grok, anything that speaks the protocol -- and ask for
 software. It builds the container, deploys it to Cloud Run in your project, and reports back
 the HTTP code it got when it checked. Your project, your bill, your key, and the credential
@@ -387,10 +393,43 @@ format at that directory. `agent-plugin/mcp.json` ships with a placeholder URL b
 control plane's address does not exist until you install; the installer prints the exact
 value to substitute, and writes a resolved copy next to it that is not part of the manifest.
 
+## Gemini Enterprise, and multi-user by binding
+
+Point a **Gemini Enterprise custom connector** at the `/mcp` URL and a Gemini chat gets the
+full tool surface over OAuth 2.1 — the same tools every other client gets, against your
+project, your bill, your key. No model holds a Google credential: the connector presents its
+binding and the control plane resolves it to a role server-side. Consent is CSRF-protected,
+and a signed-in user's session is re-verified against Google *inside its lifetime* rather than
+trusted for seven days on one check.
+
+**Identity resolves from the connector binding** — `oauth_client_id` + `oauth_email` — mapped
+to a strain on the server, every turn. What that means for a team is worth stating plainly:
+
+- **By default, everyone shares one identity.** With the keyless flat-rate config
+  (`PC_NOCARD_EXEC=1`, `PC_NOCARD_ALL=1`) that makes a chat interface painless, every user you
+  add to the Gemini Enterprise application inherits the single Google account that consented to
+  the connector and executes as one bound strain carrying the full tool surface. Powerful,
+  shared, and right for a single operator — and `SECURITY.md` documents the exposure of that
+  posture in full rather than dressing it up.
+- **Multi-user is a binding, not a mode.** Bind each teammate's Google account (`oauth_email`)
+  to their own strain, and each person resolves to their own isolated identity — its own
+  memory, journal, permissions and `tool_classes`. A leaked account leaks one role, not the
+  workspace. That per-user binding is the designated way to open the door to a team;
+  restricting the shared strain is not.
+
+To build an agent for it: connect and consent, bind the account to a strain, arm the tools it
+needs with `load_skill` up front (in a GE chat each fleet tool is its own skill and only a
+couple are preloaded — phrase every call as one sentence with the tool bound to the verb),
+fence it with `tool_classes`, and let other agents find it through the **Agent2Agent** card
+every strain publishes at `/agents/{role}/.well-known/agent-card.json`.
+
 ## More
 
 - `FEATURES.md` — the full feature inventory
 - `wiki/` — architecture pages, including the five diagrams
 - `SECURITY.md` — the security policy and how to report
+- `docs/architecture.png` — the full architecture diagram (shown at the top)
+- `docs/release-architecture.pdf` — the release and architecture write-up, print-ready
+- `docs/security-review.pdf` — the v15.0 security review
 
 Apache-2.0. Keep the copyright headers and the NOTICE file.

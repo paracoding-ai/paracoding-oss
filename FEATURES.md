@@ -114,7 +114,38 @@ with `whoami` and nothing else, and that one tool returns an explanation of why 
 connection can do nothing, because a chat that does not know it is unprovisioned will report
 success on work it never did.
 
-## 6. Two MCP protocol eras on one endpoint
+## 6. Gemini Enterprise — multi-user by binding
+
+- **A Gemini chat drives your project.** Point a Gemini Enterprise custom connector at the
+  `/mcp` URL and the chat gets the full tool surface over OAuth 2.1 — the same ~59 tools every
+  other client gets, against your project, your bill, your key. No model holds a Google
+  credential; the connector presents its binding and the control plane resolves it to a role
+  server-side.
+- **Per-connector identity.** Identity resolves from the connector binding — `oauth_client_id`
+  + `oauth_email` — mapped to a strain on the server, every turn.
+- **CSRF-protected consent.** The OAuth consent that binds a Google account to the connector is
+  protected against cross-site request forgery.
+- **Durable sessions, re-verified in flight.** A GE user session is re-verified against Google
+  *inside its lifetime* rather than trusted for seven days on a single check at sign-in.
+- **One strain by default.** With the keyless flat-rate config (`PC_NOCARD_EXEC=1`,
+  `PC_NOCARD_ALL=1`) optimised for a chat interface like GE, every user added to the GE
+  application inherits the one Google account that consented, and executes as a single bound
+  strain carrying the full tool surface. Powerful, shared, and right for a single operator —
+  and `SECURITY.md` documents the exposure of that posture in full rather than dressing it up.
+- **Multi-user is a binding, not a mode.** Bind each teammate's Google account (`oauth_email`)
+  to their own strain and each resolves to an isolated identity — own memory, journal,
+  permissions and `tool_classes`. A leaked account leaks one role, not the workspace. That
+  per-user binding is the designated way to open the door to a team; restricting the shared
+  strain is not.
+- **Arm tools as skills.** In a GE chat each fleet tool registers as its *own* skill; GE
+  preloads a couple and the rest are armed with `load_skill`. Phrase a call as one sentence
+  with the tool bound to the verb (`use git_propose to land the change`) — naming a tool alone
+  does not arm it.
+- **Discoverable over A2A.** Every strain publishes an Agent2Agent card at
+  `/agents/{role}/.well-known/agent-card.json`, so a Gemini agent addresses a Paracoding strain
+  the standard, vendor-neutral way.
+
+## 7. Two MCP protocol eras on one endpoint
 
 The modern **`2026-07-28`** revision — stateless, per-request metadata — is served on the
 **same `POST /mcp`** that keeps answering the 2025-era `initialize` handshake. A client of
@@ -136,7 +167,7 @@ either generation connects to one URL and gets the protocol it speaks.
   dual-era client reads as "no modern endpoint here" and follows by probing the deprecated
   SSE transport — a failure whose diagnostic points at the wrong thing.
 
-## 7. It ships as an agent plugin
+## 8. It ships as an agent plugin
 
 An **Agent Plugins 1.0.0** package (`plugin.json`, `mcp.json`, a README) rides in the release,
 so agent clients other than this project's own console can reach the control plane.
@@ -151,7 +182,7 @@ so agent clients other than this project's own console can reach the control pla
 - **It declares no `headers` block, on purpose.** The credential is yours, it expires, and it
   does not belong in a file that ships in a release tarball. Mint a session key first.
 
-## 8. A git server that stores encrypted objects
+## 9. A git server that stores encrypted objects
 
 `pcgit` — a real git implementation over Firestore + Cloud Storage.
 
@@ -169,14 +200,14 @@ so agent clients other than this project's own console can reach the control pla
 - **`POST /git/blob`** takes raw bytes straight into the object store, so landing a large or
   binary file never means retyping it through a model.
 
-## 9. The vault
+## 10. The vault
 
 - **PCV1 envelope**, epoch-versioned, with a **post-quantum X-Wing KEM** master key in Cloud KMS.
 - Cleartext prefixes are explicit and minimal, so the bootstrap path can always be read.
 - A blob that isn't PCV1 is returned verbatim and never decoded to a string — a git object is
   a zlib stream and a UTF-8 round trip corrupts it silently.
 
-## 10. Authorised execution — the gate
+## 11. Authorised execution — the gate
 
 - Jobs are staged with a **command digest**, then executed by a **separate Cloud Run service**
   that holds no standing admin roles and, since `SEC-EXEC-NO-DATASTORE-V1`, **no database
@@ -204,7 +235,7 @@ so agent clients other than this project's own console can reach the control pla
   `PATH`, so an ordinary `set -uo pipefail` preamble is unaffected. Command substitution, pipes
   and `xargs` resolve through `PATH` too, so they are covered rather than evaded.
 
-## 11. Memory that survives the session
+## 12. Memory that survives the session
 
 - **Knowledge graph** with typed entities, relations, and observations carrying a confidence
   level — `measured` / `inferred` / `reported` — and evidence (job id, path, revision).
@@ -215,7 +246,7 @@ so agent clients other than this project's own console can reach the control pla
   *believed*, including claims later retracted).
 - `whoami` **delivers** the digest rather than telling an agent to go and read it.
 
-## 12. The console
+## 13. The console
 
 - **Flowhood chat** — talk to a strain, which can run tools and build things. Claude and
   Gemini, with a 16-round tool loop sized to fit the build-and-deploy flow it documents.
@@ -229,7 +260,7 @@ so agent clients other than this project's own console can reach the control pla
 - **Mushroom mode and regular mode** — gold or blue-green, and a lexicon that rewrites the
   product's own vocabulary.
 
-## 13. Release engineering that refuses
+## 14. Release engineering that refuses
 
 `gen.py` cuts the public release and is the largest pre-ship check in the system.
 
@@ -250,7 +281,7 @@ so agent clients other than this project's own console can reach the control pla
 - **Nothing operator-specific ships**: the release tree is checked clean of the operator's
   company, email, project and hostnames.
 
-## 14. Observability and spend control
+## 15. Observability and spend control
 
 - **Everything is journalled** with a named action — `stage_job`, `exec_claim`, `exec_start`,
   `exec_refused_replay`, `exec_refused_stale_approval`, `archive_served`, and more. "What
@@ -268,7 +299,7 @@ so agent clients other than this project's own console can reach the control pla
   history outlives Firestore's 120-day window — and the documented rule is create and seed it
   *before* enabling the TTL, or pre-deploy transcripts are destroyed with no copy.
 
-## 15. Deploy discipline
+## 16. Deploy discipline
 
 - **Source in the repository → build reads the repository → deploy ships the build.**
 - Deploy `--no-traffic --tag`, verify, then shift — **and pin traffic to the revision name
