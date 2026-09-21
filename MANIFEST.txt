@@ -1,19 +1,19 @@
-# release manifest v15.0
-# generated from source commit dab327434876580bdd0c36c7b0aa27865ccf5ad0
+# release manifest v15.1
+# generated from source commit 9412fbbabf00c74bd35da1050c446ffe91598a9c
 # regenerate with gen.py -- hand edits WILL drift and are not supported
 
 8facdfc4ec53e973      6181  CONTRIBUTING.md
 cbba0b9d06b0c1d2     20477  FEATURES.md
 9e42f0bf5c319e34     11351  LICENSE
 78cc7525c53ed734      4150  NOTICE
-0c7950ca5cd9c0c0     26701  README.md
-1d752abfd1b3f320     21995  SECURITY.md
-7fb6d110f300a7f6    419974  install.sh
+b1a6ac7d305c2323     26701  README.md
+fea47cd7122b50e9     21995  SECURITY.md
+af3b710a612afa7e    419974  install.sh
 a9692055a950925d     45532  uninstall.sh
-bdcedb03a31af42c     14689  upgrade.sh
+5a2f30a4b7915471     14689  upgrade.sh
 0970f6247abf524e      1303  agent-plugin/README.md
 e679d5eab4d80423       221  agent-plugin/mcp.json
-17d1299a7eadbabf       639  agent-plugin/plugin.json
+d0bf3ac963493af5       639  agent-plugin/plugin.json
 1e4cfede9711fa16     16929  control-plane/Dockerfile
 e6e9b6291ddb68de      5875  control-plane/blob-audit.mjs
 97a2bbee410eb982        20  control-plane/blob-baseline.json
