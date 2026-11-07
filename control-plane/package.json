@@ -4,26 +4,32 @@
   "description": "GCP/Firebase serverless board, journal, history, data-lake & MCP control plane",
   "main": "dist/index.js",
   "scripts": {
-    "build": "esbuild src/index.ts --platform=node --format=cjs --target=node20 --outfile=dist/index.js && esbuild src/evidence.ts --platform=node --format=cjs --target=node20 --outfile=dist/evidence.js && esbuild src/anchor.ts --platform=node --format=cjs --target=node20 --outfile=dist/anchor.js && esbuild src/anchor-run.ts --platform=node --format=cjs --target=node20 --outfile=dist/anchor-run.js && esbuild src/gittools.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/gittools.js --external:firebase-admin --external:@google-cloud/storage --external:isomorphic-git",
-    "start": "node dist/index.js"
+    "build": "esbuild src/index.ts --platform=node --format=cjs --target=node20 --outfile=dist/index.js && esbuild src/shared.ts --platform=node --format=cjs --target=node20 --outfile=dist/shared.js && esbuild src/evidence.ts --platform=node --format=cjs --target=node20 --outfile=dist/evidence.js && esbuild src/anchor.ts --platform=node --format=cjs --target=node20 --outfile=dist/anchor.js && esbuild src/anchor-run.ts --platform=node --format=cjs --target=node20 --outfile=dist/anchor-run.js && esbuild src/gittools.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/gittools.js --external:firebase-admin --external:@google-cloud/storage --external:isomorphic-git && esbuild src/ghtools.ts --platform=node --format=cjs --target=node20 --outfile=dist/ghtools.js && esbuild src/mcp2.ts --platform=node --format=cjs --target=node20 --outfile=dist/mcp2.js && esbuild src/mcp2026.ts --platform=node --format=cjs --target=node20 --outfile=dist/mcp2026.js && esbuild src/pg-fs.ts --platform=node --format=cjs --target=node20 --outfile=dist/pg-fs.js && esbuild src/oauth-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/oauth-pg.js && esbuild src/strains-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/strains-pg.js && esbuild src/journal-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/journal-pg.js && esbuild src/memory-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/memory-pg.js && esbuild src/work-items-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/work-items-pg.js && esbuild src/chat-history-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/chat-history-pg.js && esbuild src/kvdoc-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/kvdoc-pg.js && esbuild src/token-usage-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/token-usage-pg.js && esbuild src/vrp-pg.ts --platform=node --format=cjs --target=node20 --outfile=dist/vrp-pg.js && mkdir -p dist/mods && for f in src/mods/*.ts; do [ -e \"$f\" ] || break; esbuild \"$f\" --platform=node --format=cjs --target=node20 --outfile=\"dist/mods/$(basename \"$f\" .ts).js\"; done",
+    "start": "node dist/index.js",
+    "test": "PC_NO_LISTEN=1 tsx test/evidence.test.ts && tsx test/anchor.test.ts && tsx test/anchor-run.test.ts && tsx test/status-page.test.ts && tsx test/import-smoke.test.ts && for x in test/mods/*.test.ts; do [ -e \"$x\" ] || break; tsx \"$x\"; done",
+    "coverage": "c8 --reporter=text-summary --reporter=cobertura npm run test"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.7.0",
     "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@modelcontextprotocol/server": "2.0.0",
+    "diff": "^9.0.0",
     "express": "5.2.1",
     "firebase-admin": "14.2.0",
     "http-proxy": "1.18.1",
-    "uuid": "14.0.1",
-    "zod": "4.4.3",
     "isomorphic-git": "^1.40.0",
-    "diff": "^9.0.0"
+    "pg": "^8.13.1",
+    "uuid": "14.0.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/uuid": "^10.0.0",
     "@types/node": "^20.12.7",
+    "@types/uuid": "^10.0.0",
+    "c8": "^10.1.3",
+    "esbuild": "^0.21.5",
+    "tsx": "^4.19.2",
     "typescript": "^7.0.2"
   }
 }

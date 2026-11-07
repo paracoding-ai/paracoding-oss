@@ -1,0 +1,26 @@
+[Unit]
+Description=vmcp: check for and apply available security updates at every boot
+Documentation=man:unattended-upgrade(8)
+Wants=network-online.target
+After=network-online.target cloud-init.service
+# Don't race the daily apt jobs on the same boot
+After=apt-daily.service apt-daily-upgrade.service
+# [VMCP-PATCH-WAIT-PG-V1] GitLab's package preinst backs up its DB; at boot that DB was not up yet, so
+# every boot with a GitLab update queued failed (2026-10-30, 2026-10-31). Order after GitLab and wait
+# for its Postgres socket (max 5 min, then patch the rest anyway).
+After=gitlab-runsvdir.service
+
+[Service]
+Type=oneshot
+# Refresh package lists (ignore transient mirror failures), then apply ONLY the
+# security origins configured in /etc/apt/apt.conf.d/50unattended-upgrades.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /var/opt/gitlab/postgresql/.s.PGSQL.5432 ] && exit 0; sleep 5; done; echo "gitlab postgres not up after 5 min; patching the rest"; exit 0'
+ExecStart=-/usr/bin/apt-get update -o Acquire::Retries=3
+ExecStart=/usr/bin/unattended-upgrade -v
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

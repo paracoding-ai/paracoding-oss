@@ -918,7 +918,10 @@ export async function gitGrep(opts: GitGrepOptions): Promise<GitGrepResult> {
   let cacheMisses = 0;
   const startRead = (j: number) => {
     if (j < candidates.length && !reads[j] && !pcBlobCacheGet(String(candidates[j].oid || '')).hit) {
-      reads[j] = gitRead(c, { path: candidates[j].path, ref: ref }).catch(() => null);
+      reads[j] = Promise.race([
+        gitRead(c, { path: candidates[j].path, ref: ref }),
+        new Promise((res) => setTimeout(() => res(null), 15000))
+      ]).catch(() => null);
     }
   };
   for (let i = 0; i < candidates.length; i++) {

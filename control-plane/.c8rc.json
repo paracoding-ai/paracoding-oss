@@ -1,0 +1,11 @@
+{
+  "all": true,
+  "include": ["src/**/*.ts"],
+  "exclude": ["test/**", "**/*.test.ts", "src/**/*.d.ts"],
+  "reporter": ["text-summary", "cobertura"],
+  "check-coverage": true,
+  "lines": 3,
+  "statements": 3,
+  "branches": 0,
+  "functions": 0
+}

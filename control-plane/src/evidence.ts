@@ -20,7 +20,7 @@
 // THREE PROPERTIES, AND THE THIRD IS THE ONE THAT IS USUALLY MISSING.
 //
 //   1. The record is bound to the ARGUMENTS, not the tool name. request_digest is the RFC 8785
-//      JCS digest of the call's arguments. "fleet-recorder called git_push" is not evidence; "fleet-recorder
+//      JCS digest of the call's arguments. "fleet-x called git_push" is not evidence; "fleet-x
 //      called git_push with arguments that canonicalize to sha256:abcd" is.
 //
 //   2. Refusals are recorded, not just allows. A log containing only successes cannot distinguish
@@ -68,7 +68,7 @@ export interface Decision {
 
 // ---------------------------------------------------------------- RFC 8785 JCS
 //
-// Ported from ts/jcs.ts on repo/fleet-inspector, which was cross-checked against the Python
+// Ported from ts/jcs.ts on repo/fleet-nvidia, which was cross-checked against the Python
 // implementation over 2,400 real entries out of this fleet's own journal: 2400/2400 entry hashes
 // agreed and both produced RFC 6962 root sha256:f3d3cdedd98d1392. Reusing that exact code is the
 // point -- a second canonicalization that is merely "deterministic-looking" would make the digests

@@ -1,0 +1,7 @@
+[Unit]
+Description=Check VM idle every 10 min (scale-to-zero)
+[Timer]
+OnBootSec=25min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target

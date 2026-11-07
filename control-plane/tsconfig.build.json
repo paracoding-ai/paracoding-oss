@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noImplicitReturns": true,
+    "outDir": ".build",
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/**/*"]
+}

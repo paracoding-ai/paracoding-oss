@@ -1,0 +1,39 @@
+// vmcp: boot-time AUTO-PATCH policy (applied by vmcp-security-updates.service on every
+// boot + the daily apt timers). Rule: "if it's not a release upgrade, it's a bug-fix
+// patch -- install it every boot."
+//
+// Ubuntu: take -security AND -updates. Both are patch/bug-fix streams WITHIN the current
+// release; moving to a new Ubuntu release is do-release-upgrade, which unattended-upgrades
+// never performs. (-security comes from the stock 50unattended-upgrades Allowed-Origins.)
+//
+// Third-party (GitLab, GitLab Runner, Node.js, Chrome): the repo origins below are allowed,
+// and the SERIES CEILING is enforced by the version pins in
+// /etc/apt/preferences.d/fleet-series-pins -- so only patch/bug-fix versions auto-apply and
+// release (minor/major) upgrades stay a deliberate, manual step (bump the pin to move a series).
+//
+// Never auto-reboot: a kernel update on boot must not cause a reboot loop; the operator
+// reboots on their own schedule.
+
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-updates";
+};
+
+Unattended-Upgrade::Origins-Pattern {
+    "origin=packages.gitlab.com/gitlab/gitlab-ce";
+    "origin=packages.gitlab.com/runner/gitlab-runner";
+    "site=deb.nodesource.com";
+    "origin=Google LLC,suite=stable";
+    "origin=google-cloud-ops-agent-noble-all";
+};
+
+// Only claude-desktop stays manual: its versioning (2.x -> 3.x) exposes no patch/release
+// boundary to pin on, and a desktop-app major jump is a release upgrade.
+Unattended-Upgrade::Package-Blacklist {
+    "claude-desktop";
+};
+
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "false";
+Unattended-Upgrade::MinimalSteps "true";

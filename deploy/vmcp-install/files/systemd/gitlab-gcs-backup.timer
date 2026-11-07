@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily Paracoding VMCP GitLab backup to GCS
+[Timer]
+OnCalendar=*-*-* 08:17:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+[Install]
+WantedBy=timers.target

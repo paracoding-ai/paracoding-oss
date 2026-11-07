@@ -1,0 +1,5 @@
+[Unit]
+Description=Paracoding VMCP scale-to-zero idle-off check
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vmcp-idle-off.sh

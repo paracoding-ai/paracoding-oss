@@ -329,6 +329,38 @@ function completeResult(id: any, payload: any, deps: Mcp2026Deps): any {
   return { jsonrpc: '2.0', id: id, result: { resultType: 'complete', ...payload, _meta: meta } };
 }
 
+// ---- Picket guard hook (fail-open, flag-gated) --------------------------------
+// Wires the MCP tool-dispatch path to the local Picket action-firewall (OWASP LLM06,
+// excessive agency). The agent has already chosen a tool+args here; this gate decides
+// whether that action is safe to run.
+//   PICKET_GUARD = off (default; inert, no fetch, zero behavior change)
+//                | log (call guard + log verdict, NEVER blocks -- detection-only soak)
+//                | enforce (block on 'block', hold on 'needs-approval')
+// Fail-open by construction: any guard error, non-200, or >800ms => returns null => allow.
+// The guard is 127.0.0.1 only, so a down/slow guard can never wedge dispatch.
+const PICKET_MODE = (process.env.PICKET_GUARD || 'off').toLowerCase();
+const PICKET_URL = (process.env.PICKET_URL || 'http://127.0.0.1:8087').replace(/\/$/, '');
+async function picketAction(name: string, args: any): Promise<{ verdict: string; reasons: string[] } | null> {
+  if (PICKET_MODE === 'off') return null;
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 800);
+    let r: any;
+    try {
+      r = await fetch(PICKET_URL + '/guard-action', {
+        method: 'POST', signal: ac.signal,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: name, args: args || {} })
+      });
+    } finally { clearTimeout(timer); }
+    if (!r || !r.ok) return null;
+    const j: any = await r.json();
+    return { verdict: String(j && j.verdict ? j.verdict : 'allow'), reasons: Array.isArray(j && j.reasons) ? j.reasons : [] };
+  } catch (_e) {
+    return null;   // fail-open: guard unreachable/slow => allow
+  }
+}
+
 // ------------------------------------------------------------------ the handler
 
 /**
@@ -511,6 +543,22 @@ export async function mcp2026Handle(input: Mcp2026Input, deps: Mcp2026Deps): Pro
     // the client omits the header but puts the value in the body.
     const headerErr = validateParamHeaders(headers, tool.inputSchema, args);
     if (headerErr) return errResponse(400, reqId, E_HEADER_MISMATCH, headerErr);
+
+    // --- Picket action-firewall (LLM06). Flag-gated + fail-open; see picketAction() above.
+    const picket = await picketAction(name, args);
+    if (picket && picket.verdict !== 'allow') {
+      try { console.warn('[picket]', PICKET_MODE, 'tool=' + name, 'verdict=' + picket.verdict, 'reasons=' + picket.reasons.join(',')); } catch (_e) { /* logging must never throw */ }
+      if (PICKET_MODE === 'enforce') {
+        const msg = picket.verdict === 'needs-approval'
+          ? 'Picket held this action for human approval (irreversible / high blast-radius): ' + picket.reasons.join('; ')
+          : 'Picket blocked this action: ' + picket.reasons.join('; ');
+        return {
+          status: 200,
+          headers: { ...JSON_HEADERS },
+          body: JSON.stringify(completeResult(reqId, { content: [{ type: 'text', text: msg }], isError: true }, deps))
+        };
+      }
+    }
 
     let out: any;
     try {

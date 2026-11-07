@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paracoding — System Status</title>
+<style>
+ :root{--g1:#0a0e14;--g2:#0b1017;--g3:#0d1420;--ink:#f4f6f8;--dim:rgba(255,255,255,.58);--glass:rgba(255,255,255,.05);--line:rgba(255,255,255,.12);--acc:#7aa2ff}
+ *{box-sizing:border-box} html,body{height:100%;margin:0}
+ body{font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);background:linear-gradient(135deg,var(--g1),var(--g2) 52%,var(--g3)) fixed;padding:24px}
+ .wrap{max-width:860px;margin:0 auto}
+ h1{font-size:1.35rem;margin:.1rem 0}
+ .sub{color:var(--dim);font-size:.82rem}
+ .hdr{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:1rem}
+ .rf{font-size:.8rem;color:var(--dim);cursor:pointer;border:1px solid var(--line);background:var(--glass);border-radius:8px;padding:.35rem .7rem}
+ .banner{display:flex;align-items:center;gap:.6rem;padding:.8rem 1rem;border-radius:12px;background:var(--glass);border:1px solid var(--line);margin-bottom:1rem;font-weight:700}
+ .grp{margin:1.1rem 0 .3rem;font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+ .row{display:flex;align-items:center;gap:.7rem;padding:.55rem .9rem;border-radius:10px;background:var(--glass);border:1px solid var(--line);margin:.28rem 0}
+ .dot{width:12px;height:12px;border-radius:50%;flex:none;box-shadow:0 0 8px currentColor}
+ .up{color:#3ad17a;background:#3ad17a}.degraded{color:#ffcf5a;background:#ffcf5a}.down{color:#ff5b5b;background:#ff5b5b}.unknown{color:#8899aa;background:#8899aa}
+ .nm{font-weight:600}.dt{color:var(--dim);font-size:.82rem;margin-left:auto;text-align:right;max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .tiles{display:flex;gap:.6rem;margin:.3rem 0}
+ .tile{flex:1;background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:.7rem .9rem}
+ .tl{font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)} .tv{font-size:1.4rem;font-weight:800;margin-top:.15rem}
+ .graph{display:flex;align-items:flex-end;gap:2px;height:66px;padding:.5rem .2rem .2rem;background:var(--glass);border:1px solid var(--line);border-radius:10px;margin:.3rem 0}
+ .bar{flex:1;min-width:2px;background:linear-gradient(180deg,var(--acc),#3ad17a);border-radius:2px 2px 0 0;opacity:.85}
+ .bar:hover{opacity:1}
+ .svcs{background:var(--glass);border:1px solid var(--line);border-radius:10px;margin:.3rem 0;overflow:hidden}
+ .srow{display:flex;justify-content:space-between;gap:1rem;padding:.4rem .9rem;border-top:1px solid var(--line);font-size:.86rem}
+ .srow:first-child{border-top:0} .srow span:last-child{color:var(--dim);white-space:nowrap}
+ .note{color:var(--dim);font-size:.76rem;margin:.3rem 0}
+ .grp2{margin:1.3rem 0 .4rem;font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+ .gcard{background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:.6rem .75rem;margin:.4rem 0}
+ .ghdr{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:.35rem}
+ .gtl{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:700}
+ .rng{display:flex;gap:.2rem}
+ .rb{font-size:.68rem;color:var(--dim);cursor:pointer;border:1px solid var(--line);background:transparent;border-radius:6px;padding:.12rem .4rem}
+ .rb.on{color:#0a0e14;background:var(--acc);border-color:var(--acc);font-weight:700}
+ .gbox{height:118px}
+ .glg{display:flex;flex-wrap:wrap;gap:.1rem .9rem;margin-top:.35rem;font-size:.72rem;color:var(--dim)}
+ .glg span{display:inline-flex;align-items:center;gap:.3rem}
+ .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+ .mrow{display:grid;grid-template-columns:1fr 1fr;gap:.6rem} .mrow>.gcard{min-width:0;margin:0}
+ .rowgrid{display:grid;grid-template-columns:1fr 1fr;gap:.28rem .6rem;margin:.28rem 0} .rowgrid>.row{margin:0}
+ .pktbl{width:100%;border-collapse:collapse;font-size:.76rem;margin-top:.4rem} .pktbl th{text-align:left;color:var(--dim);font-weight:600;padding:.22rem .45rem;border-bottom:1px solid var(--line);text-transform:uppercase;letter-spacing:.04em;font-size:.66rem} .pktbl td{padding:.22rem .45rem;border-bottom:1px solid var(--line)} .pkstat{font-size:1.02rem;margin:.25rem 0 .1rem} .pkstat b{font-weight:800}
+ @media(max-width:640px){.mrow,.rowgrid{grid-template-columns:1fr}}
+</style></head>
+<body><div class="wrap">
+ <div class="hdr"><div><h1>&#127812; System Status</h1><div class="sub" id="sub">loading&#8230;</div></div><div style="display:flex;gap:.5rem"><button class="rf" id="bounceBtn" onclick="bounceMcp()" title="Restart the control-plane to re-register /mcp so wedged MCP connector chats re-dial. ~7s blip for flowhood too.">&#8635; Bounce MCP</button><button class="rf" onclick="load();loadBilling()">&#8635; Refresh</button></div></div>
+ <div class="banner" id="banner"><span class="dot unknown"></span><span id="btxt">Checking&#8230;</span></div>
+ <div id="metrics"></div>
+ <div id="billing"></div>
+ <div id="list"></div>
+ <div id="picket"></div>
+ <div id="backup"></div>
+</div>
+<script>
+ var RANK={up:0,unknown:1,degraded:2,down:3};
+ function el(cls,txt){ var e=document.createElement('div'); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
+ function money(n){ return (n==null)?'—':('$'+Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})); }
+ function toks(n){ n=Number(n)||0; return n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'k':String(n); }
+ async function load(){
+   try{ var r=await fetch('/api/status',{cache:'no-store'});
+     if(!r.ok){ document.getElementById('sub').textContent='status unavailable (HTTP '+r.status+')'; return; }
+     render(await r.json());
+   }catch(e){ document.getElementById('sub').textContent='status unavailable'; }
+ }
+ function render(d){
+   var checks=d.checks||[]; var list=document.getElementById('list'); list.innerHTML='';
+   var groups={}; checks.forEach(function(c){ (groups[c.group]=groups[c.group]||[]).push(c); });
+   var worst='up'; checks.forEach(function(c){ if((RANK[c.status]||0)>(RANK[worst]||0)) worst=c.status; });
+   Object.keys(groups).forEach(function(g){
+     list.appendChild(el('grp',g));
+     var rg=el('rowgrid');
+     groups[g].forEach(function(c){
+       var row=el('row');
+       var dot=el('dot '+(c.status||'unknown'));
+       var nm=el('nm'); nm.textContent=c.name;
+       var dt=el('dt'); dt.textContent=c.detail||c.status||'';
+       row.appendChild(dot); row.appendChild(nm); row.appendChild(dt); rg.appendChild(row);
+     });
+     list.appendChild(rg);
+   });
+   var up=checks.filter(function(c){return c.status==='up'}).length;
+   document.getElementById('banner').firstChild.className='dot '+worst;
+   document.getElementById('btxt').textContent = worst==='up' ? ('All systems operational — '+up+'/'+checks.length+' green') : (up+'/'+checks.length+' green · '+(checks.length-up)+' need attention');
+   document.getElementById('sub').textContent='Updated '+new Date(d.generated_at||Date.now()).toLocaleTimeString()+' · auto-refresh 20s';
+ }
+ async function loadBilling(){
+   try{ var r=await fetch('/api/status/billing',{cache:'no-store'}); if(!r.ok) return; renderBilling(await r.json()); }catch(e){}
+ }
+ function mkTiles(spec){ var t=el('tiles'); spec.forEach(function(x){ var c=el('tile'); c.appendChild(el('tl',x[0])); c.appendChild(el('tv',money(x[1]))); t.appendChild(c); }); return t; }
+ function renderBilling(d){
+   var b=document.getElementById('billing'); b.innerHTML=''; var g=d.gcp||{}; var l=d.llm||{}; var series=g.series||[];
+   b.appendChild(el('grp','Billing — GCP spend (UTC)'));
+   if(g.stale){
+     var daysOld=g.last_date?Math.round((Date.now()-new Date(g.last_date+'T00:00:00Z').getTime())/864e5):'?';
+     var w=el('note','⚠ GCP billing export is stale — last data '+(g.last_date||'?')+' ('+daysOld+'d ago). Figures are through that date; re-enable the BigQuery billing export to resume live GCP cost.'); w.style.color='#ffcf5a'; b.appendChild(w);
+     var lastDay=series.length?series[series.length-1].c:0;
+     var last7=series.slice(-7).reduce(function(a,x){return a+x.c;},0);
+     var total=series.reduce(function(a,x){return a+x.c;},0);
+     b.appendChild(mkTiles([['Last data-day',lastDay],['Last 7 data-days',last7],['30-day total',total]]));
+   } else {
+     b.appendChild(mkTiles([['Today',g.day],['This week',g.week],['This month',g.month]]));
+   }
+   if(g.note) b.appendChild(el('note',g.note));
+   if(series.length){
+     var max=Math.max.apply(null,series.map(function(x){return x.c;}))||1;
+     var gr=el('graph'); series.forEach(function(x){ var bar=el('bar'); bar.style.height=Math.max(2,Math.round(x.c/max*58))+'px'; bar.title=x.d+': '+money(x.c); gr.appendChild(bar); });
+     b.appendChild(gr); b.appendChild(el('note','Daily GCP spend, last '+series.length+' days'));
+   }
+   if(g.services&&g.services.length){
+     var sv=el('svcs'); g.services.forEach(function(s){ var row=el('srow'); row.appendChild(el(null,s.s)); row.appendChild(el(null,money(s.c))); sv.appendChild(row); }); b.appendChild(sv);
+   }
+ }
+ async function bounceMcp(){
+   if(!confirm('Bounce the MCP endpoint?\n\nThis restarts the control-plane (~7s) so wedged connector chats re-dial. Flowhood chats blip briefly.')) return;
+   var b=document.getElementById('bounceBtn'); if(b){ b.disabled=true; b.textContent='bouncing…'; }
+   try{ await fetch('/api/vm/bounce-mcp',{method:'POST',cache:'no-store'}); }catch(e){}
+   setTimeout(function(){ if(b){ b.disabled=false; b.innerHTML='&#8635; Bounce MCP'; } location.reload(); }, 12000);
+ }
+
+ function fmtBytes(n){ n=Number(n)||0; return n>=1e9?(n/1e9).toFixed(2)+' GB':n>=1e6?(n/1e6).toFixed(1)+' MB':n>=1e3?(n/1e3).toFixed(0)+' KB':n+' B'; }
+ async function loadBackups(){ var d={}; try{ var r=await fetch('/api/backup/list',{cache:'no-store',credentials:'same-origin'}); if(r.ok) d=await r.json(); }catch(e){} renderBackups(d); }
+ function renderBackups(d){
+   var b=document.getElementById('backup'); if(!b) return; b.innerHTML='';
+   b.appendChild(el('grp','Backup & Restore — full system in one file'));
+   var act=el('row');
+   var sel=document.createElement('select'); sel.id='bkScope'; sel.className='rf'; sel.innerHTML='<option value="full">full (DB + config + data-lake)</option><option value="core">core (DB + config)</option>';
+   var mk=document.createElement('button'); mk.className='rf'; mk.innerHTML='&#128190; Back up now'; mk.onclick=createBackup;
+   var vf=document.createElement('button'); vf.className='rf'; vf.textContent='Verify latest'; vf.onclick=verifyBackup;
+   act.appendChild(sel); act.appendChild(mk); act.appendChild(vf); b.appendChild(act);
+   var dl=d.download;
+   if(dl&&dl.url){
+     var row=el('row'); var nm=el('nm'); nm.innerHTML='&#11015; Latest backup ('+(dl.scope||'')+', '+fmtBytes(dl.size_bytes)+')';
+     var a=document.createElement('a'); a.href=dl.url; a.className='rf'; a.textContent='Download'; a.style.marginLeft='auto'; a.setAttribute('download','');
+     row.appendChild(nm); row.appendChild(a); b.appendChild(row);
+     b.appendChild(el('note','Plain .tar.gz — open it with any archive tool (double-click, 7-Zip, Finder). Signed URL ~24h · '+dl.object));
+     b.appendChild(el('note','Restore onto a fresh OSS install: clone the repo, then  ops/backup/fleet-restore.sh --archive <file|gs://…> --db fleet --config --lake --confirm'));
+   } else if(dl&&dl.error){ b.appendChild(el('note','download URL error: '+dl.error)); }
+   else { b.appendChild(el('note','No completed backup yet — click Back up now. full includes the ~5GB data-lake and takes a few minutes.')); }
+ }
+ async function createBackup(){
+   var sc=(document.getElementById('bkScope')||{}).value||'full';
+   if(!confirm('Create a '+sc+' backup now? Plain .tar.gz you can open with any archive tool — no key needed.')) return;
+   try{ var r=await fetch('/api/backup/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({scope:sc})}); var j=await r.json();
+     if(!j.ok){ alert('backup error: '+(j.error||'?')); return; }
+     alert('Backup started ('+j.id+', '+j.scope+'). Runs in the background — the download link appears here when it finishes.'); pollBackups(0);
+   }catch(e){ alert('failed to start backup'); }
+ }
+ function pollBackups(n){ loadBackups(); if(n<24) setTimeout(function(){ pollBackups(n+1); }, 15000); }
+ async function verifyBackup(){
+   try{ var r=await fetch('/api/backup/list',{cache:'no-store'}); var j=await r.json(); var obj=j.download&&j.download.object;
+     if(!obj){ alert('no completed backup to verify'); return; }
+ 
+     alert('Verifying… restores the DB dump into a throwaway database and reports row counts. This can take a minute.');
+     var vr=await fetch('/api/backup/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({object:obj})}); var vj=await vr.json();
+     alert(vj.ok?('VERIFY OK — the backup restores.\n\nrestored row counts:\n'+JSON.stringify(vj.restored_counts,null,1)):('verify failed: '+(vj.error||'?')));
+   }catch(e){ alert('verify failed'); }
+ }
+
+
+ // ---- live graphs (CPU + edge/LB traffic) ----
+ var SM_W=3600;
+ var SM_RANGES=[['1h',3600],['6h',21600],['24h',86400],['7d',604800]];
+ function setRange(w){ SM_W=w; loadMetrics(); }
+ function rngBtns(){ return '<span class="rng">'+SM_RANGES.map(function(r){return '<button class="rb'+(r[1]===SM_W?' on':'')+'" onclick="setRange('+r[1]+')">'+r[0]+'</button>';}).join('')+'</span>'; }
+ function fmtRate(n){ n=Number(n)||0; return n>=1e9?(n/1e9).toFixed(2)+' GB/s':n>=1e6?(n/1e6).toFixed(2)+' MB/s':n>=1e3?(n/1e3).toFixed(0)+' KB/s':n.toFixed(0)+' B/s'; }
+ function sumSeries(obj){ var m={}; Object.keys(obj||{}).forEach(function(k){ (obj[k]||[]).forEach(function(p){ m[p.t]=(m[p.t]||0)+p.v; }); }); return Object.keys(m).sort(function(a,b){return a-b;}).map(function(t){return {t:+t,v:m[t]};}); }
+ function W(){ return 1000; } var GH=108;
+ function pathLine(series,max,color,fill){ if(!series||!series.length) return ''; var n=series.length,w=W(); var pts=series.map(function(p,i){ var x=(i/Math.max(1,n-1))*w; var y=GH-Math.min(1,(p.v/(max||1)))*GH; return x.toFixed(1)+','+y.toFixed(1); }); var out=''; if(fill){ out+='<polygon fill="'+color+'" opacity="0.16" points="0,'+GH+' '+pts.join(' ')+' '+w+','+GH+'"/>'; } out+='<polyline fill="none" stroke="'+color+'" stroke-width="1.6" points="'+pts.join(' ')+'"/>'; return out; }
+ function svg(inner){ return '<svg viewBox="0 0 '+W()+' '+GH+'" preserveAspectRatio="none" style="width:100%;height:'+GH+'px;display:block">'+inner+'</svg>'; }
+ function maxOf(){ var m=0; for(var i=0;i<arguments.length;i++){ (arguments[i]||[]).forEach(function(p){ if(p.v>m)m=p.v; }); } return m||1; }
+ function lgItem(c,t){ return '<span><span class="sw" style="background:'+c+'"></span>'+t+'</span>'; }
+ function gcard(title,svgHtml,legend,sub){ var c=el('gcard'); var h=el('ghdr'); h.innerHTML='<span class="gtl">'+title+'</span>'+rngBtns(); c.appendChild(h); var bx=el('gbox'); bx.innerHTML=svgHtml; c.appendChild(bx); if(legend){ var lg=el('glg'); lg.innerHTML=legend; c.appendChild(lg); } if(sub) c.appendChild(el('note',sub)); return c; }
+ // CPU stacked-by-state to 100%
+ function cpuSvg(cpu){ var b=(cpu&&cpu.buckets)||[]; var n=b.length; if(!n) return svg(''); var states=[['user','#3ad17a'],['system','#ffcf5a'],['iowait','#ff5b5b'],['other','#a07aff']]; var w=W(); var cum=[]; for(var i=0;i<n;i++)cum[i]=0; var out=''; states.forEach(function(st){ var top=[],bot=[]; for(var i=0;i<n;i++){ var x=(i/Math.max(1,n-1))*w; var bk=b[i]; var below=cum[i]; var val=bk?(bk[st[0]]||0):0; var above=below+val; bot.push(x.toFixed(1)+','+(GH-below/100*GH).toFixed(1)); top.push(x.toFixed(1)+','+(GH-above/100*GH).toFixed(1)); cum[i]=above; } out+='<polygon fill="'+st[1]+'" opacity="0.88" points="'+top.join(' ')+' '+bot.reverse().join(' ')+'"/>'; }); return svg(out); }
+ function memSvg(mem){ var b=(mem&&mem.buckets)||[]; var n=b.length; if(!n) return svg(''); var states=[['used','#3ad17a'],['cached','#7aa2ff'],['buffered','#ffcf5a'],['free','#5a6b85']]; var w=W(); var cum=[]; for(var i=0;i<n;i++)cum[i]=0; var out=''; states.forEach(function(st){ var top=[],bot=[]; for(var i=0;i<n;i++){ var x=(i/Math.max(1,n-1))*w; var bk=b[i]; var below=cum[i]; var val=bk?(bk[st[0]]||0):0; var above=below+val; bot.push(x.toFixed(1)+','+(GH-below/100*GH).toFixed(1)); top.push(x.toFixed(1)+','+(GH-above/100*GH).toFixed(1)); cum[i]=above; } out+='<polygon fill="'+st[1]+'" opacity="0.88" points="'+top.join(' ')+' '+bot.reverse().join(' ')+'"/>'; }); return svg(out); }
+ function mrtgSvg(e){ var m=maxOf(e.in,e.out); return svg(pathLine(e.in,m,'#3ad17a',true)+pathLine(e.out,m,'#7aa2ff',false)); }
+ function netSvg(net){ var ins=sumSeries(net&&net.bytes_in), outs=sumSeries(net&&net.bytes_out); var m=maxOf(ins,outs); return svg(pathLine(ins,m,'#36c2b4',true)+pathLine(outs,m,'#7aa2ff',false)); }
+ function renderMetrics(d){ var root=document.getElementById('metrics'); if(!root) return; root.innerHTML=''; if(!d||!d.ok){ root.appendChild(el('grp2','Traffic & host')); root.appendChild(el('note','metrics unavailable')); return; }
+   root.appendChild(el('grp2','Edge traffic — in / out, per front door'));
+   var mrow=el('mrow'); (d.edge||[]).forEach(function(e){ var cur=(e.out&&e.out.length)?e.out[e.out.length-1].v:0, curi=(e.in&&e.in.length)?e.in[e.in.length-1].v:0; var nm=e.service.replace('vmcp-mcp','mcp edge').replace('vmcp-ui','flowhood edge'); var idle=(!e.in.length&&!e.out.length); mrow.appendChild(gcard('MRTG · '+nm, mrtgSvg(e), lgItem('#3ad17a','in '+fmtRate(curi))+lgItem('#7aa2ff','out '+fmtRate(cur)), idle?'idle — no traffic through this front door yet':'')); }); root.appendChild(mrow);
+   root.appendChild(el('grp2','Host — CPU & memory'));
+   var cl=lgItem('#3ad17a','User')+lgItem('#ffcf5a','System')+lgItem('#ff5b5b','I/O wait')+lgItem('#a07aff','Other'); var busy=100; var lastc=(d.cpu&&d.cpu.buckets||[]).filter(Boolean).pop(); if(lastc) busy=Math.round(100-(lastc.idle||0));
+   var ml=lgItem('#3ad17a','Used')+lgItem('#7aa2ff','Cached')+lgItem('#ffcf5a','Buffers')+lgItem('#5a6b85','Free'); var mused=0; var lastm=(d.mem&&d.mem.buckets||[]).filter(Boolean).pop(); if(lastm) mused=Math.round(lastm.used||0);
+   var hrow=el('mrow');
+   hrow.appendChild(gcard('CPU utilization — stacked by state', cpuSvg(d.cpu), cl, 'Per-vCPU-averaged across '+((d.cpu&&d.cpu.vcpu)||'?')+' vCPU. Latest busy ~'+busy+'%. '+(SM_W/3600>=24?(SM_W/86400+'d'):(SM_W/3600+'h'))+' window.'));
+   hrow.appendChild(gcard('Memory — stacked by state', memSvg(d.mem), ml, ((d.mem&&d.mem.totalGb)||'?')+' GB total. Latest used ~'+mused+'%. '+(SM_W/3600>=24?(SM_W/86400+'d'):(SM_W/3600+'h'))+' window.'));
+   root.appendChild(hrow);
+ }
+ function pkEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
+ function pkAgo(iso){ if(!iso) return '?'; var d=(Date.now()-new Date(iso).getTime())/86400000; if(isNaN(d)) return '?'; return d<1?(Math.max(1,Math.round(d*24))+'h ago'):(Math.round(d)+'d ago'); }
+ function renderPicket(d){ var root=document.getElementById('picket'); if(!root) return; root.innerHTML=''; if(!d||!d.ok) return;
+   root.appendChild(el('grp2','Picket \u2014 edge auto-ban'));
+   var c=d.config||{}, s=d.sigs||{}, b=d.bans||{}; var card=el('gcard');
+   var cfg='mode '+(c.mode||'?')+' \u00b7 '+c.strikes+' strikes / '+c.window_sec+'s \u00b7 ban '+c.ban_ttl_sec+'s \u00b7 permanent \u00d7'+c.permanent_after+' \u00b7 path-scan '+c.pathscan_distinct;
+   var sig='signatures: <b>'+(s.rules||0)+'</b> rules \u00b7 '+pkEsc(s.source||'?')+' \u00b7 updated '+pkAgo(s.updated)+' \u00b7 sha '+pkEsc(s.sha||'?');
+   var html='<div class="note" style="margin:.1rem 0 .25rem">'+cfg+'</div><div class="note" style="margin:.1rem 0 .3rem">'+sig+'</div>';
+   html+='<div class="pkstat"><b>'+(b.active||0)+'</b> banned \u00b7 '+(b.permanent||0)+' permanent \u00b7 '+(b.strikes_total||0)+' strikes total</div>';
+   if(b.recent&&b.recent.length){ var rows=b.recent.map(function(r){ return '<tr><td style="font-family:ui-monospace,monospace">'+pkEsc(r.cid)+'</td><td>'+(r.ban_count||0)+(r.permanent?' \u26d4':'')+'</td><td>'+pkEsc(r.reason||'')+'</td><td>'+pkAgo(r.updated)+'</td></tr>'; }).join('');
+     html+='<table class="pktbl"><thead><tr><th>IP</th><th>strikes</th><th>reason</th><th>last</th></tr></thead><tbody>'+rows+'</tbody></table>'; }
+   else { html+='<div class="note">no active bans \u2014 all quiet</div>'; }
+   card.innerHTML=html; root.appendChild(card); }
+ async function loadPicket(){ var d={}; try{ var r=await fetch('/api/status/picket',{cache:'no-store'}); if(r.ok) d=await r.json(); }catch(e){} renderPicket(d); }
+ async function loadMetrics(){ var d={}; try{ var r=await fetch('/api/status/metrics?w='+SM_W,{cache:'no-store'}); if(r.ok) d=await r.json(); }catch(e){} renderMetrics(d); }
+
+ load(); setInterval(load,20000); loadBilling(); setInterval(loadBilling,300000); loadBackups(); setInterval(loadBackups,60000); loadMetrics(); setInterval(loadMetrics,60000);
+ loadPicket(); setInterval(loadPicket,30000);
+
+</script>
+</body></html>

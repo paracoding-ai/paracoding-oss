@@ -1,0 +1,29 @@
+# [FLEET-AUTO-PATCH] Cap each third-party package at its CURRENT release series so
+# unattended-upgrades applies patch/bug-fix updates every boot but never a release
+# (minor/major) upgrade. Bump a block deliberately to move that series forward.
+# Priority 990 = "prefer this series, never downgrade".
+
+# GitLab CE/EE: monthly MINOR releases (19.5 -> 19.6) are releases; 19.5.z are patches.
+Package: gitlab-ce gitlab-ee
+Pin: version 19.5.*
+Pin-Priority: 990
+
+# GitLab Runner + helper images: MINOR is the release line (19.4 -> 19.5); 19.4.z patches.
+Package: gitlab-runner gitlab-runner-helper-images
+Pin: version 19.4.*
+Pin-Priority: 990
+
+# Node.js: the MAJOR is the release line (24 -> 25); 24.x are patches/minors within it.
+Package: nodejs
+Pin: version 24.*
+Pin-Priority: 990
+
+# Google Chrome: the MAJOR is the release line (155 -> 156); 155.0.x.y are patches.
+Package: google-chrome-stable
+Pin: version 155.*
+Pin-Priority: 990
+
+# Google Cloud Ops Agent: the MAJOR is the release line (2 -> 3); 2.x are patches/minors within it.
+Package: google-cloud-ops-agent
+Pin: version 2.*
+Pin-Priority: 990

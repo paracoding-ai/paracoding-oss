@@ -1,0 +1,10 @@
+[Unit]
+Description=Paracoding VMCP daily FULL backup to GCS: fleet DB + /etc/fleet + lake + GitLab (repos, DB, secrets) [FLEET-BACKUP-V2]
+After=gitlab-runsvdir.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+Environment=BACKUP_SCOPE=full
+Environment=BACKUP_BY=daily-timer
+Environment=BACKUP_KEEP=7
+ExecStart=/srv/fleet/src/ops/backup/fleet-backup.sh

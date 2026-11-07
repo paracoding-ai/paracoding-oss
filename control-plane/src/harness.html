@@ -20,6 +20,21 @@
 window.pcWhimsyOn = function(){
   try { return !(window.PC_BRAND && window.PC_BRAND.whimsy === false); } catch(e){ return true; }
 };
+/* [PREFS-MIGRATE-V1] ONE-TIME RESET OF THE TWO STORED PREFERENCES THAT WOULD OTHERWISE
+   DEFEAT THE NEW DEFAULTS. The file already warns about this in [BRAND-WHIMSY-V1]: a browser
+   that has ever clicked the mushroom toggle carries pc_mush=1, so changing a DEFAULT moves
+   nothing for the person who already uses the product -- and the operator is that person.
+   Mushroom OFF and the black palette are the look he asked for, so this writes both once and
+   then never runs again: the marker key means a later deliberate choice is respected.
+   Wrapped because localStorage throws in a private window, and this runs before everything. */
+(function(){
+  try{
+    if(localStorage.getItem('pc.prefsV1')) return;
+    localStorage.setItem('pc_mush','0');
+    localStorage.setItem('pc_theme','dark');
+    localStorage.setItem('pc.prefsV1','1');
+  }catch(e){}
+})();
 </script>
 <style>
   :root{
@@ -67,15 +82,19 @@ window.pcWhimsyOn = function(){
        Nothing is deleted here: every value below is the one the renderer computes today, so stock
        is unchanged, and a brand that ships a finished asset sets --logo-filter:none,
        --logo-radius:0, --logo-w-*:auto and a --logo-maxw as DATA. */
-    --logo-filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45));
+    /* [LOGO-NO-HALO-V1] RETIRED 2026-10-05 on the operator's call: the logo "gets a big gold
+       halo around it ... remove that". There was never a halo IMAGE -- it is the gold accent
+       (--acc-rgb 240,194,74) emitted twice, as a drop-shadow() at the tail of the filter chain
+       and as a box-shadow token below. Both are gone. */
+    --logo-filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock);
     --logo-radius:50%;
     --logo-fit-hdr:cover;--logo-fit-empty:contain;
     --logo-h-hdr:30px;--logo-w-hdr:30px;
     --logo-h-empty:84px;--logo-w-empty:84px;
     --logo-h-mobile:26px;--logo-w-mobile:26px;
     --logo-maxw:none;
-    --logo-shadow-hdr:0 0 12px 2px rgba(var(--acc-rgb),.5);
-    --logo-shadow-empty:0 0 26px 5px rgba(var(--acc-rgb),.4);
+    --logo-shadow-hdr:none;
+    --logo-shadow-empty:none;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -84,7 +103,7 @@ window.pcWhimsyOn = function(){
     display:flex;flex-direction:column;height:100dvh;overflow:hidden;}
   a{color:var(--ink);text-decoration:none}
   .hdr{display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;background:rgba(var(--sunk-rgb),.22);border-bottom:1px solid var(--glass-line);backdrop-filter:blur(8px)}
-  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45))}
+  .hdr img{width:34px;height:34px;object-fit:contain;filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock)}
   .hdr .ttl{font-weight:800;letter-spacing:.02em;font-size:1.02rem}
   .hdr .sub{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-dim)}
   /* [HARNESSUI-THINKING-V75] THE WAIT USED TO LOOK LIKE A CRASH. The pending bubble was the single
@@ -94,7 +113,7 @@ window.pcWhimsyOn = function(){
      indistinguishable, a moving one cannot be mistaken for either. */
   .pcdots{display:inline-block;min-width:3.2em;font-weight:700;letter-spacing:.12em;color:var(--ink-dim);animation:pcpulse 1.6s ease-in-out infinite}
   @keyframes pcpulse{0%,100%{opacity:.45}50%{opacity:1}}
-  .hdr .rt{margin-left:auto;display:flex;gap:.4rem}
+  .hdr .rt{margin-left:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.4rem}
   .hbtn{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:10px;padding:.45rem .7rem;font-size:.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.4rem}
   .hbtn:hover{background:var(--glass-2)}
   .hbtn:disabled{opacity:.45;cursor:default}
@@ -109,7 +128,7 @@ window.pcWhimsyOn = function(){
   .divb{width:1px;height:22px;background:var(--glass-line);align-self:center;margin:0 .15rem}
   .startb{border-color:rgba(120,255,190,.55)!important;background:rgba(60,200,140,.22)!important}
   .stopb{border-color:rgba(255,150,140,.55)!important;background:rgba(200,80,80,.22)!important}
-  .app{flex:1;display:flex;min-height:0}
+  .app{flex:1;display:flex;min-height:0;transition:margin-right .2s ease}
   .side, .rdp{transition:width .16s ease}
   .side.collapsed, .rdp.collapsed{width:0!important;min-width:0;padding:0;overflow:hidden;border:0}
   .splitter{width:7px;flex:none;cursor:col-resize;position:relative}
@@ -167,7 +186,7 @@ window.pcWhimsyOn = function(){
   .chat .cbar .via.provsw b{font-weight:700;opacity:.42;padding:.04rem .3rem;border-radius:999px;transition:opacity .12s}
   .chat .cbar .via.provsw b.on{opacity:1;color:var(--ink);background:rgba(var(--ink-rgb),.13)}
   .chat .cbar .via.provsw b[data-p="ge"].on{box-shadow:inset 0 0 0 1px rgba(90,200,160,.75)}
-  .dotGe{background:#5ac8a0}
+  .dotGe{background:#5ac8a0}.dotDeepseek{background:#4d6bfe}
   .chat .cbar .via.provsw b[data-p="claude"].on{box-shadow:inset 0 0 0 1px rgba(217,119,87,.65)}
   .chat .cbar .via.provsw b[data-p="gemini"].on{box-shadow:inset 0 0 0 1px rgba(75,139,245,.65)}
   .chat .cbar .via.provsw i{font-style:normal;opacity:.4;font-size:.7rem}
@@ -264,9 +283,44 @@ window.pcWhimsyOn = function(){
     <div><div class="sub">Paracoding.ai</div><div class="ttl">Paracoding.AI - Agentic Harness</div></div>
     <div class="rt">
       <button class="hbtn" onclick="window.open('/dash','pcdash')">📊 Dashboard</button>
-      <button class="hbtn" onclick="window.open('/wiki','pcwiki')" title="Internal system wiki">📖 Docs</button>
+      <button class="hbtn" id="pcGlBtn" onclick="pcGlToggle()" title="Open GitLab — your repos, logged in with your Paracoding identity">🦊 GitLab</button>
+      <button class="hbtn" id="pcStBtn" onclick="pcStToggle()" title="Fleet status + VM power">📊 Status</button>
+      <button class="hbtn" id="vmGlBtn" onclick="vmGlToggle()" title="Start / stop the vmcp VM — auto-stops after 2h idle, wakes on first request">⚙ VM: …</button>
+      <button class="hbtn" onclick="window.open('https://console.cloud.google.com/home/dashboard?project=your-project-id','gcpconsole')" title="Open the Google Cloud Console (as your logged-in Google account)">☁️ GCP</button>
+      <button class="hbtn" onclick="window.open('https://remotedesktop.google.com/access','crd')" title="Open the Linux desktop on the vmcp VM via Chrome Remote Desktop">🖥️ Desktop</button>
     </div>
   </div>
+  <script>
+  (function(){
+    var btn;
+    function set(txt, run){ if(!btn) return; btn.textContent='⚙ vmcp: '+txt; btn.setAttribute('data-run', run?'1':'0'); btn.style.color = run ? '#7CFFB2' : (txt==='…' ? '' : '#FF9B9B'); }
+    window.vmGlRefresh=function(){ fetch('/api/vm/gitlab',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){ var s=(d&&d.status)||'?'; set(s, s==='RUNNING'); }).catch(function(){ set('?', false); }); };
+    window.vmGlToggle=function(){ if(!btn) return; var running=btn.getAttribute('data-run')==='1'; var act=running?'stop':'start'; if(!confirm((running?'Stop':'Start')+' the vmcp VM?')) return; set((running?'stopping':'starting')+'…', running); fetch('/api/vm/gitlab/'+act,{method:'POST',credentials:'same-origin'}).then(function(r){return r.json();}).then(function(){ setTimeout(window.vmGlRefresh,4000); }).catch(function(){ setTimeout(window.vmGlRefresh,4000); }); };
+    function init(){ btn=document.getElementById('vmGlBtn'); if(btn){ window.vmGlRefresh(); setInterval(window.vmGlRefresh, 20000); } }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
+  })();
+  (function(){
+    /* [HARNESSUI-AUTOGO-V1] Operator "Auto Go" toggle. Every N minutes it auto-sends "go" to the
+       SELECTED agent so a strain keeps working unattended. Toggle state + interval persist in
+       localStorage (survives refresh and strain-switching). A tick is SKIPPED while that agent has a
+       turn in flight, or while the operator has a draft typed, so it never stacks turns or clobbers
+       input. The button shows a live mm:ss countdown while armed. All app-state reads are guarded, so
+       this degrades to a no-op rather than throwing if the main script's internals ever move. */
+    var KEY='pc_autogo', KMIN='pc_autogo_min';
+    var tickTimer=null, cdTimer=null, nextAt=0;
+    function mins(){ try{ var m=parseFloat(localStorage.getItem(KMIN)||'10'); return (m>0&&m<=180)?m:10; }catch(_e){ return 10; } }
+    function isOn(){ try{ return localStorage.getItem(KEY)==='1'; }catch(_e){ return false; } }
+    function el(){ return document.getElementById('autoGoBtn'); }
+    function fmt(ms){ if(ms<0)ms=0; var s=Math.round(ms/1000),mm=Math.floor(s/60),ss=s%60; return mm+':'+(ss<10?'0':'')+ss; }
+    function paint(){ var b=el(); if(!b) return; if(!isOn()){ b.textContent='▶ Auto Go ('+mins()+'m): OFF'; b.style.color=''; return; } b.textContent='● Auto Go: '+fmt(nextAt-Date.now()); b.style.color='#7CFFB2'; }
+    function fire(){ try{ var ta=document.getElementById('ta'); var busy=false; try{ busy=!!(PCBUSY&&SEL&&PCBUSY[SEL.id]); }catch(_e){} if(ta && !ta.value.trim() && !busy && typeof send==='function'){ ta.value='go'; send(); } }catch(_e){} finally{ nextAt=Date.now()+mins()*60000; paint(); } }
+    function start(){ stop(true); nextAt=Date.now()+mins()*60000; tickTimer=setInterval(fire, mins()*60000); cdTimer=setInterval(paint, 1000); paint(); }
+    function stop(keep){ if(tickTimer){clearInterval(tickTimer);tickTimer=null;} if(cdTimer){clearInterval(cdTimer);cdTimer=null;} if(!keep) paint(); }
+    window.autoGoToggle=function(){ var now=!isOn(); try{ localStorage.setItem(KEY, now?'1':'0'); }catch(_e){} if(now) start(); else stop(); paint(); };
+    function init(){ if(!el()) return; if(isOn()) start(); else paint(); }
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
+  })();
+  </script>
   <div class="app">
     <div class="rail railL" id="railL" onclick="toggleSide()" title="Expand sidebar">›</div>
     <aside class="side" id="side">
@@ -277,6 +331,7 @@ window.pcWhimsyOn = function(){
           <button data-p="ge" onclick="setProvider('ge')"><span class="dotc dotGe"></span>GE seat</button>
           <button data-p="claude" onclick="setProvider('claude')"><span class="dotc dotClaude"></span>Claude</button>
           <button data-p="gemini" class="on" onclick="setProvider('gemini')"><span class="dotc dotGemini"></span>Gemini</button>
+          <button data-p="deepseek" onclick="setProvider('deepseek')"><span class="dotc dotDeepseek"></span>DeepSeek</button>
         </div>
         <div class="subtoggle" id="modelToggle"></div>
       </div>
@@ -296,7 +351,7 @@ window.pcWhimsyOn = function(){
         <span class="via provsw" id="cVia" role="button" tabindex="0"
               onclick="pcToggleProvider()"
               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pcToggleProvider();}"
-        ><b data-p="ge">GE seat</b><i>&#8646;</i><b data-p="claude">Claude</b><i>&#8646;</i><b data-p="gemini">Gemini</b></span>
+        ><b data-p="ge">GE seat</b><i>&#8646;</i><b data-p="claude">Claude</b><i>&#8646;</i><b data-p="gemini">Gemini</b><i>&#8646;</i><b data-p="deepseek">DeepSeek</b></span>
         <span class="meter" id="cMeter">session 0 in / 0 out</span>
       </div>
       <div class="stream" id="stream">
@@ -340,6 +395,10 @@ window.pcWhimsyOn = function(){
       <div class="row"><input id="inGemini" type="password" placeholder="No static key needed (token auth)" disabled><button class="save" disabled>Token</button></div>
       <div class="hint">Token-only via Vertex AI OAuth.</div>
       <div class="hint" id="chatGeminiState">&mdash;</div></div>
+    <div class="kfield"><label><span class="dotc dotDeepseek"></span> DeepSeek (V4 Pro) <span class="tag" id="tagDeepseek">—</span></label>
+      <div class="row"><input id="inDeepseek" type="password" placeholder="your DeepSeek API key (sk-...)"><button class="save" onclick="saveKey('deepseek')">Rotate</button></div>
+      <div class="hint">Paste your DeepSeek API key from platform.deepseek.com. Metered, no classifier refusals. Key stored in Secret Manager.</div>
+      <div class="hint" id="chatDeepseekState">&mdash;</div></div>
     <!-- [GH-TOOLS-V1] GITHUB LIVES HERE, WITH THE OTHER CREDENTIALS, AND IT IS STATIC MARKUP.
          It was first built as a section of the dashboard Settings panel and the operator could
          not find it, which is two separate defects worth naming. (1) WRONG PLACE: this console
@@ -381,8 +440,8 @@ window.pcWhimsyOn = function(){
   /* [PG-GE-SUBSTRATE] The flat-rate seat, added to the picker this console already had.
      It is listed FIRST because it is the one that does not cost per token: the operator
      should have to make a deliberate move to leave it, not a deliberate move to reach it. */
-  const MODELS={ ge:[], claude:[], gemini:[] };
-  const MODEL={ge:'',claude:'',gemini:''};
+  const MODELS={ ge:[], claude:[], gemini:[], deepseek:[] };
+  const MODEL={ge:'',claude:'',gemini:'',deepseek:''};
   var PCEFFORT='';                    /* server-configured effort, from /api/models */
   var PCRUNTIME={model:'',effort:''}; /* what /api/chat reported it ACTUALLY answered with */
   function renderModelToggle(){ const el=$('modelToggle'); el.innerHTML='';
@@ -414,6 +473,7 @@ window.pcWhimsyOn = function(){
      rather than as a guess. */
   function pcProviderName(p){ p=String(p||'').toLowerCase();
     if(p==='ge') return 'Gemini Enterprise';
+    if(p==='deepseek') return 'DeepSeek';
     return p==='claude'?'Claude':(p==='gemini'?'Gemini':(p?(p.charAt(0).toUpperCase()+p.slice(1)):'')); }
   function pcModelStamp(prov,api,eff){
     /* [PG-GE-SUBSTRATE] The seat has one model and its name IS the substrate name, so the
@@ -454,7 +514,7 @@ window.pcWhimsyOn = function(){
   /* Three substrates now, so the pill CYCLES rather than flips. The order is the cost order
      -- seat, then the two metered advisors -- so one click from the seat never lands on a
      billed substrate by surprise; it takes two to get to Gemini and two to get back. */
-  var PCPROVS=['ge','claude','gemini'];
+  var PCPROVS=['ge','claude','gemini','deepseek'];
   function pcToggleProvider(){ var i=PCPROVS.indexOf(PROVIDER); setProvider(PCPROVS[(i<0?0:i+1)%PCPROVS.length]); }
   window.pcToggleProvider=pcToggleProvider;
   /* PCRUNTIME is "what /api/chat reported it ACTUALLY answered with". After a substrate flip that
@@ -476,21 +536,23 @@ window.pcWhimsyOn = function(){
      default_provider can now cause is Gemini -> Claude on an install that configured Claude, and
      only after the round trip, and only if the operator has not clicked in the meantime -- which
      is reachable, because loadFleet() is awaited before loadModels().
-     DELIBERATELY NOT DONE: no localStorage. This console has never remembered the substrate
-     across a reload, PCPICKED means "picked during THIS page load", and inventing cross-reload
-     memory here would change behaviour well beyond honouring a server default. */
-  var PCPICKED=false;
-  function setProvider(p,explicit){ if(explicit!==false) PCPICKED=true;
+     CROSS-RELOAD MEMORY: the substrate IS remembered now (localStorage 'pc.provider'), because a
+     hard refresh resetting to the server default kept flipping the operator back to DeepSeek. A
+     human pick persists and is restored at boot (PCPICKED=true) so default_provider cannot
+     overwrite it; precedence stays url > remembered > server default. */
+  var PCPICKED=false; var PCPROV_SUPPRESS=false; /* [ARGON-PROVSTICK-V1] one-shot: a URL ?provider= wins over per-strain on the boot select */
+  function setProvider(p,explicit){ if(explicit!==false){ PCPICKED=true; try{localStorage.setItem('pc.provider',p);}catch(e){} try{ if(typeof SEL!=='undefined'&&SEL&&SEL.id) localStorage.setItem('pc.prov.'+SEL.id,String(p)); }catch(e){} }
     if(p!==PROVIDER) PCRUNTIME={model:'',effort:''};
     PROVIDER=p; document.querySelectorAll('#toggle button').forEach(b=>b.classList.toggle('on',b.dataset.p===p)); renderModelToggle(); updateVia(); }
-  async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.ge) MODELS.ge=d.ge; if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.effort) PCEFFORT=String(d.effort);
+  async function loadModels(){ if(DEMO) return; try{ const d=await api('/api/models'); if(d&&d.ge) MODELS.ge=d.ge; if(d&&d.claude) MODELS.claude=d.claude; if(d&&d.gemini) MODELS.gemini=d.gemini; if(d&&d.deepseek) MODELS.deepseek=d.deepseek; if(d&&d.effort) PCEFFORT=String(d.effort);
       if(!MODELS.ge.some(m=>m.id===MODEL.ge)) MODEL.ge=MODELS.ge[0]&&MODELS.ge[0].id;
       if(!MODELS.claude.some(m=>m.id===MODEL.claude)) MODEL.claude=MODELS.claude[0]&&MODELS.claude[0].id; if(!MODELS.gemini.some(m=>m.id===MODEL.gemini)) MODEL.gemini=MODELS.gemini[0]&&MODELS.gemini[0].id;
+      if(!MODELS.deepseek.some(m=>m.id===MODEL.deepseek)) MODEL.deepseek=MODELS.deepseek[0]&&MODELS.deepseek[0].id;
       /* Applied AFTER the catalog is in hand, so the chip row repaints once, on the right list.
          An unknown or absent value is ignored rather than defaulted over: a server that says
          nothing must not move a page that is already showing something. */
       var _dp=d&&d.default_provider?String(d.default_provider).toLowerCase():'';
-      if(!PCPICKED && (_dp==='ge'||_dp==='claude'||_dp==='gemini') && _dp!==PROVIDER) setProvider(_dp,false);
+      if(!PCPICKED && (_dp==='ge'||_dp==='claude'||_dp==='gemini'||_dp==='deepseek') && _dp!==PROVIDER) setProvider(_dp,false);
       renderModelToggle(); updateVia(); }catch(e){} }
   // ---- token / cost meter -------------------------------------------------------------------
   // Session tally accumulates client-side from the `usage` /api/chat now returns per turn.
@@ -528,7 +590,9 @@ window.pcWhimsyOn = function(){
          identifier from a string three passes have edited is how you end up POSTing a delete for
          something that was never on screen. The id is data now; the text stays free to change. */
       d.setAttribute('data-strain-id', a.id||'');
-      d.innerHTML='<span class="st '+statusClass(a.status)+'">●</span><div style="min-width:0"><div class="nm">'+esc(a.name)+'</div><div class="rl pcid">'+esc(a.role||a.id)+'</div></div><div class="meta"><div class="rl">'+(a.last_ts?ago(a.last_ts):'')+'</div>'+(a.backlog?'<div class="rl" style="color:var(--gold)">'+a.backlog+' queued</div>':'')+'</div>'; el.appendChild(d); } }
+      var isWorking = (PCRUN[a.id] || (typeof PCBUSY==='object' && PCBUSY[a.id]));
+      var stCls = isWorking ? 's-working' : statusClass(a.status);
+      d.innerHTML='<span class="st '+stCls+'">●</span><div style="min-width:0"><div class="nm">'+esc(a.name)+'</div><div class="rl pcid">'+esc(a.role||a.id)+'</div></div><div class="meta"><div class="rl">'+(a.last_ts?ago(a.last_ts):'')+'</div>'+(a.backlog?'<div class="rl" style="color:var(--gold)">'+a.backlog+' queued</div>':'')+'</div>'; el.appendChild(d); } }
   /* [STRAINMEMORY-V1] THE CONSOLE REMEMBERS WHICH STRAIN YOU WERE IN.
      The boot sequence preferred fleet-advisor unconditionally, so every reload -- including the
      hard refreshes this session asked for over and over -- silently moved the operator to a
@@ -544,15 +608,61 @@ window.pcWhimsyOn = function(){
      forgets. A remembered id that is no longer on the fleet falls through to the old behaviour. */
   function pcRemember(id){ try{ if(id) localStorage.setItem('pc.strain', String(id)); }catch(e){} }
   function pcRemembered(){ try{ return localStorage.getItem('pc.strain')||''; }catch(e){ return ''; } }
-  function selectAgent(id){ SEL=AGENTS.find(a=>a.id===id)||null; window.SEL=SEL; pcRemember(SEL&&SEL.id); renderAgents(); $('cWho').textContent=SEL?SEL.name:'Select an agent';
-    $('cWhoDot').className='st '+(SEL?statusClass(SEL.status):'s-idle'); $('ta').disabled=!SEL; $('send').disabled=!SEL; renderStream(); $('ta').focus(); if(SEL){ HIST[SEL.id]=[]; renderStream(); loadHistory(SEL.id,true); } }
+  /* [ARGON-PROVSTICK-V1] Provider stickiness was GLOBAL (one pc.provider), so picking deepseek on a
+     deepseek strain made a refresh on Argon restore deepseek instead of its own gemini. Remember the
+     substrate PER STRAIN, seeded from the provider a turn actually ran on, so each strain reopens on
+     the substrate it was last used with. */
+  function pcProvForStrain(id){ try{ return (id && localStorage.getItem('pc.prov.'+id))||''; }catch(e){ return ''; } }
+  function pcSaveProvForStrain(id,p){ try{ if(id && p) localStorage.setItem('pc.prov.'+id, String(p)); }catch(e){} }
+  function selectAgent(id){
+    if(SEL && SEL.id === id) return;
+    SEL=AGENTS.find(a=>a.id===id)||null; window.SEL=SEL; pcRemember(SEL&&SEL.id);
+    try{ if(SEL && !PCPROV_SUPPRESS){ var _sp=pcProvForStrain(SEL.id); if(_sp && ['ge','claude','gemini','deepseek'].indexOf(_sp)>=0 && _sp!==PROVIDER) setProvider(_sp,true); } }catch(_e){}
+    renderAgents(); $('cWho').textContent=SEL?SEL.name:'Select an agent';
+    var isWorking = SEL && (PCRUN[SEL.id] || (typeof PCBUSY==='object' && PCBUSY[SEL.id]));
+    $('cWhoDot').className='st '+(SEL?(isWorking?'s-working':statusClass(SEL.status)):'s-idle'); $('ta').disabled=!SEL; $('send').disabled=!SEL;
+    pcQPaint(); renderStream(); $('ta').focus();
+    if(SEL){
+      if(!HIST[SEL.id] || (!HIST[SEL.id].length && !PCRUN[SEL.id])){
+        HIST[SEL.id]=[]; renderStream(); loadHistory(SEL.id,true);
+      } else if(!PCRUN[SEL.id]){
+        loadHistory(SEL.id,false);
+      }
+      pcAttachActive(SEL.id);
+    }
+  }
   async function loadHistory(id,force){ if(DEMO) return; try{ const d=await api('/api/chat/history?agentId='+encodeURIComponent(id)+(force?'&full=1':'')); if(d&&d.history){ const cur=HIST[id]||[]; if(force||cur.length<=d.history.length){ HIST[id]=d.history.map(function(h){
         /* [HARNESSUI-PROVSW-V1] h.stamp / h.model / h.provider are read on the chance the route
            starts carrying them; measured today it returns {role,text} only, so this resolves to
            '' and the turn renders unstamped. Nothing is inferred from the current toggle. */
         var st=h.stamp||(h.model?pcModelStamp(h.provider||'',h.model,h.effort||''):'');
-        return {role:h.role,text:h.text,stamp:st||''};}); if(SEL&&SEL.id===id) renderStream(); } } }catch(e){} }
+        return {role:h.role,text:h.text,stamp:st||'',steps:(Array.isArray(h.steps)?h.steps:null),tool_model:h.tool_model||''};}); if(SEL&&SEL.id===id) renderStream(); } } }catch(e){} }
   function refreshHistory(){ if(!SEL) return; loadHistory(SEL.id,true); }
+  /* [ARGON-XTAB-V1] A turn runs in the tab that started it; its running state (PCRUN) is tab-local.
+     So a SECOND tab that opens the same strain saw it idle. These let any tab ask the server whether
+     a strain is running (/api/chat/active, backed by PC_TURN_ACTIVE) and attach to the same progress
+     stream -- showing the live tool-activity bubble -- then reload the final answer when it lands. */
+  function pcAttachActive(sid){ try{
+    if(!sid || PCRUN[sid] || PCATTACH[sid]) return; /* our own turn, or already attached */
+    api('/api/chat/active?agentId='+encodeURIComponent(sid)+'&_t='+Date.now(),{cache:'no-store'}).then(function(a){
+      if(!a || !a.running) return; if(PCRUN[sid] || PCATTACH[sid]) return; /* raced a local send */
+      PCRUN[sid]={tid:a.turnId,steps:(a.steps||[]),tool_model:(a.tool_model||''),model:(a.model||''),attached:true};
+      if(SEL&&SEL.id===sid){ renderStream(); var el=$('cWhoDot'); if(el) el.className='st s-working'; }
+      PCATTACH[sid]=setInterval(function(){ pcAttachPoll(sid); }, 1200);
+    }).catch(function(){});
+  }catch(_e){} }
+  function pcAttachStop(sid){ try{ if(PCATTACH[sid]){ clearInterval(PCATTACH[sid]); delete PCATTACH[sid]; } }catch(_e){} }
+  function pcAttachPoll(sid){ try{
+    api('/api/chat/active?agentId='+encodeURIComponent(sid)+'&_t='+Date.now(),{cache:'no-store'}).then(function(a){
+      if(a&&a.running){ if(PCRUN[sid]&&PCRUN[sid].attached){ if(a.steps&&a.steps.length) PCRUN[sid].steps=a.steps; if(a.tool_model) PCRUN[sid].tool_model=a.tool_model; if(a.model) PCRUN[sid].model=a.model; if(SEL&&SEL.id===sid) pcLiveUpdate(sid); } return; }
+      /* finished in the other tab */
+      pcAttachStop(sid); var wasAtt=PCRUN[sid]&&PCRUN[sid].attached; delete PCRUN[sid];
+      if(SEL&&SEL.id===sid){ var el=$('cWhoDot'); if(el) el.className='st '+statusClass(SEL.status); }
+      if(wasAtt){ setTimeout(function(){ loadHistory(sid,true); }, 650); }
+    }).catch(function(){ pcAttachStop(sid); if(PCRUN[sid]&&PCRUN[sid].attached){ delete PCRUN[sid]; if(SEL&&SEL.id===sid) renderStream(); } });
+  }catch(_e){} }
+  /* poll the SELECTED strain for a run started in another tab (cheap: one GET every 3s, only when idle locally) */
+  try{ setInterval(function(){ try{ if(SEL && !PCRUN[SEL.id] && !PCATTACH[SEL.id]) pcAttachActive(SEL.id); }catch(_e){} }, 3000); }catch(_e){}
   /* [MD-FENCES-V1] WHY THIS WAS REWRITTEN, because the old version's failure is instructive.
      It ran the inline-code rule -- a /`([^`]+)`/ replace -- FIRST, over the whole message,
      knowing nothing about fenced blocks. Given a three-backtick fence those backticks cannot
@@ -651,9 +761,9 @@ window.pcWhimsyOn = function(){
          of today is gone -- and the model, the rounds and the logs link sit one click behind it. */
       if(/^\[seat model=/.test(ln)){
         var ft=[]; while(i<lines.length){ ft.push(lines[i]); var fin=/\]\s*$/.test(lines[i]); i++; if(fin) break; }
-        var fb=ft.join('\n'), fq=(fb.match(/queries=(\d+)/)||[])[1], fu=(fb.match(/you (\d+\/\d+ \(\d+%\))/)||[])[1];
+        var fb=ft.join('\n'), fq=(fb.match(/queries=(\d+)/)||[])[1], fu=(fb.match(/pool (\d+\/\d+ \(\d+%\))/)||[])[1];
         out.push('<details style="margin:.4rem 0"><summary style="cursor:pointer;color:var(--ink-dim);font-size:.85rem;user-select:none">'
-          +(fq?(fq+' quer'+(fq==='1'?'y':'ies')):'seat')+(fu?(' · you '+fu):'')+'</summary>'
+          +(fq?(fq+' quer'+(fq==='1'?'y':'ies')):'seat')+(fu?(' · total '+fu):'')+'</summary>'
           +'<div style="margin:.35rem 0 .2rem;font-size:.84rem;color:var(--ink-dim);line-height:1.45;word-break:break-word">'
           +lnk(fb).replace(/\n/g,'<br>')+'</div></details>');
         continue; }
@@ -685,12 +795,25 @@ window.pcWhimsyOn = function(){
      h.model/h.provider if they ever appear so the client is ready, but as of this change they do
      not, and an unstamped turn is left unstamped rather than being labelled with whatever the
      toggle happens to be pointing at now. */
+  var PCRUN={}, PCTIMERS={}; var PCATTACH={}; /* [ARGON-XTAB-V1] cross-tab attach pollers: strain id -> interval */
   function renderStream(){ const s=$('stream');
     if(!SEL){ s.innerHTML=''; s.appendChild(mkEmpty()); return; }
     const h=HIST[SEL.id]||[];
     if(!h.length){ s.innerHTML=''; const e=mkEmpty(); e.querySelector('div:last-child').innerHTML='<b>'+esc(SEL.name)+'</b><br>'+esc(SEL.role||'')+' — no messages yet. Status reads its live state.'; s.appendChild(e); return; }
-    s.innerHTML=''; for(const m of h){ const d=document.createElement('div'); d.className='msg '+(m.role==='me'?'me':'ag'); d.innerHTML=(m.role==='me'?'':'<span class="nmtag">'+esc(SEL.name)+(m.stamp?('<span class="mdl"> - '+esc(m.stamp)+'</span>'):'')+'</span>')+((m.imgs&&m.imgs.length)?m.imgs.map(function(im){return '<img src="data:'+im.media_type+';base64,'+im.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">';}).join(''):(m.img&&m.img.data?'<img src="data:'+m.img.media_type+';base64,'+m.img.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">':''))+md(m.text); s.appendChild(d); } s.scrollTop=s.scrollHeight; }
+    s.innerHTML=''; for(const m of h){ const d=document.createElement('div'); d.className='msg '+(m.role==='me'?'me':'ag'); d.innerHTML=(m.role==='me'?'':'<span class="nmtag">'+esc(SEL.name)+(m.stamp?('<span class="mdl"> - '+esc(m.stamp)+'</span>'):'')+'</span>')+((m.imgs&&m.imgs.length)?m.imgs.map(function(im){return '<img src="data:'+im.media_type+';base64,'+im.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">';}).join(''):(m.img&&m.img.data?'<img src="data:'+m.img.media_type+';base64,'+m.img.data+'" style="max-width:240px;border-radius:10px;display:block;margin:.2rem 0">':''))+md(m.text)+pcStepsHtml(m.steps,m); s.appendChild(d); } try{ if(SEL&&PCRUN[SEL.id]){ var _lb=s.lastChild; if(_lb){ _lb.classList.remove('pcthinking'); _lb.insertAdjacentHTML('beforeend', pcLiveBubbleHtml(((PCRUN[SEL.id]||{}).steps)||[], ((PCRUN[SEL.id]||{}).tool_model)||'')); } } }catch(_e){} s.scrollTop=s.scrollHeight; }
+  /* [HARNESSUI-TOOLMODEL-V2] The tool-activity label is the model that RAN the tools. In split mode
+     that is the dispatch model (tool_model, e.g. Gemini 3.8 Flash); otherwise the main model ran them
+     itself, so show the main model -- never a hardcoded Flash, which mislabelled every Argon turn. */
+  function pcToolModelLabel(m){ try{ if(m&&m.tool_model) return m.tool_model;
+    var mod=(m&&m.model)||(typeof PCRUNTIME!=='undefined'&&PCRUNTIME.model)||((typeof MODEL!=='undefined'&&typeof PROVIDER!=='undefined')?MODEL[PROVIDER]:'');
+    if(mod){ var lbl=''; try{ lbl=pcModelLabel(mod); }catch(_e){} return lbl||mod; }
+    return (typeof PROVIDER!=='undefined'&&PROVIDER==='gemini')?'Gemini':(typeof PROVIDER!=='undefined'&&PROVIDER==='claude')?'Claude':'model'; }catch(_e){ return 'model'; } }
+  function pcStepsHtml(st,m){ try{ if(!st||!st.length) return ''; var tlbl=pcToolModelLabel(m); var items=st.map(function(s){ var nm=esc(String((s&&s.name)||'tool')); var out=esc(String((s&&s.out)||'')); return '<div style="margin:.35rem 0"><div style="font-weight:600;font-size:.82rem;opacity:.85">'+nm+'</div><pre style="margin:.15rem 0 0;white-space:pre-wrap;word-break:break-word;font-size:.78rem;opacity:.7;max-height:220px;overflow:auto">'+out+'</pre></div>'; }).join(''); return '<details class="pctools" style="margin:.4rem 0 .1rem;border:1px solid rgba(128,128,128,.28);border-radius:8px;padding:.25rem .55rem;background:rgba(128,128,128,.06)"><summary style="cursor:pointer;font-size:.8rem;opacity:.82;user-select:none">Tool activity &middot; '+tlbl+' &middot; '+st.length+' step'+(st.length===1?'':'s')+'</summary><div style="margin-top:.3rem">'+items+'</div></details>'; }catch(e){ return ''; } }
   function mkEmpty(){ const e=document.createElement('div'); e.className='empty'; e.innerHTML='<img src="/brand/logo.png" alt="" onerror="this.style.display=\'none\'"><div>No messages yet.</div>'; return e; }
+  function pcLiveItemsHtml(st){ if(!st||!st.length) return '<div style="opacity:.6;font-size:.8rem">starting&hellip;</div>'; return st.map(function(x){ var nm=esc(String((x&&x.name)||'tool')); var out=esc(String((x&&x.out)||'')); return '<div style="margin:.3rem 0"><div style="font-weight:600;font-size:.8rem;opacity:.85">'+nm+'</div><pre style="margin:.1rem 0 0;white-space:pre-wrap;word-break:break-word;font-size:.76rem;opacity:.72">'+out+'</pre></div>'; }).join(''); }
+  function pcLiveBubbleHtml(st,tm){ var n=(st&&st.length)||0; var tlbl=pcToolModelLabel(tm?{tool_model:tm}:null); return '<div class="pclivewrap"><span class="pcpulse"></span><span style="font-size:.78rem;opacity:.8">running</span><button type="button" class="pcstopbtn" title="Stop this turn" onclick="try{pcStopTurn()}catch(e){}">&#9632; stop</button><details open class="pctools pclive-d"><summary>Tool activity &middot; '+tlbl+' &middot; '+n+' step'+(n===1?'':'s')+' (running)</summary><div class="pclive-body">'+pcLiveItemsHtml(st)+'</div></details></div>'; }
+  function pcLiveUpdate(sid){ try{ if(!SEL||SEL.id!==sid) return; var body=document.querySelector('#stream .pclive-body'); if(!body){ renderStream(); return; } var st=(PCRUN[sid]&&PCRUN[sid].steps)||[]; var atB=(body.scrollHeight-body.scrollTop-body.clientHeight)<24; body.innerHTML=pcLiveItemsHtml(st); var sum=document.querySelector('#stream .pclive-d>summary'); if(sum) sum.textContent='Tool activity · '+pcToolModelLabel({tool_model:(PCRUN[sid]||{}).tool_model})+' · '+st.length+' step'+(st.length===1?'':'s')+' (running)'; if(atB) body.scrollTop=body.scrollHeight; }catch(_e){} }
+  function pcLiveSteps(st,tm){ try{ if(!st||!st.length) return; var dock=document.getElementById('pcthinkdock'); var host=dock&&dock.querySelector('.msg'); if(!host) return; var live=host.querySelector('.pclive'); if(!live){ live=document.createElement('div'); live.className='pclive'; host.appendChild(live); } var items=st.map(function(s){ var nm=esc(String((s&&s.name)||'tool')); var out=esc(String((s&&s.out)||'')); return '<div style="margin:.3rem 0"><div style="font-weight:600;font-size:.78rem;opacity:.85">'+nm+'</div><pre style="margin:.1rem 0 0;white-space:pre-wrap;word-break:break-word;font-size:.74rem;opacity:.7;max-height:110px;overflow:auto">'+out+'</pre></div>'; }).join(''); var tlbl=pcToolModelLabel(tm?{tool_model:tm}:null); live.innerHTML='<details open class="pctools" style="margin:.4rem 0 0;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:.25rem .55rem;background:rgba(128,128,128,.07);text-align:left;max-width:560px"><summary style="cursor:pointer;font-size:.78rem;opacity:.85">Tool activity &middot; '+tlbl+' &middot; '+st.length+' step'+(st.length===1?'':'s')+' (running)</summary><div style="margin-top:.3rem;max-height:260px;overflow:auto">'+items+'</div></details>'; try{ var sc=document.getElementById('stream'); if(sc) sc.scrollTop=sc.scrollHeight; }catch(_e){} }catch(e){} }
   function grow(t){ t.style.height='auto'; t.style.height=Math.min(140,t.scrollHeight)+'px'; }
   function keyd(e){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } }
   let PENDIMG=[];
@@ -704,23 +827,26 @@ window.pcWhimsyOn = function(){
      statement and its correction are read together before anything runs.
      PCBUSY rather than "is the dock present": the dock is a rendering detail and can be absent
      for a turn that is still very much in flight. */
-  var PCBUSY=false, PCQ=[], PCABORT=null, PCSTOPPED=false;
+  var PCBUSY={}, PCQ={}, PCABORT={}, PCSTOPPED={};
+  function getQ(sid){ if(!sid) return []; if(!PCQ[sid]) PCQ[sid]=[]; return PCQ[sid]; }
   function pcQPaint(){ try{
       var bar=$('pcqbar'), t=$('pcqtext'); if(!bar||!t) return;
-      var n=PCQ.length;
+      var sid=(SEL&&SEL.id)||'';
+      var q=getQ(sid);
+      var n=q.length;
       if(!n){ bar.classList.remove('on'); t.textContent=''; return; }
       // Short on purpose: this line has to survive a 375px composer without wrapping, and the
       // character count that used to be here was the part that pushed it over.
       t.innerHTML='<b>'+n+' queued</b> &middot; '+(n===1?'sent when this finishes':'grouped into one message');
       bar.classList.add('on');
     }catch(e){} }
-  function pcQClear(){ PCQ=[]; pcQPaint(); }
+  function pcQClear(){ if(SEL&&SEL.id){ PCQ[SEL.id]=[]; } pcQPaint(); }
   /* [HARNESSUI-STOPBTN-V1] Stop means stop WAITING. The fetch is aborted, so the page stops
      blocking and the operator gets his input back immediately -- but a tool call already handed
      to the server may well complete, and the reply to this turn is simply never collected. The
      bubble says exactly that rather than claiming the work was cancelled, because claiming that
      would be a lie the operator could act on. */
-  function pcStopTurn(){ PCSTOPPED=true; try{ if(PCABORT) PCABORT.abort(); }catch(e){} }
+  function pcStopTurn(){ var sid=(SEL&&SEL.id)||''; if(sid){ PCSTOPPED[sid]=true; try{ if(PCABORT[sid]) PCABORT[sid].abort(); }catch(e){} /* [ARGON-STOP-V1] also tell the SERVER to cancel the in-flight turn -- aborting the fetch alone left it running in the background */ try{ api('/api/chat/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agentId:sid})}); }catch(e){} } }
   window.pcQClear=pcQClear; window.pcStopTurn=pcStopTurn;
   /* [HARNESS-UI-ICONS-V1] ONE PLACE THAT KNOWS WHAT THE ATTACH BUTTON LOOKS LIKE. The badge
      used to be painted by assigning textContent at three call sites, which is why the icon had
@@ -732,43 +858,49 @@ window.pcWhimsyOn = function(){
   function onImg(inp){ const fs=inp.files; if(!fs||!fs.length) return; for(var i=0;i<fs.length;i++){ (function(f){ const rd=new FileReader(); rd.onload=function(e){ PENDIMG.push({media_type:f.type||'image/png', data:String(e.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; pcPaintUp(PENDIMG.length); }; rd.readAsDataURL(f); })(fs[i]); } inp.value=''; }
   $('ta').addEventListener('paste', e => { for (const it of (e.clipboardData?.items||[])) { if (it.type && it.type.indexOf('image')===0){ const f=it.getAsFile(); if(f){ const rd=new FileReader(); rd.onload=ev=>{ PENDIMG.push({media_type:f.type||'image/png', data:String(ev.target.result).split(',')[1]}); if(SEL)$('send').disabled=false; pcPaintUp(PENDIMG.length); }; rd.readAsDataURL(f); e.preventDefault(); } } } });
   async function send(preset){ const ta=$('ta');
+    const targetSid = (preset && preset.targetSid) || (SEL && SEL.id);
+    if(!targetSid) return;
+    const isTargetSel = (SEL && SEL.id === targetSid);
     /* [HARNESSUI-QUEUE-V1] A send while a turn is in flight QUEUES instead of racing it. The
        send button is deliberately left enabled during a run -- it is how the operator adds to
        the queue -- so this branch, not a disabled attribute, is what keeps two turns from being
        in flight at once. `preset` is the flush calling back in with the grouped batch, and it
        must never re-enter this branch. */
-    if(PCBUSY && !preset){
+    if(PCBUSY[targetSid] && !preset){
       const qt=ta.value.trim();
       if(!qt && !PENDIMG.length) return;
-      PCQ.push({text:qt, imgs:PENDIMG}); PENDIMG=[]; pcPaintUp(0);
-      ta.value=''; grow(ta); pcQPaint(); return;
+      getQ(targetSid).push({text:qt, imgs:PENDIMG}); PENDIMG=[]; pcPaintUp(0);
+      if(isTargetSel){ ta.value=''; grow(ta); pcQPaint(); }
+      return;
     }
     const text = preset ? String(preset.text||'') : ta.value.trim();
     const imgs = preset ? (preset.imgs||[]) : PENDIMG;
-    if((!text&&!imgs.length)||!SEL) return;
-    if(!preset){ PENDIMG=[]; pcPaintUp(0); }
-    (HIST[SEL.id]=HIST[SEL.id]||[]).push({role:'me',text,imgs}); ta.value=''; grow(ta); renderStream();
+    if(!text&&!imgs.length) return;
+    if(!preset){ PENDIMG=[]; pcPaintUp(0); if(isTargetSel){ ta.value=''; grow(ta); } }
+    (HIST[targetSid]=HIST[targetSid]||[]).push({role:'me',text,imgs}); if(isTargetSel) renderStream();
     /* [HARNESSUI-PROVSW-V1] The stamp is fixed at SEND time from the selection this turn is
        actually going out on, so flipping the toggle while the reply is in flight cannot change
        the label on this turn. It is upgraded below to what /api/chat says it answered with. */
-    const pending={role:'ag',text:'',stamp:pcStampNow()}; HIST[SEL.id].push(pending); renderStream(); pcThinkStart();
+    const pending={role:'ag',text:'',stamp:pcStampNow()}; HIST[targetSid].push(pending); var _sid=targetSid; var _tid='tn'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); PCRUN[_sid]={tid:_tid,steps:[],tool_model:''}; var _pf=0; renderAgents(); if(isTargetSel){ renderStream(); pcThinkStart(); } try{if(PCTIMERS[_sid])clearInterval(PCTIMERS[_sid]);}catch(_e){} PCTIMERS[_sid]=setInterval(function(){ try{ api('/api/chat/progress?turnId='+encodeURIComponent(_tid)+'&_t='+Date.now(),{cache:'no-store'}).then(function(p){ _pf=0; try{ if(p){ if(PCRUN[_sid]){ if(p.steps&&p.steps.length) PCRUN[_sid].steps=p.steps; if(p.tool_model) PCRUN[_sid].tool_model=String(p.tool_model); } if(PCRUN[_sid]&&PCRUN[_sid].steps&&PCRUN[_sid].steps.length) pcLiveUpdate(_sid); } }catch(_e){} }).catch(function(){ _pf++; if(_pf===12){ try{ if(PCTIMERS[_sid]){clearInterval(PCTIMERS[_sid]);PCTIMERS[_sid]=null;} }catch(_x){} try{ var _b=document.querySelector('#stream .pclive-body'); if(!_b){ if(SEL&&SEL.id===_sid) renderStream(); _b=document.querySelector('#stream .pclive-body'); } if(_b){ var _n=document.createElement('div'); _n.style.cssText='font-size:.74rem;opacity:.7;margin:.3rem 0'; _n.textContent='no progress answer for ~10s — the server may be restarting. Verifying whether this turn finished…'; _b.appendChild(_n); } var _s=document.querySelector('#stream .pclive-d>summary'); if(_s) _s.textContent='Tool activity · '+pcToolModelLabel({tool_model:(PCRUN[_sid]||{}).tool_model})+' · reconnecting'; }catch(_x){} } }); }catch(_e){} }, 850);
     /* [HARNESSUI-PROVSW-V1] Pin the substrate and the model id this turn is being sent on. The
        toggle is one click away and the request is in flight for seconds; reading PROVIDER again
        after the await would attribute the reply to whatever is selected when it lands. */
-    const _turnProv=PROVIDER, _turnModel=MODEL[PROVIDER];
+    const _turnProv=PROVIDER, _turnModel=MODEL[PROVIDER]; try{ pcSaveProvForStrain(_sid,_turnProv); }catch(_e){}
     /* [HARNESSUI-QUEUE-V1] / [HARNESSUI-STOPBTN-V1] One flag for "a turn is in flight" and one
        controller for "stop waiting on it". Both are cleared in the finally below, so a thrown
        turn cannot leave the composer permanently queueing into a run that already ended. */
-    PCBUSY=true; PCSTOPPED=false; PCABORT=(typeof AbortController!=='undefined')?new AbortController():null;
+    PCBUSY[_sid]=true; PCSTOPPED[_sid]=false; PCABORT[_sid]=(typeof AbortController!=='undefined')?new AbortController():null;
     try{ let reply; const mlabel=(MODELS[_turnProv]||[]).find(x=>x.id===_turnModel); const mname=mlabel?mlabel.label:_turnModel;
-      if(DEMO){ await new Promise(r=>setTimeout(r,500)); reply='(demo) '+SEL.name+' via '+pcProviderName(_turnProv)+' '+mname+': got "'+text+'".'; }
-      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},signal:PCABORT?PCABORT.signal:undefined,body:JSON.stringify({provider:_turnProv,model:_turnModel,agentId:SEL.id,message:text,images:imgs,history:[]})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage);
+      const targetAgent=AGENTS.find(a=>a.id===_sid)||{id:_sid,name:_sid};
+      if(DEMO){ await new Promise(r=>setTimeout(r,500)); reply='(demo) '+targetAgent.name+' via '+pcProviderName(_turnProv)+' '+mname+': got "'+text+'".'; }
+      else{ const d=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},signal:PCABORT[_sid]?PCABORT[_sid].signal:undefined,body:JSON.stringify({provider:_turnProv,model:_turnModel,agentId:_sid,message:text,images:imgs,history:[],turnId:_tid})}); reply=d.reply||'(no reply)'; meterAddTurn(d.usage); try{pending.steps=(d&&Array.isArray(d.steps))?d.steps:null; if(d&&d.tool_model) pending.tool_model=d.tool_model;}catch(_e){}
         /* [HARNESSUI-PROVSW-V1] Re-stamp this turn from what the server says it ACTUALLY answered
            with -- d.model beats the catalog entry we guessed from at send time. PCRUNTIME is only
            updated when the substrate has not been flipped out from under this reply, otherwise a
            late Gemini response would rewrite the tooltip of a bar that now says Claude. */
         var _rm=(d&&d.model)?String(d.model):'', _re=(d&&d.effort)?String(d.effort):'';
         if(_rm||_re) pending.stamp=pcModelStamp(_turnProv,_rm||( mlabel&&mlabel.api )||_turnModel||'',_re||PCEFFORT);
+        if(_rm) pending.model=_rm; pending.provider=_turnProv;
         if(_turnProv===PROVIDER){ if(_rm) PCRUNTIME.model=_rm; if(_re) PCRUNTIME.effort=_re; }
         updateVia(); }
       pending.text=reply;
@@ -794,7 +926,7 @@ window.pcWhimsyOn = function(){
          arrived. */
       pending.stamp=pcModelStamp(_turnProv,_turnModel||'',PCEFFORT);
       /* [HARNESSUI-STOPBTN-V1] An abort is not an error and must not be reported as one. */
-      if(PCSTOPPED || (e && (e.name==='AbortError' || String(e)==='AbortError'))){
+      if(PCSTOPPED[_sid] || (e && (e.name==='AbortError' || String(e)==='AbortError'))){
         pending.text='⏹ Stopped waiting on this turn. Anything already handed to the server may '
           +'have finished running — the reply just was not collected.';
       } else {
@@ -822,7 +954,7 @@ window.pcWhimsyOn = function(){
            in flight -- that is why _turnProv is pinned at send -- so a strain switch mid-turn
            compared this turn against another strain's history. Both branches now use the id
            pinned when the turn failed. */
-        var _rsAgent = (SEL && SEL.id) || '';
+        var _rsAgent = _sid;
         var _rsText  = text;
         var _rsMatch = function (turns) {
           var last = turns[turns.length - 1], prev = turns[turns.length - 2];
@@ -835,40 +967,52 @@ window.pcWhimsyOn = function(){
           var ch = await api('/api/chat/history?agentId=' + encodeURIComponent(_rsAgent) + '&full=1');
           return _rsMatch((ch && ch.history) || []);
         };
-        if(!_why && e.status!==401 && e.status!==412 && document.visibilityState==='visible') {
-          pending.text = 'Reconnecting... checking if the turn finished.';
-          try { var got = await _rsTry(); pending.text = got || _errFallback; }
-          catch(e2) { pending.text = _errFallback; }
-        } else if(!_why && e.status!==401 && e.status!==412) {
-           pending.text = 'Reconnecting... checking if the turn finished.';
-           var PC_RESCUE_MAX = 600, _rsN = 0;
-           var intv = setInterval(async function() {
-             if (++_rsN > PC_RESCUE_MAX) { clearInterval(intv); pending.text = _errFallback; renderStream(); return; }
-             if (document.visibilityState!=='visible') return;
-             clearInterval(intv);
-             try { var got2 = await _rsTry(); pending.text = got2 || _errFallback; }
-             catch(e2) { pending.text = _errFallback; }
-             renderStream();
-           }, 1000);
+        if(!_why && e.status!==401 && e.status!==412) {
+          // [HARNESSUI-ORPHAN-RESCUE-V4] KEEP CHECKING UNTIL THE REPLY LANDS. The old code checked
+          // history ONCE (or once on the first visible tick) and then wrote the error -- but the
+          // server often finishes the turn seconds later, so a slow DeepSeek turn showed "connection
+          // dropped" over a reply that did arrive and WAS saved. Now it polls every 3s while the tab
+          // is visible until _rsMatch finds our reply, then paints it; it only writes the error after
+          // a real wall-clock timeout (60 min, matching the server request timeout).
+          pending.text = 'Reconnecting… checking if the turn finished.'; if(SEL&&SEL.id===_sid) renderStream();
+          var _rsN = 0, _rsStart = Date.now(), _rsDone = false;
+          var _rsStep = async function(){
+            if(_rsDone) return;
+            if(Date.now()-_rsStart > 3600000 || _rsN > 1500){ _rsDone=true; try{clearInterval(_rsIv);}catch(_x){} pending.text=_errFallback; if(SEL&&SEL.id===_sid) renderStream(); return; }
+            if(document.visibilityState!=='visible') return;
+            _rsN++;
+            try { var got = await _rsTry(); if(got){ _rsDone=true; try{clearInterval(_rsIv);}catch(_x){} pending.text=got; if(SEL&&SEL.id===_sid) renderStream(); return; } }
+            catch(e2) {}
+          };
+          var _rsIv = setInterval(_rsStep, 3000);
+          _rsStep();
         } else {
           pending.text = _errFallback;
         }
       }
     }
-    finally{ PCBUSY=false; PCABORT=null; }
-    pcThinkStop(); renderStream();
+    finally{
+      delete PCBUSY[_sid];
+      delete PCABORT[_sid];
+      try{if(PCTIMERS[_sid]){clearInterval(PCTIMERS[_sid]);PCTIMERS[_sid]=null;}}catch(_e){}
+      try{delete PCRUN[_sid];}catch(_e){}
+      renderAgents();
+    }
+    if(SEL&&SEL.id===_sid){ pcThinkStop(); renderStream(); }
     /* [HARNESSUI-QUEUE-V1] FLUSH AS ONE MESSAGE, IN ORDER. Joined with a blank line so the parts
        stay legible as separate statements, and sent through a timeout rather than a direct call so
        this turn's render finishes first and the recursion never nests. */
-    if(PCQ.length){
-      var batch=PCQ.slice(); PCQ=[]; pcQPaint();
+    var q=getQ(_sid);
+    if(q.length){
+      var batch=q.slice(); PCQ[_sid]=[];
+      if(SEL&&SEL.id===_sid) pcQPaint();
       var parts=[]; var qimgs=[];
       for(var qi=0; qi<batch.length; qi++){
         if(batch[qi].text) parts.push(batch[qi].text);
         qimgs=qimgs.concat(batch[qi].imgs||[]);
       }
       var merged=parts.join('\n\n');
-      if(merged||qimgs.length) setTimeout(function(){ send({text:merged, imgs:qimgs}); }, 0);
+      if(merged||qimgs.length) setTimeout(function(){ send({targetSid:_sid, text:merged, imgs:qimgs}); }, 0);
     } }
   /* [HARNESSUI-THINKING-V75] Growing dots, driven by a timer rather than by CSS `content`
      keyframes -- animating `content` is a Chrome-only trick and this console is also opened from
@@ -899,7 +1043,7 @@ window.pcWhimsyOn = function(){
      REDUCE-MOTION SLOWS IT, IT DOES NOT REPLACE IT -- the lesson from the ASCII version, which
      fell back to dots and therefore showed the operator dots, because his browser has the
      setting on. It is expressed in CSS here, so there is no branch in the script at all. */
-  function pcThinkStart(){ pcThinkStop(); try{
+  function pcThinkStart(){ return; try{
       var s=$('stream'), b=s&&s.lastChild; if(!b) return;
       /* the knockout filter lives in the document, created once and reused by every turn */
       if(!document.getElementById('pcbfilters')){
@@ -998,17 +1142,35 @@ window.pcWhimsyOn = function(){
       }
     }
 
+    const dk = !!(st&&st.deepseek);
+    let dColor = 'miss', dText = 'not set';
+    let dDot = '<span class="st s-idle" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px"></span>';
+    if (dk) {
+      let dAge = st.deepseek_set_at ? (now - st.deepseek_set_at) / 86400000 : 0;
+      if (dAge <= 30) {
+        dColor = 'ok'; dText = 'set (' + Math.floor(dAge) + 'd)';
+        dDot = '<span class="st s-working" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#4df5b0"></span>';
+      } else if (dAge <= 60) {
+        dColor = 'miss'; dText = 'set (' + Math.floor(dAge) + 'd)';
+        dDot = '<span class="st s-waiting" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#ffd77a"></span>';
+      } else {
+        dColor = 'miss'; dText = 'set (' + Math.floor(dAge) + 'd)';
+        dDot = '<span class="st" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;background:#ff8f86;color:#ff8f86"></span>';
+      }
+    }
+
     $('tagClaude').innerHTML= cDot + cText; $('tagClaude').className='tag '+(cColor);
     $('tagGemini').innerHTML= gDot + gText; $('tagGemini').className='tag ok';
+    if($('tagDeepseek')){ $('tagDeepseek').innerHTML= dDot + dText; $('tagDeepseek').className='tag '+(dColor); }
     
-    $('keyState').innerHTML = gDot + cDot;
+    $('keyState').innerHTML = gDot + cDot + dDot;
     paintChatTransport(st && st.chat);
   }
   /* [CHAT-TRANSPORT-VISIBLE-V104] One sentence per provider, built from harChatResolved's OWN
      fields, so this line, the [chat/resolve] log and a failing chat can never disagree about what
      was chosen. Never renders a key value -- key_present is a boolean and that is all it is. */
   function paintChatTransport(chat){
-    ['claude','gemini'].forEach(function(p){
+    ['claude','gemini','deepseek'].forEach(function(p){
       var el=$('chat'+p.charAt(0).toUpperCase()+p.slice(1)+'State'); if(!el) return;
       var c=chat&&chat[p];
       if(!c){ el.innerHTML='&mdash;'; return; }
@@ -1060,16 +1222,25 @@ window.pcWhimsyOn = function(){
       if(el) el.textContent='Not stored'+(why?': '+why:' ('+((e&&e.status)||'net')+').');
     }
   }
-  async function saveKey(p){ const v=$('in'+(p==='claude'?'Claude':'Gemini')).value.trim(); if(!v) return;
-    if(DEMO){ paintKeyState(Object.assign({claude:$('tagClaude').textContent==='set',gemini:$('tagGemini').textContent==='set'},{[p]:true})); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; return; }
-    try{ await api('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:v})}); $('in'+(p==='claude'?'Claude':'Gemini')).value=''; loadKeys(); }catch(e){ /* [SEC-FLEETMODE-CONSOLE-V1] SAY WHY IT FAILED. api() already throws {status, body} with the parsed JSON body, and every refusal on this route sends {error}; this used to print the bare code and drop the sentence that explained it, so a 409 read as an unexplained no. */ const _why=(e&&e.body&&(e.body.error||e.body.detail))||''; alert('Could not save key ('+(e.status||'net')+')'+(_why?': '+_why:'')+'.'); } }
+  async function saveKey(p){ var _inId=p==='claude'?'inClaude':p==='deepseek'?'inDeepseek':'inGemini'; const v=$(_inId).value.trim(); if(!v) return;
+    if(DEMO){ paintKeyState(Object.assign({claude:$('tagClaude').textContent==='set',gemini:$('tagGemini').textContent==='set',deepseek:($('tagDeepseek')&&$('tagDeepseek').textContent||'')==='set'},{[p]:true})); $(_inId).value=''; return; }
+    try{ await api('/api/keys',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:v})}); $(_inId).value=''; loadKeys(); }catch(e){ /* [SEC-FLEETMODE-CONSOLE-V1] SAY WHY IT FAILED. api() already throws {status, body} with the parsed JSON body, and every refusal on this route sends {error}; this used to print the bare code and drop the sentence that explained it, so a 409 read as an unexplained no. */ const _why=(e&&e.body&&(e.body.error||e.body.detail))||''; alert('Could not save key ('+(e.status||'net')+')'+(_why?': '+_why:'')+'.'); } }
   /* [STRAINLIFE-UI-PROVISION-V1] this used to do location.href to a route that has never existed, so the
      only fleet-facing way to make a strain was a 404. It now runs the create flow, which asks
      for a name first. If the lifecycle script failed to load we say so rather than navigating
      somewhere that 404s. */
   function provision(){ if(DEMO){ alert('Creating a strain is disabled in the demo view.'); return; } if(typeof window.slNewStrain==='function'){ window.slNewStrain(); return; } alert('Create a new strain is unavailable: the strain-lifecycle script did not load.'); }
-  const DEMO_AGENTS=[{id:'fleet-advisor',name:'Fleet Advisor',role:'strategy · planning',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-gcp',name:'Fleet GCP',role:'cloud · deploys/IAM/billing',status:'working',last_ts:Date.now()-300000,backlog:0},{id:'fleet-security',name:'Fleet Security',role:'review · audits and refusals',status:'idle',last_ts:Date.now()-1800000,backlog:1}];
-  async function loadFleet(){ try{ const d=await api('/api/fleet/agents'); AGENTS=d.agents||d||[]; }catch(e){ DEMO=true; AGENTS=DEMO_AGENTS; } renderAgents(); }
+  const DEMO_AGENTS=[{id:'fleet-infra',name:'Fleet Infra',role:'infra · gcp/dns/deploy',status:'working',last_ts:Date.now()-120000,backlog:0},{id:'fleet-advisor',name:'Fleet Advisor',role:'strategy · planning',status:'waiting',last_ts:Date.now()-900000,backlog:2},{id:'fleet-publisher',name:'Fleet Publisher',role:'books · publishing',status:'idle',last_ts:Date.now()-7200000,backlog:0}];
+  /* [STRAIN-NAMES-INTACT-V1] STRIP THE "Fleet " NAMESPACE ONCE, AT THE DATA LAYER.
+     The operator, 2026-10-05: every row reads "Fleet Bughunters" and it should read
+     "Bughunters" -- "every strain shows in the list as 'Fleet Name' it should not show
+     'Fleet ' just 'Name'". Doing it here rather than at each render site means the sidebar
+     row, the header, the empty state and the message tag all get the same short name for
+     free. Verified safe: the STRAINROW-ID-V1 note above says a row's identity comes from
+     data-strain-id, so the visible text is explicitly free to change. */
+  function pcShortName(n){ try{ var s=String(n==null?'':n).trim(); if(s.slice(0,6).toLowerCase()==='fleet ') s=s.slice(6).trim(); return s; }catch(e){ return n; } }
+  function pcShortNames(list){ try{ (list||[]).forEach(function(a){ if(a&&a.name) a.name=pcShortName(a.name); }); }catch(e){} }
+  async function loadFleet(){ try{ const d=await api('/api/fleet/agents'); AGENTS=d.agents||d||[]; if(DEMO){ DEMO=false; try{loadModels();}catch(_e){} try{loadKeys();}catch(_e){} try{loadUsage();}catch(_e){} try{if(SEL)loadHistory(SEL,true);}catch(_e){} } }catch(e){ DEMO=true; AGENTS=DEMO_AGENTS; } pcShortNames(AGENTS); renderAgents(); }
   /* [STRAINROSTER-STALE-V1] THE PANEL WAS DRAWN ONCE AND NEVER AGAIN.
      loadFleet ran at init and after a create/delete/subculture, and nowhere else. A console tab
      is left open for hours, so the strain list on screen drifts arbitrarily far from the fleet:
@@ -1082,7 +1253,7 @@ window.pcWhimsyOn = function(){
      small read (18 rows) and it is skipped while the tab is hidden, so an idle background tab
      costs nothing. It does NOT touch the selected strain or the open transcript. */
   var PCROSTER_MS = 60000;
-  function pcRosterTick(){ if(DEMO) return; if(document.hidden) return; try{ loadFleet(); }catch(e){} }
+  function pcRosterTick(){ if(document.hidden) return; try{ loadFleet(); }catch(e){} }
   try{
     setInterval(pcRosterTick, PCROSTER_MS);
     window.addEventListener('focus', pcRosterTick);
@@ -1109,7 +1280,7 @@ window.pcWhimsyOn = function(){
      what paints before /api/models answers, and the install's own default_provider may replace
      it once the catalog is in hand. The `false` second argument is what marks this call as not
      a human pick, which is the only reason the server default is allowed to win. */
-  (async function(){ setProvider(PROVIDER,false); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{
+  (async function(){ try{ var _rp=localStorage.getItem('pc.provider'); if(_rp && ['ge','claude','gemini','deepseek'].indexOf(_rp)>=0){ PROVIDER=_rp; PCPICKED=true; } }catch(e){} setProvider(PROVIDER,false); await loadFleet(); await loadModels(); await loadKeys(); loadUsage(); try{
     /* [HARNESSUI-DEEPLINK-V1] A LINK CAN NAME THE STRAIN AND THE SUBSTRATE.
        /chat?strain=fleet-advisor&provider=ge opens straight into that strain on that substrate,
        which is what makes this console shareable the way an enterprise hands out an app URL:
@@ -1130,8 +1301,8 @@ window.pcWhimsyOn = function(){
       }); } catch(e) {}
     try {
       var _lp = String(_qs.provider||_qs.substrate||'').toLowerCase();
-      if(_lp==='ge'||_lp==='claude'||_lp==='gemini'){
-        for(var _g=0; _g<4 && PROVIDER!==_lp; _g++) pcToggleProvider();
+      if(_lp==='ge'||_lp==='claude'||_lp==='gemini'||_lp==='deepseek'){
+        setProvider(_lp,true); PCPROV_SUPPRESS=true;
       }
     } catch(e) {}
     var _linked = String(_qs.strain||_qs.agent||'');
@@ -1141,6 +1312,7 @@ window.pcWhimsyOn = function(){
            || (AGENTS||[]).find(function(a){return a.id==='fleet-advisor';})
            || (AGENTS||[])[0];
     if(_pick && !SEL) selectAgent(_pick.id);
+    PCPROV_SUPPRESS=false;
   }catch(e){} })();
 </script>
 <style id="pcfungi">
@@ -1196,7 +1368,16 @@ window.pcWhimsyOn = function(){
     background:rgba(var(--sunk-rgb),.42);border:1px solid var(--glass-line);border-radius:15px;
     backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
   #pcthinkdock .nmtag{display:block;text-align:center}
-  #stream .msg.pcthinking{display:none}
+  #stream .msg.pcthinking{}
+  .pclivewrap{margin:.4rem 0 .1rem;text-align:left}
+  .pcpulse{display:inline-block;width:9px;height:9px;border-radius:50%;background:#e0a92b;margin-right:.45rem;vertical-align:middle;box-shadow:0 0 6px #e0a92b;animation:pcpulse 1s ease-in-out infinite}
+  @keyframes pcpulse{0%,100%{opacity:.35;transform:scale(.82)}50%{opacity:1;transform:scale(1.12)}}
+  @media (prefers-reduced-motion:reduce){.pcpulse{animation-duration:2.4s}}
+  .pcstopbtn{vertical-align:middle;cursor:pointer;border-radius:8px;border:1px solid var(--glass-line);background:rgba(var(--ink-rgb),.18);color:var(--ink);font-size:.72rem;padding:.12rem .5rem;margin-left:.5rem}
+  .pcstopbtn:hover{background:rgba(var(--ink-rgb),.30)}
+  details.pclive-d{margin:.35rem 0 0;border:1px solid rgba(128,128,128,.3);border-radius:8px;padding:.25rem .55rem;background:rgba(128,128,128,.07)}
+  details.pclive-d>summary{cursor:pointer;font-size:.8rem;opacity:.85;user-select:none}
+  .pclive-body{margin-top:.3rem;max-height:min(55vh,520px);overflow:auto}
   /* [HARNESSUI-STOPBTN-V1] THE STOP IS ON THE THINKING BUBBLE, not in a menu and not at the top
      of the page, because the moment the operator wants it is the moment he is already looking at
      the brain. pointer-events has to be re-enabled on the button itself: the dock is
@@ -1350,7 +1531,7 @@ window.pcWhimsyOn = function(){
     document.body.appendChild(w);
   }
   window.slNewStrain=async function(){
-    var name=prompt('Create a new strain.\n\nName it (e.g. ads, or fleet-archivist):','');
+    var name=prompt('Create a new strain.\n\nName it (e.g. ads, or fleet-ads):','');
     if(!name)return;name=name.trim();if(!name)return;
     var slug=name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+/,'').replace(/-+$/,'').slice(0,40);
     if(!slug){alert('That name has no usable letters.');return;}
@@ -1480,7 +1661,7 @@ window.pcWhimsyOn = function(){
      light theme leaked in here in the first place.
      Found by porting a downstream rebrand back: that install hit this the day it shipped a light
      theme and fixed it locally. This is the fix coming home. */
-  #pcl,#pcl-btn,#pcl-ov,.modal{
+  html[data-theme="light"] #pcl,html[data-theme="light"] #pcl-btn,html[data-theme="light"] #pcl-ov,html[data-theme="light"] .modal{
     --g1:#123a56;--g2:#0f4a47;--g3:#175339;
     --ink:#ffffff;--ink-rgb:255,255,255;
     --ink-soft:rgba(255,255,255,.82);--ink-dim:rgba(255,255,255,.62);
@@ -1526,7 +1707,7 @@ window.pcWhimsyOn = function(){
   var PAL=[['purple','#5a2a8f','#180c30'],['green','#123a56','#175339'],['orange','#7a3a12','#2a1206'],['blue','#123a6a','#0a1430'],['dark','#26262c','#0b0b0e'],['light','#f2f4f4','#dfe3e4']];
   function g(k,d){ try{ var v=localStorage.getItem(k); return v==null?d:v; }catch(e){ return d; } }
   function s(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
-  var theme=g('pc_theme','purple'), mush=pcWhimsyOn()&&g('pc_mush','1')==='1', btn;
+  var theme=g('pc_theme','dark'), mush=pcWhimsyOn()&&g('pc_mush','0')==='1', btn;
   function applyTheme(t){ document.documentElement.setAttribute('data-theme',t); }
   function applyMush(on){ document.body.classList.toggle('nomush',!on); if(btn) btn.textContent=on?'🍄':'◉'; }
   applyTheme(theme);
@@ -1546,7 +1727,7 @@ window.pcWhimsyOn = function(){
      now FOUR controls for one setting -- this one, the dashboard panel's, LAYERS > Settings',
      and the floating pill -- and a closure that has not been clicked since page load holds a
      stale value. The trailing sync() repaints the other three and re-renders the lexicon. */
-  sw.onclick=function(){ mush=(g('pc_mush','1')!=='1'); sw.classList.toggle('on',mush); s('pc_mush',mush?'1':'0'); if(mush && theme==='green') theme='purple'; else if(!mush && theme==='purple') theme='green'; s('pc_theme',theme); applyTheme(theme); applyMush(mush); markSw(); if(window.pcMush&&window.pcMush.sync)window.pcMush.sync(); };
+  sw.onclick=function(){ mush=(g('pc_mush','0')!=='1'); sw.classList.toggle('on',mush); s('pc_mush',mush?'1':'0'); if(mush && theme==='green') theme='purple'; else if(!mush && theme==='purple') theme='green'; s('pc_theme',theme); applyTheme(theme); applyMush(mush); markSw(); if(window.pcMush&&window.pcMush.sync)window.pcMush.sync(); };
   document.addEventListener('click',function(e){ if(panel.classList.contains('show') && !panel.contains(e.target) && e.target!==btn) panel.classList.remove('show'); });
 })();
 </script>
@@ -1616,7 +1797,7 @@ window.pcWhimsyOn = function(){
     return ['g', a.last_action?('idle · last: '+a.last_action):'idle until you need it'];}
 
   function themeSection(){
-    var mush=pcWhimsyOn()&&g('pc_mush','1')==='1', theme=g('pc_theme','purple');
+    var mush=pcWhimsyOn()&&g('pc_mush','0')==='1', theme=g('pc_theme','dark');
     var sec=document.createElement('div'); sec.className='dpsec'; sec.innerHTML='<h4>Settings</h4>';
     var r1=document.createElement('div'); r1.className='dprow'; r1.innerHTML='<span>Mushroom theme</span>';
     var sw=document.createElement('button'); sw.type='button'; sw.className='dpsw'+(mush?' on':''); sw.innerHTML='<i></i>'; r1.appendChild(sw); if(pcWhimsyOn()) sec.appendChild(r1);
@@ -1626,7 +1807,7 @@ window.pcWhimsyOn = function(){
     PAL.forEach(function(pp){var b=document.createElement('button');b.type='button';b.title=pp[0];b.setAttribute('data-t',pp[0]);b.style.background='linear-gradient(135deg,'+pp[1]+','+pp[2]+')';b.onclick=function(){theme=pp[0];s('pc_theme',theme);applyTheme(theme);markSm();};sm.appendChild(b);});
     r2.appendChild(sm); sec.appendChild(r2); markSm();
     /* [HARNESSUI-LEXICON-V1] same as the theme-button switch: read pc_mush, then sync the rest. */
-    sw.onclick=function(){mush=(g('pc_mush','1')!=='1');sw.classList.toggle('on',mush);s('pc_mush',mush?'1':'0');if(mush&&theme==='green')theme='purple';else if(!mush&&theme==='purple')theme='green';s('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();if(window.pcMush&&window.pcMush.sync)window.pcMush.sync();};
+    sw.onclick=function(){mush=(g('pc_mush','0')!=='1');sw.classList.toggle('on',mush);s('pc_mush',mush?'1':'0');if(mush&&theme==='green')theme='purple';else if(!mush&&theme==='purple')theme='green';s('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();if(window.pcMush&&window.pcMush.sync)window.pcMush.sync();};
     return sec;
   }
 
@@ -1636,7 +1817,6 @@ window.pcWhimsyOn = function(){
     var hd=document.createElement('div'); hd.className='dphd'; hd.innerHTML='<span class="t">⚙️ Settings</span>';
     var x=document.createElement('button'); x.className='x'; x.textContent='✕'; x.title='Close'; x.onclick=closeDash; hd.appendChild(x); wrap.appendChild(hd);
     var fl=document.createElement('a'); fl.href='/flow'; fl.textContent='🍄 Open Fleet Flow'; fl.style.cssText='display:block;text-align:center;background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);font-weight:800;border-radius:11px;padding:.6rem;text-decoration:none;margin:.1rem 0 .3rem'; wrap.appendChild(fl);
-    var wk=document.createElement('a'); wk.href='/wiki'; wk.textContent='📖 Docs · internal wiki'; wk.style.cssText='display:block;text-align:center;background:rgba(var(--ink-rgb),.10);border:1px solid rgba(var(--ink-rgb),.22);color:var(--ink);font-weight:700;border-radius:11px;padding:.5rem;text-decoration:none;margin:0 0 .35rem;font-size:.82rem'; wk.title='Internal system wiki — every page carries a computed freshness badge'; wrap.appendChild(wk);
     wrap.appendChild(themeSection());
     var sum=await api('/api/dash/summary');
     var asec=document.createElement('div'); asec.className='dpsec'; asec.innerHTML='<h4>Strains</h4>';
@@ -1692,26 +1872,26 @@ window.pcWhimsyOn = function(){
 #pcl-btn{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:99996;background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);font-weight:800;border:0;border-radius:11px 0 0 11px;padding:.85rem .32rem;cursor:pointer;box-shadow:0 3px 14px rgba(0,0,0,.45);font-size:.72rem;letter-spacing:.12em;writing-mode:vertical-rl;text-orientation:mixed;display:flex;align-items:center;gap:.35rem}
 #pcl-btn .dotp{width:8px;height:8px;border-radius:50%;background:#c0392b;display:none;box-shadow:0 0 7px #ff6b5b}
 #pcl-btn.hasjobs .dotp{display:inline-block}
-#pcl-ov{position:fixed;inset:0;background:rgba(5,3,15,.42);opacity:0;pointer-events:none;transition:opacity .18s;z-index:99997}
-#pcl-ov.on{opacity:1;pointer-events:auto}
-#pcl{position:fixed;right:0;top:0;height:100%;width:460px;min-width:300px;max-width:96vw;background:#0f0a1e;border-left:1px solid #3a2864;transform:translateX(104%);transition:transform .2s ease;z-index:99998;display:flex;flex-direction:column;box-shadow:-6px 0 26px rgba(0,0,0,.55)}
+#pcl-ov{position:fixed;inset:0;background:transparent;opacity:0;pointer-events:none;transition:opacity .18s;z-index:99997}
+#pcl-ov.on{opacity:0;pointer-events:none}
+#pcl{position:fixed;right:0;top:0;height:100%;width:460px;min-width:300px;max-width:96vw;background:linear-gradient(160deg,var(--g1),var(--g2) 65%,var(--g3));border-left:1px solid var(--glass-line);transform:translateX(104%);transition:transform .2s ease;z-index:99998;display:flex;flex-direction:column;box-shadow:-6px 0 26px rgba(0,0,0,.55)}
 #pcl.on{transform:translateX(0)} #pcl.notrans{transition:none!important}
-#pcl .tabs{display:flex;gap:.2rem;padding:.4rem .4rem;border-bottom:1px solid #3a2864;background:#160e2b;align-items:stretch}
-#pcl .tabs button.tb{flex:1;background:#241748;border:1px solid #3a2864;color:#bcaee6;border-radius:9px;padding:.4rem .1rem;font-size:.66rem;font-weight:700;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.1rem;line-height:1.05}
+#pcl .tabs{display:flex;gap:.2rem;padding:.4rem .4rem;border-bottom:1px solid var(--glass-line);background:rgba(var(--sunk-rgb),.3);align-items:stretch}
+#pcl .tabs button.tb{flex:1;background:#241748;border:1px solid var(--glass-line);color:#bcaee6;border-radius:9px;padding:.4rem .1rem;font-size:.66rem;font-weight:700;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.1rem;line-height:1.05}
 #pcl .tabs button.tb .ic{font-size:1rem}
 #pcl .tabs button.tb.on{background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);border-color:var(--acc1)}
-#pcl .tabs .cx{flex:0 0 auto;background:none;border:0;color:#8a78b6;font-size:1.3rem;padding:0 .3rem;cursor:pointer}
+#pcl .tabs .cx{flex:0 0 auto;background:none;border:0;color:var(--ink-dim);font-size:1.3rem;padding:0 .3rem;cursor:pointer}
 #pcl .body{flex:1;position:relative;min-height:0}
 #pcl .pane{position:absolute;inset:0;display:none}
 #pcl .pane.on{display:block}
 #pcl .pane iframe{width:100%;height:100%;border:0;background:#0a0a0f;display:block}
 #pcl .withbar{display:flex;flex-direction:column;height:100%}
 #pcl .withbar iframe{flex:1}
-#pcl .popbar{display:flex;align-items:center;gap:.45rem;padding:.5rem .6rem;background:#160e2b;border-bottom:1px solid #3a2864;font-size:.75rem;color:#bcaee6}
+#pcl .popbar{display:flex;align-items:center;gap:.45rem;padding:.5rem .6rem;background:rgba(var(--sunk-rgb),.3);border-bottom:1px solid var(--glass-line);font-size:.75rem;color:#bcaee6}
 #pcl .popbar .sp{flex:1}
 #pcl .popbar button{background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);border:0;border-radius:8px;padding:.32rem .6rem;font-weight:800;cursor:pointer;font-size:.74rem}
-#pcl .sset{padding:1.1rem;color:#efe9ff;overflow:auto;height:100%}
-#pcl .sset h4{margin:0 0 .7rem;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:#8a78b6}
+#pcl .sset{padding:1.1rem;color:var(--ink);overflow:auto;height:100%}
+#pcl .sset h4{margin:0 0 .7rem;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim)}
 #pcl .srow{display:flex;align-items:center;justify-content:space-between;margin:.6rem 0;font-weight:700;font-size:.9rem}
 #pcl .ssw{width:46px;height:26px;border-radius:999px;background:rgba(var(--ink-rgb),.25);cursor:pointer;border:0;position:relative;flex:none}
 #pcl .ssw.on{background:#5fce9a} #pcl .ssw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s} #pcl .ssw.on i{left:23px}
@@ -1723,32 +1903,44 @@ window.pcWhimsyOn = function(){
    carried its own teal, which is why the panel read as two applications bolted together.
    var(--glass)/--glass-line/--ink-soft are the same tokens the rest of the app themes on, so
    these follow the colour picker instead of ignoring it. */
-#pcl .acc{margin-top:.9rem;border:1px solid var(--glass-line,#3a2864);border-radius:11px;overflow:hidden;background:var(--glass,#160e2b)}
-#pcl .acc>.acch{display:flex;align-items:center;gap:.5rem;width:100%;background:transparent;border:0;color:#efe9ff;
+#pcl .acc{margin-top:.9rem;border:1px solid var(--glass-line,var(--glass-line));border-radius:11px;overflow:hidden;background:var(--glass,rgba(var(--sunk-rgb),.3))}
+#pcl .acc>.acch{display:flex;align-items:center;gap:.5rem;width:100%;background:transparent;border:0;color:var(--ink);
   font-weight:800;font-size:.86rem;padding:.7rem .8rem;cursor:pointer;text-align:left}
 #pcl .acc>.acch .cv{margin-left:auto;transition:transform .18s;opacity:.7;font-size:.8rem}
 #pcl .acc.open>.acch .cv{transform:rotate(180deg)}
 #pcl .acc>.accb{display:none;padding:0 .8rem .85rem}
 #pcl .acc.open>.accb{display:block}
 #pcl .kwrap{margin-top:.4rem}
-#pcl .kwrap p{color:#8a78b6;font-size:.76rem;line-height:1.5;margin:.2rem 0 .8rem}
+#pcl .kwrap p{color:var(--ink-dim);font-size:.76rem;line-height:1.5;margin:.2rem 0 .8rem}
 #pcl .kwrap .kfield{margin:.75rem 0}
-#pcl .kwrap label{display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:700;color:#efe9ff;margin-bottom:.35rem}
+#pcl .kwrap label{display:flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:700;color:var(--ink);margin-bottom:.35rem}
 #pcl .kwrap .row{display:flex;gap:.4rem}
-#pcl .kwrap input{flex:1;min-width:0;background:#160e2b;border:1px solid #3a2864;color:#efe9ff;border-radius:9px;padding:.45rem .6rem;font-size:.82rem}
+#pcl .kwrap input{flex:1;min-width:0;background:rgba(var(--sunk-rgb),.3);border:1px solid var(--glass-line);color:var(--ink);border-radius:9px;padding:.45rem .6rem;font-size:.82rem}
 #pcl .kwrap input:disabled{opacity:.55}
 #pcl .kwrap button{background:linear-gradient(135deg,var(--acc1),var(--acc2));color:var(--acc-ink-2);border:0;border-radius:9px;padding:.45rem .75rem;font-weight:800;cursor:pointer;font-size:.78rem}
 #pcl .kwrap button:disabled{opacity:.5;cursor:default}
-#pcl .kwrap .hint{color:#8a78b6;font-size:.72rem;line-height:1.45;margin-top:.3rem}
+#pcl .kwrap .hint{color:var(--ink-dim);font-size:.72rem;line-height:1.45;margin-top:.3rem}
 #pcl-grip{position:absolute;top:0;left:-3px;width:9px;height:100%;cursor:ew-resize;z-index:6}
 #pcl-grip:hover{background:rgba(255,214,107,.25)}
+#pcl .tabs{display:flex;align-items:center;gap:.6rem;padding:.45rem .55rem;background:transparent;border-bottom:1px solid var(--glass-line)}
+#pcl .pclcollapse{width:30px;height:30px;border-radius:8px;border:1px solid var(--glass-line);background:transparent;color:var(--ink);font-size:1.15rem;font-weight:900;line-height:1;cursor:pointer}
+#pcl .pclcollapse:hover{background:rgba(255,214,107,.16)}
+#pcl .pcltitle{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);font-weight:800}
+/* [VMCP-UI-MOBILE-V1] On phones the settings panel is a full-screen overlay with a big
+   collapse control and no edge-resize, so pulling it out never strands the window. */
+@media(max-width:768px){
+  #pcl{width:100vw!important;max-width:100vw!important;min-width:0!important}
+  #pcl-grip{display:none!important}
+  #pcl .pclcollapse{width:42px;height:42px;font-size:1.6rem;flex:none}
+  #pcl .tabs{padding:.55rem .7rem}
+}
 </style>
 <button id="pcl-btn" onclick="pclOpen()"><span class="dotp"></span>⚙ SETTINGS</button>
 <div id="pcl-ov" onclick="pclClose()"></div>
 <div id="pcl">
   <div class="tabs">
-    <button class="tb" data-t="settings" onclick="pclTab('settings')"><span class="ic">⚙️</span>Settings</button>
-    <button class="cx" title="Close" onclick="pclClose()">&times;</button>
+    <button class="pclcollapse" title="Collapse settings" onclick="pclClose()">&#8249;</button><button class="tb" data-t="settings" style="display:none" onclick="pclTab('settings')"><span class="ic">⚙️</span>Settings</button>
+    <span class="pcltitle">&#9881;&#65039; Settings</span>
   </div>
   <div class="body">
     <div class="pane" data-p="settings"><div class="sset" id="pcl-set"></div></div>
@@ -1768,10 +1960,15 @@ window.pcWhimsyOn = function(){
   var PCL_TABS=['settings'];
   function pclSafeTab(t){ return PCL_TABS.indexOf(String(t))>=0?String(t):'settings'; }
   window.pclTab=function(name){ name=pclSafeTab(name); document.querySelectorAll('#pcl .tb').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-t')===name);}); document.querySelectorAll('#pcl .pane').forEach(function(p){p.classList.toggle('on',p.getAttribute('data-p')===name);}); loadPane(name); ls('pcl_tab',name); };
-  window.pclOpen=function(){ if(typeof window.closeDash==='function') window.closeDash(); hideLegacy(); var w=lg('pcl_w',''); if(w){ panel.classList.add('notrans'); panel.style.width=w; setTimeout(function(){panel.classList.remove('notrans');},30); } panel.classList.add('on'); ov.classList.add('on'); pclTab(pclSafeTab(lg('pcl_tab','settings'))); };
-  window.pclClose=function(){ panel.classList.remove('on'); ov.classList.remove('on'); };
+  function pclPos(){ try{ var h=document.querySelector('.hdr'); var t=h?Math.round(h.getBoundingClientRect().bottom):0; panel.style.top=t+'px'; panel.style.height='calc(100% - '+t+'px)'; }catch(e){} }
+  /* [VMCP-UI-PUSH-V1] mirror the left nav: shrink .app by the panel width so the drawer slides in
+     beside the chat instead of over it. Desktop only; phones keep the full-screen overlay. */
+  function pclPush(){ try{ var app=document.querySelector('.app'); if(!app) return; if(window.innerWidth>768 && panel.classList.contains('on')){ app.style.marginRight=panel.offsetWidth+'px'; } else { app.style.marginRight=''; } }catch(e){} }
+  window.addEventListener('resize', function(){ if(panel && panel.classList.contains('on')){ pclPos(); pclPush(); } });
+  window.pclOpen=function(){ if(typeof window.closeDash==='function') window.closeDash(); hideLegacy(); var w=lg('pcl_w',''); if(w && window.innerWidth>768){ panel.classList.add('notrans'); panel.style.width=w; setTimeout(function(){panel.classList.remove('notrans');},30); } else { panel.style.width=''; } panel.classList.add('on'); pclPos(); pclPush(); ov.classList.add('on'); pclTab(pclSafeTab(lg('pcl_tab','settings'))); };
+  window.pclClose=function(){ panel.classList.remove('on'); ov.classList.remove('on'); pclPush(); };
   function buildSettings(){ var host=document.getElementById('pcl-set'); if(!host || host.getAttribute('data-built'))return; host.setAttribute('data-built','1');
-    var mush=pcWhimsyOn()&&lg('pc_mush','1')==='1', theme=lg('pc_theme','purple');
+    var mush=pcWhimsyOn()&&lg('pc_mush','0')==='1', theme=lg('pc_theme','dark');
     function applyTheme(t){document.documentElement.setAttribute('data-theme',t);}
     function applyMush(on){document.body.classList.toggle('nomush',!on);}
     host.innerHTML='<h4>Appearance</h4>';
@@ -1786,12 +1983,12 @@ window.pcWhimsyOn = function(){
        switch is not going away even though the pill now floats over the top right -- an
        adopter who has collapsed the pill still needs somewhere to find the setting -- but the
        pill is the one the operator asked for and the one the demo has. */
-    sw.onclick=function(){mush=(lg('pc_mush','1')!=='1');sw.classList.toggle('on',mush);ls('pc_mush',mush?'1':'0');if(mush&&theme==='green'){theme='purple';}else if(!mush&&theme==='purple'){theme='green';}ls('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();if(window.pcMush&&window.pcMush.sync)window.pcMush.sync();};
+    sw.onclick=function(){mush=(lg('pc_mush','0')!=='1');sw.classList.toggle('on',mush);ls('pc_mush',mush?'1':'0');if(mush&&theme==='green'){theme='purple';}else if(!mush&&theme==='purple'){theme='green';}ls('pc_theme',theme);applyTheme(theme);applyMush(mush);markSm();if(window.pcMush&&window.pcMush.sync)window.pcMush.sync();};
     var note=document.createElement('div'); note.style.cssText='margin-top:1.2rem;color:#8a78b6;font-size:.76rem;line-height:1.5'; note.innerHTML='Drag the left edge to resize. Everything configurable lives on this panel.'; host.appendChild(note);
   }
   var grip=document.getElementById('pcl-grip'), rz=false;
   grip.addEventListener('mousedown',function(e){rz=true;panel.classList.add('notrans');document.body.style.userSelect='none';e.preventDefault();});
-  document.addEventListener('mousemove',function(e){ if(!rz)return; var w=Math.max(300,Math.min(window.innerWidth*0.96,window.innerWidth-e.clientX)); panel.style.width=w+'px'; });
+  document.addEventListener('mousemove',function(e){ if(!rz)return; var w=Math.max(300,Math.min(window.innerWidth*0.96,window.innerWidth-e.clientX)); panel.style.width=w+'px'; pclPush(); });
   document.addEventListener('mouseup',function(){ if(rz){rz=false;panel.classList.remove('notrans');document.body.style.userSelect='';ls('pcl_w',panel.style.width);} });
   function hideLegacy(){ var rr=document.getElementById('railR');
     if(rr){ rr.classList.remove('show'); rr.onclick=null; rr.setAttribute('style','display:none!important'); }
@@ -1975,7 +2172,7 @@ window.pcWhimsyOn = function(){
         if(on&&typeof onOpen==='function'){ try{ onOpen(); }catch(e){} }
         try{localStorage.setItem('pcl_acc_'+id,on?'1':'0');}catch(e){} };
       h.setAttribute('aria-expanded','false');
-      try{ if(localStorage.getItem('pcl_acc_'+id)==='1'){ w.classList.add('open'); h.setAttribute('aria-expanded','true'); } }catch(e){}
+      try{ if(id!=='pastes' && localStorage.getItem('pcl_acc_'+id)==='1'){ w.classList.add('open'); h.setAttribute('aria-expanded','true'); if(typeof onOpen==='function'){ try{onOpen();}catch(e){} } } }catch(e){}
       w.appendChild(h); w.appendChild(b); box.appendChild(w); return w;
     }
     /* [GH-TOOLS-V1] THE GITHUB FIELD RIDES IN HERE FOR FREE, and that is why it is a .kfield in
@@ -2219,7 +2416,7 @@ window.pcWhimsyOn = function(){
 
   // ---- the entry point: a header button, placed beside the other console links -----
   // NO-OP IF THE HEADER IS NOT THERE. That is the whole point of this construction.
-  var rt = document.querySelector('.hdr .rt');
+  var rt = null; /* [VMCP-UI-V4] Session pastes header button removed */
   if (rt) {
     var b = el('button', {class:'hbtn', id:'pcps-open', title:'Mint a session key that makes a Cowork chat a strain'},
                '&#127812; Session pastes');
@@ -2444,10 +2641,10 @@ window.pcWhimsyOn = function(){
    (2,186-2,616 pixels per render). filter and border-radius are safe as tokens because the base
    rules read them; box-shadow needs an element rule at matching specificity to reach the img. */
 body.nomush{
-  --logo-filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock) drop-shadow(0 0 10px rgba(var(--acc-rgb),.45));
+  --logo-filter:grayscale(1) sepia(1) saturate(6.5) hue-rotate(5deg) brightness(1.1) url(#pcbKnock);
   --logo-radius:10px;
-  --logo-shadow-hdr:0 0 10px rgba(var(--acc-rgb),.35);
-  --logo-shadow-empty:0 0 10px rgba(var(--acc-rgb),.35);}
+  --logo-shadow-hdr:none;
+  --logo-shadow-empty:none;}
 body.nomush .hdr img,body.nomush .brand img{box-shadow:none!important}
 body.nomush .empty img{box-shadow:none!important}
 
@@ -2549,7 +2746,10 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
        "Fleet <Capitalised>" strings that are NOT names, "Fleet Flow" and "Paracoding Fleet",
        are both consumed by rules above this one, which is why the broad form is safe here and
        would not have been if this rule came first. */
-    [/(?<![\w-])Fleet\s+([A-Za-z][\w]*)(?![\w-])/g,'$1 strain'],
+    /* [STRAIN-NAMES-INTACT-V1] RETIRED 2026-10-05. This rule rewrote the strain list --
+       "Fleet Bughunters" -> "Bughunters strain" -- and the operator's words were that it
+       "applies the lexicon to the strain names list and messes them so I can recognize
+       what strain it is". Names are identical in both modes now. */
     /* the trailing dot in the lookahead protects the "Paracoding.ai" eyebrow from becoming
        a domain that does not exist. */
     [/(?<![\w-])Paracoding(?![\w.\-])/g,'Agentic Fungi'],
@@ -2677,11 +2877,11 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
      MEASURED, and it cost the operator an hour of not trusting the console. The dictionary
      carries ['build','grow'] so mushroom mode can say "growing" instead of "building" -- fine
      for prose. It was also being applied to the strain row's ROLE LINE, which is an id. So
-     fleet-courier rendered as "grow", the row read "Grow strain", and the operator saw a strain he
+     fleet-build rendered as "grow", the row read "Grow strain", and the operator saw a strain he
      did not recognise sitting in his fleet -- his Cloud Build identity, renamed into something
      that looked like junk, which he then quite reasonably tried to delete.
      IT ALSO BROKE THE DELETE. rid() recovered the id by reading that same line back, so the
-     click POSTed agentId "fleet-herald", which does not exist: the server removed nothing,
+     click POSTed agentId "fleet-grow", which does not exist: the server removed nothing,
      answered ok:true, and the row stayed. "the example strain" deleted cleanly because no dictionary
      rule touched its name -- which is exactly why only ONE row appeared to be undeletable.
      A display language may rename anything a person reads. It may never rename a name the
@@ -2767,7 +2967,7 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
      is what rewrites them in the professional direction. Gutting apply() would leave them on
      screen, which is the trap rebranding this console has repeatedly walked into. Only the
      ANSWER changes. */
-  function isOn(){ return pcWhimsyOn() && lg('pc_mush','1')==='1'; }
+  function isOn(){ return pcWhimsyOn() && lg('pc_mush','0')==='1'; }
 
   var rail=null, pill=null;
   /* [UI-NO-PILL-V55] The floating pill is NOT built (operator ruling 2026-08-15: annoying;
@@ -2797,7 +2997,7 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
      switches have always done. */
   function set(v){
     st('pc_mush', v?'1':'0');
-    var t=lg('pc_theme','purple');
+    var t=lg('pc_theme','dark');
     if(v && t==='green') t='purple'; else if(!v && t==='purple') t='green';
     st('pc_theme',t);
     sync();
@@ -2805,7 +3005,7 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
 
   function sync(){
     var v=isOn();
-    document.documentElement.setAttribute('data-theme',lg('pc_theme','purple'));
+    document.documentElement.setAttribute('data-theme',lg('pc_theme','dark'));
     document.body.classList.toggle('nomush',!v);
     if(pill && pill.innerHTML!==label(v)) pill.innerHTML=label(v);
     /* repaint the other three controls for this one setting. Each of these selectors is used by
@@ -2840,6 +3040,276 @@ body.nomush #pcmushpill{background:rgba(var(--ink-rgb),.10);color:#eafaff;
 })();
 </script>
 <!-- ===== end [HARNESSUI-DEMOLOOK-V1] ===== -->
+
+<!-- ===== [CONNECTOR-BIND-V1] =====================================================
+     BIND A CONNECTOR TO A STRAIN FROM HERE, WITHOUT HAND-QUERYING FIRESTORE.
+     WHY, MEASURED 2026-10-05: [CONNECTED-IDENTITY-V129/V1291] admits a keyless connector
+     bearer as a strain only while strains.oauth_client_id AND strains.oauth_email both match
+     a LIVE token record. The client_id is minted FRESH by RFC 7591 dynamic client
+     registration on every consent -- eight consents on one account carried eight different
+     client_ids -- so a binding written once goes STALE the next time the connector is
+     re-added, and the failure is SILENT: the chat falls back to OAUTH_DEFAULT_ROLE, serves
+     whoami and nothing else, and looks broken rather than unbound.
+     THE READ SIDE ALREADY SHIPPED. GET /api/oauth/pending [CONNECTOR-ADOPT-V1] lists every
+     live consent as {client_id, email, live_records, newest_exp, default_role, bound_role}
+     and never returns a token or a document id. This block is the WRITE side of that pairing
+     and it ADDS NO ROUTE: it calls the two routes that already exist and are already gated --
+     /api/oauth/pending (console session, approvers only) and POST /api/strains/provision
+     (console session, plus the SEC-STRAIN-ADMIN-V1 authority check). Every write lands in the
+     journal as `strain_provisioned` naming the binding, so this panel is auditable.
+     IT CANNOT DO ANYTHING THE OPERATOR COULD NOT ALREADY DO BY HAND: the client_id it writes
+     is read from the server, never typed, and the role comes from the live roster.
+     BIND DELIBERATELY, AND THE PANEL SAYS SO ON SCREEN: this is a posture change, not a
+     preference. Every keyless chat of that connector + account resolves to the strain bound
+     here, INCLUDING a chat that has lost its key.
+     IT CARRIES NO OPERATOR IDENTITY AND NO EXTERNAL HOST, deliberately: SEC-HTML-DEPERS-V1
+     refuses the shipped tree if either appears. Addresses and client ids arrive at runtime.
+     ============================================================================ -->
+<style id="pcbind-css">
+#pcbind-list .pcb-row{display:flex;align-items:center;gap:.45rem;padding:.38rem .5rem;margin-top:.3rem;
+  border:1px solid var(--glass-line);background:var(--glass);border-radius:9px;font-size:.79rem;flex-wrap:wrap}
+#pcbind-list .pcb-who{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pcbind-list .pcb-id{font-family:ui-monospace,monospace;font-size:.72rem;opacity:.72}
+#pcbind-list .pcb-b{font-size:.66rem;letter-spacing:.05em;text-transform:uppercase;opacity:.75}
+#pcbind-list .pcb-new{font-size:.62rem;letter-spacing:.05em;text-transform:uppercase;color:#8fe3a8}
+#pcbind-list select{border-radius:9px;padding:.28rem .4rem;font-size:.78rem;border:1px solid var(--glass-line);background:var(--glass);color:inherit}
+#pcbind-list button{border-radius:9px;padding:.28rem .55rem;font-size:.78rem;cursor:pointer;
+  border:1px solid var(--glass-line);background:var(--glass);color:inherit}
+</style>
+<script>
+/* [CONNECTOR-BIND-V1] Appended, self-contained, finds its own host at runtime and NO-OPS when
+   the host is absent -- the same construction as [HARNESSUI-V1] and [PCSESSIONPASTE-V1] further
+   up, for the reason recorded there: a line-anchored edit into the middle of this document has
+   already failed once. Nothing above this comment is touched, and no id here is one that
+   exists already. */
+(function(){
+  var BUILT=false, ROSTER=[];
+  function $(i){ return document.getElementById(i); }
+  function el(t,txt){ var n=document.createElement(t); if(txt!=null) n.textContent=txt; return n; }
+  function say(m,bad){ var n=$('pcbind-msg'); if(!n) return; n.textContent=m||''; n.style.color=bad?'#ffb4a8':'var(--ink-soft)'; }
+  function get(u){ return fetch(u,{credentials:'include'}).then(function(r){
+      return r.json().catch(function(){ return {}; }).then(function(d){ return {ok:r.ok,status:r.status,d:d}; }); }); }
+  function post(u,b){ return fetch(u,{method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){
+      return r.json().catch(function(){ return {}; }).then(function(d){ return {ok:r.ok,status:r.status,d:d}; }); }); }
+  function ago(ms){
+    if(!ms) return '';
+    var s=Math.max(0,Math.round((Date.now()-ms)/1000));
+    if(s<90) return s+'s ago';
+    if(s<5400) return Math.round(s/60)+'m ago';
+    return Math.round(s/3600)+'h ago';
+  }
+  function shortId(c){ c=String(c||''); return c.length>14 ? c.slice(0,14)+'…' : c; }
+  function render(consents,meta){
+    var host=$('pcbind-list'); if(!host) return;
+    host.textContent='';
+    if(!consents.length){
+      var none=el('div','No live consents found. Connect the connector first, then press Refresh.');
+      none.style.cssText='font-size:.78rem;color:var(--ink-soft)';
+      host.appendChild(none); return;
+    }
+    consents.forEach(function(c,i){
+      var row=el('div'); row.className='pcb-row';
+      var who=el('span'); who.className='pcb-who';
+      who.textContent=String(c.email||'?');
+      var cid=el('span'); cid.className='pcb-id'; cid.textContent=shortId(c.client_id);
+      who.appendChild(document.createTextNode(' ')); who.appendChild(cid);
+      if(i===0){ who.appendChild(document.createTextNode(' ')); var nw=el('span','newest'); nw.className='pcb-new'; who.appendChild(nw); }
+      row.appendChild(who);
+      var b=el('span'); b.className='pcb-b';
+      b.textContent=c.bound_role ? ('bound \u2192 '+c.bound_role) : 'unbound';
+      if(c.bound_role) b.style.color='#8fe3a8';
+      row.appendChild(b);
+      var when=el('span',ago(Number(c.newest_exp||0))); when.className='pcb-b'; row.appendChild(when);
+      var sel=document.createElement('select');
+      var ph=document.createElement('option'); ph.value=''; ph.textContent='bind to…'; sel.appendChild(ph);
+      ROSTER.forEach(function(r){
+        var o=document.createElement('option'); o.value=r.role;
+        o.textContent=(r.display_name && r.display_name!==r.role) ? (r.display_name+' ('+r.role+')') : r.role;
+        if(c.bound_role && r.role===c.bound_role) o.selected=true;
+        sel.appendChild(o);
+      });
+      row.appendChild(sel);
+      var bb=el('button', c.bound_role ? 'Rebind' : 'Bind'); bb.type='button';
+      bb.onclick=function(){
+        var role=sel.value;
+        if(!role){ say('Pick a strain for '+c.email+' first.',true); return; }
+        var rec=ROSTER.filter(function(r){ return r.role===role; })[0]||{};
+        /* display_name is sent whenever the roster knows it, because the provision route
+           defaults display_name to `role` when the body omits it -- omitting it would reset a
+           strain's human name to its backend id. */
+        var body={ role:role, oauth_client_id:String(c.client_id||''), oauth_email:String(c.email||'') };
+        if(rec.display_name) body.display_name=rec.display_name;
+        var was=bb.textContent; bb.disabled=true; bb.textContent='binding…';
+        say('binding '+c.email+' \u2192 '+role+'…');
+        post('/api/strains/provision',body).then(function(o){
+          bb.disabled=false; bb.textContent=was;
+          if(!o.ok){ say('bind failed: '+((o.d&&o.d.error)||o.status),true); return; }
+          say('Bound. Every keyless chat of this connector + account now resolves as '+role+'.');
+          load();
+        }).catch(function(e){ bb.disabled=false; bb.textContent=was; say(String(e),true); });
+      };
+      row.appendChild(bb);
+      host.appendChild(row);
+    });
+    if(meta && meta.capped){
+      var w=el('div','The consent scan hit its cap; older consents are not listed.');
+      w.style.cssText='font-size:.72rem;color:#ffb4a8;margin-top:.3rem'; host.appendChild(w);
+    }
+  }
+  function load(){
+    say('loading…');
+    get('/api/oauth/pending').then(function(p){
+      if(!p.ok){
+        say(p.status===401 ? 'Sign in to the console to manage connector bindings.'
+            : (p.status===403 ? 'Connector consents are visible to console approvers only.'
+            : 'could not read consents ('+p.status+')'), true);
+        return null;
+      }
+      return get('/api/strains').then(function(s){
+        var rows=(s.ok && s.d && s.d.strains)||[];
+        ROSTER=rows.filter(function(r){ return r && r.role && r.status!=='retired' && r.hidden!==true; })
+                  .sort(function(a,b){ return String(a.role).localeCompare(String(b.role)); });
+        var cs=(p.d && p.d.consents)||[];
+        render(cs, p.d||{});
+        say('listed '+cs.length+' consent(s) and '+ROSTER.length+' bindable strain(s). A bind is immediate — no redeploy.');
+      });
+    }).catch(function(e){ say(String(e),true); });
+  }
+  function build(){
+    if(BUILT) return;
+    var host=document.getElementById('pcl-set');
+    if(!host) return;
+    BUILT=true;
+    var w=el('div'); w.className='acc'; w.id='pcbind-acc';
+    var hb=el('button'); hb.type='button'; hb.className='acch'; hb.innerHTML='\uD83D\uDD0C Connector binding<span class="cv">\u25BE</span>';
+    var bd=el('div'); bd.className='accb';
+    var kp=el('div'); kp.className='kwrap';
+    var p=el('p','A bound connector lets its chats resolve with NO key and NO keyword. Re-adding a connector registers a new client id, so the newest consent is the one to bind \u2014 if a chat suddenly answers whoami and nothing else, bind the top row again. Binding is per connector + Google account: every keyless chat of that pair becomes the strain you pick.');
+    kp.appendChild(p);
+    var list=el('div'); list.id='pcbind-list'; kp.appendChild(list);
+    var msg=el('div'); msg.id='pcbind-msg'; msg.style.cssText='font-size:.74rem;min-height:1.1em;margin-top:.4rem;color:var(--ink-dim)'; kp.appendChild(msg);
+    var rf=el('button','Refresh'); rf.type='button'; rf.style.cssText='margin-top:.5rem'; rf.onclick=function(){ load(); }; kp.appendChild(rf);
+    bd.appendChild(kp); w.appendChild(hb); w.appendChild(bd); host.appendChild(w);
+    hb.setAttribute('aria-expanded','false');
+    hb.onclick=function(){ var on=!w.classList.contains('open'); w.classList.toggle('open',on); hb.setAttribute('aria-expanded',on?'true':'false'); if(on){ try{ load(); }catch(e){} } };
+  }
+  /* Same two triggers the session-paste block uses, because the host is built lazily: wrap the
+     tab switch, AND retry on load in case LAYERS is already open. Both are guarded, and BUILT
+     makes the second one a no-op, so opening the tab twice still yields one panel. */
+  var origTab=window.pclTab;
+  if(typeof origTab==='function'){
+    window.pclTab=function(n){ try{ origTab(n); }catch(e){} if(n==='settings'){ try{ build(); }catch(e){} } };
+  }
+  function kick(t){ if(BUILT) return; build(); if(!BUILT && t>0) setTimeout(function(){ kick(t-1); },150); }
+  if(document.readyState!=='loading') kick(20);
+  else document.addEventListener('DOMContentLoaded',function(){ kick(20); });
+})();
+</script>
+
+
+<style id="pcststyle">
+#pcStOverlay{position:fixed;z-index:1500;display:none;background:var(--bg,#120f1e);}
+#pcStOverlay.show{display:block;}
+#pcStOverlay iframe{width:100%;height:100%;border:0;display:block;background:#120f1e;}
+#pcStBtn.on{color:#FF9B6B;}
+</style>
+<div id="pcStOverlay"><iframe id="pcStFrame" title="Status" src="about:blank"></iframe></div>
+<script id="pcstjs">
+(function(){
+  var SRC='/status'; var open=false; var tick=null;
+  function chat(){ return document.querySelector('main.chat'); }
+  function ov(){ return document.getElementById('pcStOverlay'); }
+  function fr(){ return document.getElementById('pcStFrame'); }
+  function bt(){ return document.getElementById('pcStBtn'); }
+  function geom(){ var c=chat(); if(!c) return null; var r=c.getBoundingClientRect();
+    var left=r.left, top=r.top, right=r.right, bottom=r.bottom;
+    function clip(id,needOn){ var e=document.getElementById(id); if(!e) return; if(needOn && !e.classList.contains('on')) return; var g=e.getBoundingClientRect(); if(g.width>2 && g.left>left+2 && g.left<right){ right=g.left; } }
+    clip('rdpPanel',false); clip('pcl',true);
+    return {left:left, top:top, w:Math.max(0,right-left), h:Math.max(0,bottom-top)}; }
+  function sync(){ var o=ov(), g=geom(); if(!o||!g) return; o.style.left=g.left+'px'; o.style.top=g.top+'px'; o.style.width=g.w+'px'; o.style.height=g.h+'px'; }
+  function hideGl(){ var go=document.getElementById('pcGlOverlay'); if(go){ go.classList.remove('show'); var gb=document.getElementById('pcGlBtn'); if(gb){ gb.classList.remove('on'); gb.innerHTML='🦊 GitLab'; } } }
+  function openSt(){ var o=ov(), f=fr(), b=bt(); if(!o||!f) return; if(window.__pcCloseGl) window.__pcCloseGl();
+    f.src=SRC+'?t='+Date.now(); /* always load fresh: a first-loaded iframe kept pre-fix layout frozen (data refreshed, HTML didn't) */
+    open=true; o.classList.add('show'); sync();
+    if(b){ b.classList.add('on'); }
+    if(!tick) tick=setInterval(sync,150); }
+  function closeSt(){ var o=ov(), b=bt(); open=false; if(o) o.classList.remove('show');
+    if(b){ b.classList.remove('on'); b.innerHTML='📊 Status'; }
+    if(tick){ clearInterval(tick); tick=null; } }
+  window.pcStToggle=function(){ if(open) closeSt(); else openSt(); };
+  window.__pcCloseSt=closeSt;
+  window.addEventListener('resize', function(){ if(open) sync(); });
+  function wire(){ var ag=document.getElementById('agents');
+    if(ag && !ag.__pcst){ ag.__pcst=1; ag.addEventListener('click', function(){ if(open) closeSt(); }); }
+    var who=document.getElementById('cWho');
+    if(who && !who.__pcst){ who.__pcst=1; who.addEventListener('click', function(){ if(open) closeSt(); }); } }
+  function land(){ if((location.hash||'').indexOf('status')>=0){ setTimeout(window.pcStToggle, 700); } }
+  if(document.readyState!=='loading'){ wire(); land(); } else document.addEventListener('DOMContentLoaded', function(){ wire(); land(); });
+  setTimeout(wire, 1500);
+})();
+</script>
+<style id="pcglstyle">
+#pcGlOverlay{position:fixed;z-index:1500;display:none;background:var(--bg,#120f1e);}
+#pcGlOverlay.show{display:block;}
+#pcGlOverlay iframe{width:100%;height:100%;border:0;display:block;background:#1b1830;}
+#pcGlBtn.on{color:#FF9B6B;}
+</style>
+<div id="pcGlOverlay"><iframe id="pcGlFrame" title="GitLab" src="about:blank"></iframe></div>
+<script id="pcgljs">
+(function(){
+  var SRC='/gitlab'; var open=false; var tick=null; var thIv=null;
+  function chat(){ return document.querySelector('main.chat'); }
+  function ov(){ return document.getElementById('pcGlOverlay'); }
+  function fr(){ return document.getElementById('pcGlFrame'); }
+  function bt(){ return document.getElementById('pcGlBtn'); }
+  function pcGlTheme(){
+    try{
+      var f=fr(); if(!f) return; var doc=f.contentDocument; if(!doc||!doc.head) return;
+      var cs=getComputedStyle(document.documentElement);
+      function gv(n,dd){ var x=cs.getPropertyValue(n).trim(); return x||dd; }
+      var g1=gv('--g1','#26262c'), g2=gv('--g2','#17171c'), g3=gv('--g3','#0b0b0e'), acc=gv('--acc-rgb','180,140,255');
+      function lum(h){ h=String(h).replace('#',''); if(h.length===3) h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2]; var r=parseInt(h.substr(0,2),16),gg=parseInt(h.substr(2,2),16),bb=parseInt(h.substr(4,2),16); if(isNaN(r)) return 0; return (0.299*r+0.587*gg+0.114*bb)/255; }
+      var st=doc.getElementById('pc-gl-theme');
+      if(lum(g3)>0.5){ if(st&&st.parentNode) st.parentNode.removeChild(st); return; }
+      if(!st){ st=doc.createElement('style'); st.id='pc-gl-theme'; doc.head.appendChild(st); }
+      st.textContent=':root,.gl-dark,html.gl-dark{'+
+        '--gl-background-color-default:'+g3+'!important;--gl-background-color-subtle:'+g2+'!important;--gl-background-color-subtlest:'+g3+'!important;--gl-background-color-strong:'+g1+'!important;--gl-background-color-strongest:'+g1+'!important;--gl-background-color-section:'+g2+'!important;--gl-background-color-overlay:'+g2+'!important;--gl-background-color-disabled:'+g2+'!important;'+
+        '--gl-color-neutral-950:'+g3+'!important;--gl-color-neutral-900:'+g2+'!important;--gl-color-neutral-800:'+g1+'!important;'+
+        '}'+
+        'body,.layout-page{background:linear-gradient(160deg,'+g1+' 0%,'+g2+' 45%,'+g3+' 100%)!important;background-attachment:fixed!important;}'+
+        '.super-sidebar{background:'+g2+'!important;border-color:rgba(255,255,255,.06)!important;}'+
+        '.super-topbar,.top-bar-container,header.top-bar-fixed{background:'+g1+'!important;}'+
+        '.content-wrapper,#content-body,.nav-sidebar{background:transparent!important;}'+
+        'a,.gl-link,.gl-button-link{color:rgb('+acc+')!important;}';
+    }catch(e){}
+  }
+  function geom(){ var c=chat(); if(!c) return null; var r=c.getBoundingClientRect();
+    var left=r.left, top=r.top, right=r.right, bottom=r.bottom;
+    function clip(id,needOn){ var e=document.getElementById(id); if(!e) return; if(needOn && !e.classList.contains('on')) return; var g=e.getBoundingClientRect(); if(g.width>2 && g.left>left+2 && g.left<right){ right=g.left; } }
+    clip('rdpPanel',false); clip('pcl',true);
+    return {left:left, top:top, w:Math.max(0,right-left), h:Math.max(0,bottom-top)}; }
+  function sync(){ var o=ov(), g=geom(); if(!o||!g) return; o.style.left=g.left+'px'; o.style.top=g.top+'px'; o.style.width=g.w+'px'; o.style.height=g.h+'px'; }
+  function openGl(){ var o=ov(), f=fr(), b=bt(); if(!o||!f) return; if(window.__pcCloseSt) window.__pcCloseSt();
+    if(!f.src||f.src==='about:blank'||f.src.indexOf('/gitlab')===-1){ f.src=SRC; }
+    open=true; o.classList.add('show'); sync();
+    if(b){ b.classList.add('on'); }
+    if(f && !f.__pcth){ f.__pcth=1; f.addEventListener('load', pcGlTheme); } setTimeout(pcGlTheme,400); setTimeout(pcGlTheme,1400);
+    if(!tick) tick=setInterval(sync,150); if(!thIv) thIv=setInterval(pcGlTheme,3000); }
+  function closeGl(){ var o=ov(), b=bt(); open=false; if(o) o.classList.remove('show');
+    if(b){ b.classList.remove('on'); b.innerHTML='🦊 GitLab'; }
+    if(tick){ clearInterval(tick); tick=null; } if(thIv){ clearInterval(thIv); thIv=null; } }
+  window.pcGlToggle=function(){ if(open) closeGl(); else openGl(); };
+  window.__pcCloseGl=closeGl;
+  window.addEventListener('resize', function(){ if(open) sync(); });
+  function wire(){ var ag=document.getElementById('agents');
+    if(ag && !ag.__pcgl){ ag.__pcgl=1; ag.addEventListener('click', function(){ if(open) closeGl(); }); }
+    var who=document.getElementById('cWho');
+    if(who && !who.__pcgl){ who.__pcgl=1; who.addEventListener('click', function(){ if(open) closeGl(); }); } }
+  if(document.readyState!=='loading'){ wire(); } else document.addEventListener('DOMContentLoaded', wire);
+  setTimeout(wire, 1500);
+})();
+</script>
 
 </body>
 </html>
