@@ -4226,7 +4226,7 @@ const ctxBuild = async () => {
       } catch (e: any) { return { content: [{ type: 'text', text: JSON.stringify({ error: String((e && e.message) || e) }) }] }; }
     });
   server.registerTool('backup_create',
-    { description: 'Operator DR: start a one-file PLAIN .tar.gz full-system backup (Postgres fleet DB + /etc/fleet config, and the GCS data-lake on scope=full) to GCS. No passphrase, no key, no gpg -- the download opens with any archive tool (double-click / 7-Zip / Finder). It does NOT dump Secret Manager (those secrets survive an account breach; re-pull from GCP on restore). scope "full" (default) adds the ~5GB data-lake; "core" is DB + config only (fast). Runs in the background; poll backup_list for status and the 24h signed download URL.',
+    { description: 'Operator DR: start a one-file full-system backup (Postgres fleet DB + /etc/fleet config, and the data-lake + GitLab on scope=full) to GCS. Plain .tar.gz by default; when /etc/fleet/backup.env sets BACKUP_ENCRYPT_SECRET (the OSS installer does) it is .tar.gz.gpg, gpg AES256 with the passphrase held in that Secret Manager secret (decrypt: gpg --decrypt FILE.gpg > FILE; fleet-restore.sh decrypts automatically). No passphrase argument is needed either way. It does NOT dump Secret Manager (those secrets survive an account breach; re-pull from GCP on restore). scope "full" (default) adds the ~5GB data-lake; "core" is DB + config only (fast). Runs in the background; poll backup_list for status and the 24h signed download URL.',
       inputSchema: { scope: z.string().optional(), ...AG } },
     async (a: any) => { if (who(a) !== 'fleet-advisor') return { content: [{ type: 'text', text: 'backup_create is operator-only.' }], isError: true }; return { content: [{ type: 'text', text: JSON.stringify(await bkStart(String(a.scope || 'full'), String(a.passphrase || ''), who(a))) }] }; });
   server.registerTool('backup_list',
@@ -4234,7 +4234,7 @@ const ctxBuild = async () => {
       inputSchema: { ...AG } },
     async (a: any) => { if (who(a) !== 'fleet-advisor') return { content: [{ type: 'text', text: 'backup_list is operator-only.' }], isError: true }; return { content: [{ type: 'text', text: JSON.stringify(await bkList()) }] }; });
   server.registerTool('backup_verify',
-    { description: 'Operator DR: prove a backup is restorable WITHOUT touching the live system -- downloads + extracts the archive and restores its DB dump into a throwaway scratch database, then reports row counts and drops it. Pass object (the fleet-backup-*.tar.gz name).',
+    { description: 'Operator DR: prove a backup is restorable WITHOUT touching the live system -- downloads + extracts the archive and restores its DB dump into a throwaway scratch database, then reports row counts and drops it. Pass object (the fleet-backup-*.tar.gz or *.tar.gz.gpg name; encrypted archives are decrypted automatically with the configured key secret).',
       inputSchema: { object: z.string(), ...AG } },
     async (a: any) => { if (who(a) !== 'fleet-advisor') return { content: [{ type: 'text', text: 'backup_verify is operator-only.' }], isError: true }; return { content: [{ type: 'text', text: JSON.stringify(await bkVerify(String(a.object || ''), String(a.passphrase || ''))) }] }; });
   server.registerTool('backup_restore',
@@ -4414,7 +4414,32 @@ const ctxBuild = async () => {
       // so the vault registry it reads through is the one that is actually armed. Requiring a
       // second transpiled copy would load a different module record with an empty key map --
       // the exact failure [PCV1-GIT-VAULT-WIRE-V2] documents for gitBlobOid.
-      pcgitRead: async (p: string, r: string) => require('./gittools.js').readForPublish(p, r),
+      // [GH-PUBLISH-FROM-GITLAB-V1] The fleet's repositories moved to GitLab on 2026-10-07
+      // (PCGIT_BACKEND=gitlab) and the serverless git store this reader used is no longer written,
+      // so every copy_from_pcgit since then answered "5 NOT_FOUND" and no agent could publish a
+      // release -- the v21.0 OSS publish stalled on exactly that, 2026-11-01. Read the blob from
+      // the fleet GitLab first, bytes as base64 so binaries survive (the UTF-8 re-encode that broke
+      // two PDFs on 2026-09-21 cannot happen on this path), and fall back to the legacy store only
+      // when GitLab does not have it. Project: PC_PUBLISH_GL_PROJECT, default root/paracoding-fleet.
+      pcgitRead: async (p: string, r: string) => {
+        const proj = encodeURIComponent(String(process.env.PC_PUBLISH_GL_PROJECT || 'root/paracoding-fleet'));
+        const fp = encodeURIComponent(String(p).replace(/^\/+/, ''));
+        const pat = await harSecretGet('gitlab-api-token');
+        if (pat) {
+          const gr: any = await waFetch('http://127.0.0.1/gitlab/api/v4/projects/' + proj + '/repository/files/'
+            + fp + '?ref=' + encodeURIComponent(String(r || 'main')), { headers: { 'PRIVATE-TOKEN': pat } as any });
+          if (gr.status === 200) {
+            const j: any = await gr.json();
+            if (j && j.encoding === 'base64' && typeof j.content === 'string') return { encoding: 'base64', content: j.content };
+          } else if (gr.status !== 404) {
+            throw new Error('GitLab read of ' + p + '@' + r + ' failed: HTTP ' + gr.status + '. Nothing was written.');
+          }
+        }
+        if (String(process.env.PCGIT_BACKEND || '') === 'gitlab') {
+          throw new Error('NOT_FOUND: ' + p + ' at ' + r + ' in GitLab ' + decodeURIComponent(proj) + '. Nothing was written.');
+        }
+        return require('./gittools.js').readForPublish(p, r);
+      },
       configGet: ghConfig,
       journal: async (action: string, message: string) => {
         // The journal is the audit trail and a GitHub write is at least as consequential as a

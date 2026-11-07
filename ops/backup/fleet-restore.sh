@@ -10,6 +10,16 @@
 #                    GitLab must already be installed at the archive's gitlab_version (checked first).
 #          --db      the fleet DB dump into <db>       --config  /etc/fleet       --lake  /srv/fleet/lake
 #       Existing files are kept as *.pre-restore.<ts>. Secret Manager is not in the archive (it lives in GCP).
+#   [BACKUP-CRYPT-V1] Encrypted archives (*.tar.gz.gpg, or any archive whose .meta.json sidecar says
+#   "encrypted":true or whose bytes are OpenPGP) are decrypted automatically, streamed straight into tar.
+#   Passphrase, first found wins:
+#       --passphrase-file F   a file holding the passphrase (first line) -- e.g. exported from the OLD
+#                             project when restoring into a different one; the file is left in place
+#       BACKUP_PASSFILE=F     (env) a one-shot file staged by the control plane; shredded after reading
+#       --key-secret NAME     Secret Manager secret in THIS project, read with the VM metadata token;
+#                             default: the sidecar's key_secret, else BACKUP_ENCRYPT_SECRET from
+#                             /etc/fleet/backup.env, else backup-passphrase (.tar.zst.gpg legacy: backup-archive-key)
+#       A wrong passphrase fails loudly ("decrypt failed") before anything is restored.
 set -uo pipefail
 GCLOUD=/srv/fleet/google-cloud-sdk/bin/gcloud; [ -x "$GCLOUD" ] || GCLOUD=$(command -v gcloud)
 GSUTIL=/srv/fleet/google-cloud-sdk/bin/gsutil; [ -x "$GSUTIL" ] || GSUTIL=$(command -v gsutil)
@@ -19,9 +29,12 @@ PROJECT=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/c
 LAKEDIR=/srv/fleet/lake
 GLVERFILE=/opt/gitlab/embedded/service/gitlab-rails/VERSION
 ADMINURL="postgres://gitlab-psql@/postgres?host=/var/opt/gitlab/postgresql"
-ARCHIVE=""; PASS="${BACKUP_PASSPHRASE:-}"; DB=""; DO_CONFIG=0; DO_SECRETS=0; DO_LAKE=0; DO_GITLAB=0; CONFIRM=0; VERIFY=0
+HERE=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+ARCHIVE=""; PASS="${BACKUP_PASSPHRASE:-}"; PASSFILE_ARG=""; KEYSEC_ARG=""; DB=""; DO_CONFIG=0; DO_SECRETS=0; DO_LAKE=0; DO_GITLAB=0; CONFIRM=0; VERIFY=0
 while [ $# -gt 0 ]; do case "$1" in
   --archive) ARCHIVE="$2"; shift 2;;
+  --passphrase-file) PASSFILE_ARG="$2"; shift 2;;
+  --key-secret) KEYSEC_ARG="$2"; shift 2;;
   --db) DB="$2"; shift 2;;
   --verify) VERIFY=1; shift;;
   --config) DO_CONFIG=1; shift;;
@@ -39,13 +52,52 @@ WORK=$(mktemp -d /var/tmp/fleet-restore-XXXXXX); trap 'rm -rf "$WORK"' EXIT
 LOCAL="$WORK/archive"
 if [ "${ARCHIVE:0:5}" = "gs://" ]; then $GSUTIL -q cp "$ARCHIVE" "$LOCAL" || rfail "download failed"; else cp "$ARCHIVE" "$LOCAL" 2>/dev/null || rfail "archive not found"; fi
 mkdir -p "$WORK/x"
+# [BACKUP-CRYPT-V1] Is it encrypted? By name (*.gpg), or -- for anything that is not gzip -- by the
+# .meta.json sidecar flag or OpenPGP content. A plain gzip archive takes the old path untouched.
+ENC=0; INNER="$ARCHIVE"; SIDE=""
+case "$ARCHIVE" in *.gpg) ENC=1; INNER="${ARCHIVE%.gpg}";; esac
+MAGIC=$(head -c2 "$LOCAL" | od -An -tx1 | tr -d ' \n')
+if [ "$ENC" = 1 ] || [ "$MAGIC" != 1f8b ]; then
+  if [ "${ARCHIVE:0:5}" = "gs://" ]; then SIDE=$($GSUTIL -q cat "$ARCHIVE.meta.json" 2>/dev/null | head -c 4096)
+  elif [ -f "$ARCHIVE.meta.json" ]; then SIDE=$(head -c 4096 "$ARCHIVE.meta.json"); fi
+  case "$SIDE" in *'"encrypted":true'*) ENC=1;; esac
+  case "${MAGIC:0:2}" in 8c|c3) ENC=1;; esac
+fi
+if [ "$ENC" = 1 ]; then
+  # shellcheck source=fleet-backup-crypt.sh
+  . "$HERE/fleet-backup-crypt.sh" || rfail "fleet-backup-crypt.sh missing next to fleet-restore.sh"
+  command -v gpg >/dev/null 2>&1 || rfail "gpg not installed (apt-get install gnupg)"
+  if [ -n "$PASSFILE_ARG" ]; then
+    [ -r "$PASSFILE_ARG" ] || rfail "--passphrase-file not readable"
+    PASS=""; IFS= read -r PASS < "$PASSFILE_ARG" || [ -n "$PASS" ] || rfail "--passphrase-file is empty"
+  fi
+  if [ -z "$PASS" ]; then
+    KEYSEC="$KEYSEC_ARG"
+    [ -n "$KEYSEC" ] || KEYSEC=$(printf '%s' "$SIDE" | sed -n 's/.*"key_secret":"\([A-Za-z0-9_-]*\)".*/\1/p')
+    [ -n "$KEYSEC" ] || KEYSEC=$( [ -f /etc/fleet/backup.env ] && sed -n 's/^BACKUP_ENCRYPT_SECRET=\([A-Za-z0-9_-]*\).*/\1/p' /etc/fleet/backup.env | tail -1 )
+    case "$INNER" in *.tar.zst) KEYSEC="${KEYSEC:-backup-archive-key}";; *) KEYSEC="${KEYSEC:-backup-passphrase}";; esac
+    case "$KEYSEC" in *[!A-Za-z0-9_-]*) rfail "bad --key-secret name";; esac
+    PASS=$(bk_sm_access "$KEYSEC") || PASS=""
+    [ -n "$PASS" ] || PASS="$($GCLOUD secrets versions access latest --secret="$KEYSEC" --project="$PROJECT" 2>/dev/null)"
+    [ -n "$PASS" ] || rfail "encrypted archive: cannot read Secret Manager secret $KEYSEC in $PROJECT -- pass --passphrase-file F"
+  fi
+fi
 # Plain .tar.gz is the current format; .tar.zst / .tar.zst.gpg still accepted so OLDER backups restore too.
+if [ "$ENC" = 1 ]; then
+  case "$INNER" in
+    *.tar.zst) bk_decrypt < "$LOCAL" 3< <(printf '%s' "$PASS") | zstd -d -q -c | tar -C "$WORK/x" -xf -; PS=("${PIPESTATUS[@]}") ;;
+    *)         bk_decrypt < "$LOCAL" 3< <(printf '%s' "$PASS") | tar -C "$WORK/x" -xzf -;            PS=("${PIPESTATUS[@]}") ;;
+  esac
+  PASS=""
+  [ "${PS[0]}" -eq 0 ] || rfail "decrypt failed (wrong passphrase, or a truncated/tampered archive)"
+  for x in "${PS[@]:1}"; do [ "$x" -eq 0 ] || rfail "untar after decrypt failed"; done
+else
 case "$ARCHIVE" in
   *.tar.gz|*.tgz) tar -C "$WORK/x" -xzf "$LOCAL" || rfail "untar (gzip) failed" ;;
   *.tar.zst) zstd -d -q -f "$LOCAL" -o "$WORK/a.tar" && tar -C "$WORK/x" -xf "$WORK/a.tar" || rfail "untar (zstd) failed" ;;
-  *.gpg) P="$PASS"; [ -n "$P" ] || P="$($GCLOUD secrets versions access latest --secret=backup-archive-key --project=$PROJECT 2>/dev/null)"; [ -n "$P" ] || rfail "encrypted archive needs the managed key"; printf '%s' "$P" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --decrypt -o "$WORK/a.tar.zst" "$LOCAL" 2>/dev/null || rfail "decrypt failed"; zstd -d -q -f "$WORK/a.tar.zst" -o "$WORK/a.tar" && tar -C "$WORK/x" -xf "$WORK/a.tar" || rfail "untar failed" ;;
   *) rfail "unknown archive type: $ARCHIVE" ;;
 esac
+fi
 rm -f "$LOCAL" "$WORK/a.tar" "$WORK/a.tar.zst"
 [ -f "$WORK/x/db/fleet.dump" ] || rfail "archive missing db/fleet.dump"
 MAN=$(cat "$WORK/x/MANIFEST.json" 2>/dev/null || echo '{}')

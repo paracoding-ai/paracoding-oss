@@ -15,6 +15,13 @@
 - **GitLab** sign-ups are disabled; users arrive only through the IAP-backed SSO button.
 - **Patching.** Security and update packages install on every boot and daily; third-party packages are
   pinned to their current series. GitLab upgrades within its pinned series.
-- **Backups** are plain archives that include GitLab's `gitlab-secrets.json`; restrict the bucket.
+- **Backups** are encrypted (OpenPGP, AES-256) with a passphrase generated into Secret Manager
+  (`backup-passphrase`); the passphrase never enters the archive, a log or a command line. The archive
+  still contains GitLab's `gitlab-secrets.json` once decrypted, so guard both the bucket and the secret.
+- **Signed execution.** `run_command` jobs run only with an approval signed by a Cloud KMS key the
+  control plane holds; `gate-exec` verifies the signature and writes create-only run records.
+- **Root ops daemon.** `vmcp_sudo` uses a root daemon bound to 127.0.0.1:8022 with a random token
+  (`/opt/pc-ops-token`, root-only). The control plane holds that token, so a strain that can run
+  commands as `fleet` can reach root: grant strains accordingly.
 
 Report vulnerabilities privately through GitHub Security Advisories on this repository.

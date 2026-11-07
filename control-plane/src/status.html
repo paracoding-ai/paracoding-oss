@@ -121,8 +121,9 @@
 
  function fmtBytes(n){ n=Number(n)||0; return n>=1e9?(n/1e9).toFixed(2)+' GB':n>=1e6?(n/1e6).toFixed(1)+' MB':n>=1e3?(n/1e3).toFixed(0)+' KB':n+' B'; }
  async function loadBackups(){ var d={}; try{ var r=await fetch('/api/backup/list',{cache:'no-store',credentials:'same-origin'}); if(r.ok) d=await r.json(); }catch(e){} renderBackups(d); }
+ var BK_ENC=null;
  function renderBackups(d){
-   var b=document.getElementById('backup'); if(!b) return; b.innerHTML='';
+   var b=document.getElementById('backup'); if(!b) return; b.innerHTML=''; BK_ENC=d.encryption||null;
    b.appendChild(el('grp','Backup & Restore — full system in one file'));
    var act=el('row');
    var sel=document.createElement('select'); sel.id='bkScope'; sel.className='rf'; sel.innerHTML='<option value="full">full (DB + config + data-lake)</option><option value="core">core (DB + config)</option>';
@@ -134,14 +135,20 @@
      var row=el('row'); var nm=el('nm'); nm.innerHTML='&#11015; Latest backup ('+(dl.scope||'')+', '+fmtBytes(dl.size_bytes)+')';
      var a=document.createElement('a'); a.href=dl.url; a.className='rf'; a.textContent='Download'; a.style.marginLeft='auto'; a.setAttribute('download','');
      row.appendChild(nm); row.appendChild(a); b.appendChild(row);
+     if(dl.encrypted){
+       b.appendChild(el('note','Encrypted .tar.gz.gpg (gpg AES-256) — passphrase in Secret Manager secret '+(dl.key_secret||'backup-passphrase')+'. Decrypt:  gpg --decrypt '+dl.object+' > '+dl.object.replace(/\.gpg$/,'')+'  then open the .tar.gz with any archive tool. Signed URL ~24h · '+dl.object));
+       b.appendChild(el('note','Restore onto a fresh OSS install: clone the repo, then  ops/backup/fleet-restore.sh --archive <file|gs://…> --db fleet --config --lake --confirm  (decrypts automatically; add --passphrase-file F if the secret is in another project). Lose the secret and the backup is unrecoverable.'));
+     } else {
      b.appendChild(el('note','Plain .tar.gz — open it with any archive tool (double-click, 7-Zip, Finder). Signed URL ~24h · '+dl.object));
      b.appendChild(el('note','Restore onto a fresh OSS install: clone the repo, then  ops/backup/fleet-restore.sh --archive <file|gs://…> --db fleet --config --lake --confirm'));
+     }
    } else if(dl&&dl.error){ b.appendChild(el('note','download URL error: '+dl.error)); }
    else { b.appendChild(el('note','No completed backup yet — click Back up now. full includes the ~5GB data-lake and takes a few minutes.')); }
  }
  async function createBackup(){
    var sc=(document.getElementById('bkScope')||{}).value||'full';
-   if(!confirm('Create a '+sc+' backup now? Plain .tar.gz you can open with any archive tool — no key needed.')) return;
+   var enc=BK_ENC&&BK_ENC.enabled;
+   if(!confirm('Create a '+sc+' backup now? '+(enc?('Encrypted .tar.gz.gpg (AES-256) — the passphrase stays in Secret Manager secret '+BK_ENC.secret+'.'):'Plain .tar.gz you can open with any archive tool — no key needed.'))) return;
    try{ var r=await fetch('/api/backup/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({scope:sc})}); var j=await r.json();
      if(!j.ok){ alert('backup error: '+(j.error||'?')); return; }
      alert('Backup started ('+j.id+', '+j.scope+'). Runs in the background — the download link appears here when it finishes.'); pollBackups(0);

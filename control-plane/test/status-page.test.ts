@@ -13,6 +13,11 @@ const read = (p: string) => readFileSync(join(here, p), "utf8");
 const status = read("../src/status.html");
 const index = read("../src/index.ts");
 const backup = read("../../ops/backup/fleet-backup.sh");
+const restore = read("../../ops/backup/fleet-restore.sh");
+const crypt = read("../../ops/backup/fleet-backup-crypt.sh");
+const bkmod = read("../src/mods/backup.ts");
+const installer = read("../../install/install.sh");
+const firstboot = read("../../install/vm-firstboot.sh");
 
 let pass = 0, fail = 0;
 function ok(label: string, cond: boolean, detail?: string) {
@@ -44,13 +49,41 @@ ok("backup card not labelled 'encrypted'", !has(status, "one encrypted file"), "
 ["function renderBilling", "function renderBackups", "Back up now"].forEach((n) =>
   ok("status page keeps section: " + n, has(status, n)));
 
-// ---- BACKUP is plain, VM+lake, and NEVER dumps Secret Manager ----
-ok("backup is plain tar.gz", has(backup, '-czf "$ARCHIVE"') && !has(backup, "--symmetric"),
-  "backup is not plain gzip");
-ok("backup includes the data-lake (scope=full)", has(backup, "data-lake (full only)") && has(backup, 'rsync -r "gs://$LAKE"'),
+// ---- BACKUP: plain when unconfigured, encrypted when configured, VM+lake, NEVER dumps Secret Manager ----
+// [FLEET-BACKUP-V2] (2026-10-31) the backup tars the stage and the LOCAL lake (/srv/fleet/lake; the
+// old GCS lake bucket no longer exists) and pipes it through gzip -1.
+// [BACKUP-CRYPT-V1] (2026-11-07) encryption is OPT-IN via BACKUP_ENCRYPT_SECRET in /etc/fleet/backup.env:
+// unset (the production fleet) -> the unchanged plain .tar.gz line; set (the OSS installer) -> the same
+// stream through gpg --symmetric AES256 -> *.tar.gz.gpg, passphrase on fd 3 from Secret Manager.
+ok("unconfigured backup stays plain tar.gz", has(backup, '| gzip -1 > "$ARCHIVE"') && has(backup, 'METAENC=\'"encrypted":false\''),
+  "the plain .tar.gz path changed");
+ok("encryption is opt-in on BACKUP_ENCRYPT_SECRET", has(backup, 'ENC_SECRET="${BACKUP_ENCRYPT_SECRET:-}"') && has(backup, 'if [ -n "$ENC_SECRET" ]; then'),
+  "encryption is no longer gated on BACKUP_ENCRYPT_SECRET");
+ok("configured backup is gpg AES256 -> .tar.gz.gpg", has(backup, '| gzip -1 | bk_encrypt 3< <(printf') && has(backup, 'EXT=".gpg"')
+  && has(crypt, "--symmetric --cipher-algo AES256") && has(backup, '"encrypted\\":true'), "the encrypted backup path is gone");
+ok("passphrase never on a command line", !/--passphrase[ =]/.test(crypt + backup + restore) && has(crypt, "--passphrase-fd 3")
+  && !/gpg[^\n]*--passphrase-file/.test(crypt), "a passphrase reaches gpg some other way than fd 3");
+ok("metadata bearer token not on curl's command line", has(crypt, "curl -sf --config -") && !/curl[^\n]*Authorization: Bearer \$/.test(crypt),
+  "the Secret Manager bearer token is on a curl argv");
+ok("passphrase not in manifest/sidecar/output", !/(ENCMAN|METAENC|ENCOUT|RHINT)=[^\n]*BKPASS/.test(backup) && !/BKPASS[^\n]*(STAGE|MANIFEST|meta\.json|echo)/.test(backup),
+  "the passphrase can reach the manifest, sidecar or output");
+ok("backup includes the data-lake (scope=full)", has(backup, "LAKEDIR=/srv/fleet/lake") && has(backup, "TARX=(-C /srv/fleet lake)"),
   "the data-lake was dropped from the backup");
-ok("backup does NOT dump Secret Manager", !has(backup, "secrets versions access latest --secret=") && !has(backup, '"$STAGE/secrets'),
+ok("backup does NOT dump Secret Manager", !has(backup, "secrets versions access") && !has(backup, '"$STAGE/secrets') && !has(crypt, "STAGE"),
   "the Secret Manager dump is back in the backup");
+ok("retention also rotates .tar.gz.gpg", has(backup, '"gs://$BACKUPS/fleet-backup-*-$SCOPE.tar.gz.gpg"'), "encrypted archives are never pruned");
+ok("restore auto-decrypts .gpg / sidecar flag / OpenPGP bytes", has(restore, "*.gpg) ENC=1") && has(restore, "'\"encrypted\":true'")
+  && has(restore, "8c|c3) ENC=1") && has(restore, "bk_decrypt <"), "fleet-restore.sh no longer auto-decrypts");
+ok("restore takes --passphrase-file and --key-secret", has(restore, "--passphrase-file) PASSFILE_ARG") && has(restore, "--key-secret) KEYSEC_ARG"),
+  "restore lost its passphrase flags");
+ok("wrong passphrase fails loudly", has(restore, 'rfail "decrypt failed'), "a failed decrypt is no longer an error");
+ok("installer creates the passphrase once + warns", has(installer, 'sec $BK_SECRET "$(head -c 48 /dev/urandom | base64') && has(installer, "backup-encrypt-secret=$BK_SECRET")
+  && has(installer, "unrecoverable"), "install.sh no longer creates/announces the backup passphrase");
+ok("first boot writes BACKUP_ENCRYPT_SECRET", has(firstboot, 'echo "BACKUP_ENCRYPT_SECRET=$BKSEC"') && has(firstboot, " gnupg "),
+  "vm-firstboot.sh no longer configures encrypted backups");
+ok("console accepts and labels .tar.gz.gpg", has(bkmod, "tar\\.gz\\.gpg") && has(bkmod, "encrypted: done.encrypted") && has(status, "if(dl.encrypted)")
+  && has(status, "gpg --decrypt"), "the Flow Hood does not know about encrypted archives");
+ok("plain download text only for plain archives", /\} else \{\s*b\.appendChild\(el\('note','Plain \.tar\.gz/.test(status), "'Plain .tar.gz' is shown for encrypted archives");
 
 console.log("");
 console.log(fail === 0 ? "ALL " + pass + " ASSERTIONS PASS" : pass + " pass, " + fail + " FAIL");

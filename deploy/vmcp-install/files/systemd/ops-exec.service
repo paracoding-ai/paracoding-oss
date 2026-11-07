@@ -1,0 +1,15 @@
+[Unit]
+Description=Paracoding ops-exec (loopback root exec for vmcp_sudo, token-gated, 127.0.0.1:8022)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Root on purpose: this daemon is what vmcp_sudo runs through. It binds 127.0.0.1 only and
+# refuses every POST whose X-Ops-Token does not match /opt/pc-ops-token (root, 0600).
+User=root
+ExecStart=/usr/bin/python3 -I /opt/ops-exec.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -10,12 +10,16 @@ fail(){ echo "PARACODING-FAILED $*"; exit 1; }
 P=$(md project/project-id); PN=$(md project/numeric-project-id)
 CON=$(md instance/attributes/console-url); MCP=$(md instance/attributes/mcp-url); ADMIN=$(md instance/attributes/admin-email)
 SRC=$(md instance/attributes/source-uri); BK=$(md instance/attributes/backup-bucket); GLV=$(md instance/attributes/gitlab-version)
+# [BACKUP-CRYPT-V1] Secret Manager secret holding the backup passphrase (install.sh creates backup-passphrase).
+# Absent -> backup-passphrase; "none" -> plain .tar.gz backups (not recommended).
+BKSEC=$(curl -sf -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/instance/attributes/backup-encrypt-secret" || true)
+BKSEC=${BKSEC:-backup-passphrase}; case "$BKSEC" in none) BKSEC="";; *[!A-Za-z0-9_-]*) fail "bad backup-encrypt-secret metadata";; esac
 ZONE=$(md instance/zone | awk -F/ '{print $NF}'); R=${ZONE%-*}; VM=$(hostname)
 export DEBIAN_FRONTEND=noninteractive
 PSQL="/opt/gitlab/embedded/bin/psql -h /var/opt/gitlab/postgresql"
 
 if [ ! -f $S/gitlab ]; then say "gitlab $GLV"
-  apt-get update -qq >/dev/null; apt-get install -y -qq curl openssh-server ca-certificates tzdata perl python3 >/dev/null
+  apt-get update -qq >/dev/null; apt-get install -y -qq curl openssh-server ca-certificates tzdata perl python3 gnupg >/dev/null
   curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash >/dev/null 2>&1
   mkdir -p /etc/gitlab; cat > /etc/gitlab/gitlab.rb <<RB
 external_url '$CON/gitlab'
@@ -66,7 +70,7 @@ PCGIT_BACKEND=gitlab
 VERTEX_LOCATION=us-central1
 EOF
   { echo "PC_PG_URL=postgres://fleet@/fleet?host=/var/opt/gitlab/postgresql"; for k in PC_OAUTH_STORE PC_STRAINS_STORE PC_JOURNAL_STORE PC_MEMORY_STORE PC_WORKITEMS_STORE PC_CHATHISTORY_STORE PC_KV_CONFIG PC_KV_MSG PC_KV_CONFIRMS PC_KV_SESS PC_KV_BUDGET PC_TOKENUSAGE PC_KV_CHAT PC_KV_EXEC; do echo "$k=pg"; done; } > /etc/fleet/fleet-pg.env
-  echo "BACKUP_BUCKET=$BK" > /etc/fleet/backup.env
+  { echo "BACKUP_BUCKET=$BK"; [ -n "$BKSEC" ] && echo "BACKUP_ENCRYPT_SECRET=$BKSEC"; } > /etc/fleet/backup.env
   chmod 640 /etc/fleet/*.env; chgrp fleet /etc/fleet/*.env
   cat > /usr/local/sbin/fleet-load-cp-secrets.sh <<'LOADER'
 #!/bin/bash
@@ -75,8 +79,11 @@ MD=http://metadata.google.internal/computeMetadata/v1
 P=$(curl -s -H Metadata-Flavor:Google $MD/project/project-id)
 AT=$(curl -s -H Metadata-Flavor:Google $MD/instance/service-accounts/default/token | sed 's/.*"access_token":"//;s/".*//')
 S(){ curl -s -H "Authorization: Bearer $AT" "https://secretmanager.googleapis.com/v1/projects/$P/secrets/$1/versions/latest:access" | grep -o '"data": *"[^"]*"' | sed 's/.*"data": *"//;s/"$//' | base64 -d 2>/dev/null; }
-T=$(mktemp); { printf 'WA_SESSION_SECRET=%s\n' "$(S wa-session-secret)"; printf 'AGENT_TOKENS_B64=%s\n' "$(S agent-tokens-b64)"; printf 'APPROVAL_MAC_KEY=%s\n' "$(S approval-mac-key)"; } > $T
-if grep -q '^WA_SESSION_SECRET=.\+' $T; then install -m 640 -o fleet -g fleet $T /run/fleet/control-plane-secrets.env; echo "[secret-loader] loaded $(grep -c '=.\+' $T)/3"; else echo "[secret-loader] WA_SESSION_SECRET empty; refusing" >&2; fi; rm -f $T
+T=$(mktemp); { printf 'WA_SESSION_SECRET=%s\n' "$(S wa-session-secret)"; printf 'AGENT_TOKENS_B64=%s\n' "$(S agent-tokens-b64)"; printf 'APPROVAL_MAC_KEY=%s\n' "$(S approval-mac-key)"
+  # OPS_TOKEN (vmcp_sudo -> ops-exec) is local to this box, not in Secret Manager: read the daemon's own token
+  # (root 0600) on every start, so a rotated token reaches the control plane on its next restart.
+  [ -s /opt/pc-ops-token ] && printf 'OPS_TOKEN=%s\n' "$(tr -d ' \n' </opt/pc-ops-token)"; } > $T
+if grep -q '^WA_SESSION_SECRET=.\+' $T; then install -m 640 -o fleet -g fleet $T /run/fleet/control-plane-secrets.env; echo "[secret-loader] loaded $(grep -c '=.\+' $T) values"; else echo "[secret-loader] WA_SESSION_SECRET empty; refusing" >&2; fi; rm -f $T
 LOADER
   chmod 755 /usr/local/sbin/fleet-load-cp-secrets.sh
   cat > /etc/systemd/system/fleet-control-plane.service <<'UNIT'
@@ -108,6 +115,88 @@ UNIT
   for i in $(seq 1 40); do c=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/.well-known/oauth-authorization-server); [ "$c" = 200 ] && break; sleep 3; done
   [ "$c" = 200 ] || fail "control plane did not come up: journalctl -u fleet-control-plane"
   touch $S/controlplane; fi
+
+# [V21-EXEC-STAGE-V1] run_command needs the signed executor (gate-exec, 127.0.0.1:8091) and vmcp_sudo
+# needs the root ops daemon (ops-exec, 127.0.0.1:8022). install.sh created the KMS signing key, the
+# exec-records bucket and their IAM, and passed the names as metadata.
+if [ ! -f $S/exec ]; then say "executor (gate-exec) and root ops daemon (ops-exec)"
+  F=/srv/fleet/src/deploy/vmcp-install/files
+  mdf(){ curl -sf -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1" || true; }
+  KV=$(mdf approval-sig-key-version); XB=$(mdf exec-bucket)
+  case "$KV" in projects/"$P"/locations/*/keyRings/*/cryptoKeys/*/cryptoKeyVersions/[0-9]*) ;;
+    *) fail "instance metadata approval-sig-key-version is missing or malformed ('$KV'); re-run install.sh";; esac
+  printf '%s' "$XB" | grep -Eq '^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$' || fail "instance metadata exec-bucket is missing or malformed ('$XB'); re-run install.sh"
+  CONHOST=${CON#https://}; CONHOST=${CONHOST%%/*}
+  [ -n "$CONHOST" ] || fail "console-url metadata gives no host for PC_RP_ID"
+
+  # 1) The VM SA must be able to sign (control plane) and read the public key (gate-exec). IAM can
+  #    take a few minutes to propagate after install.sh granted it, so retry before failing.
+  ok=""; pk=""; sg=""; for i in $(seq 1 30); do
+    AT=$(curl -s -H Metadata-Flavor:Google http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | sed 's/.*"access_token":"//;s/".*//')
+    pk=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AT" "https://cloudkms.googleapis.com/v1/$KV/publicKey")
+    sg=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $AT" -H 'content-type: application/json' \
+      -d '{"digest":{"sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}' "https://cloudkms.googleapis.com/v1/$KV:asymmetricSign")
+    [ "$pk" = 200 ] && [ "$sg" = 200 ] && ok=1 && break; sleep 10; done
+  unset AT
+  [ -n "$ok" ] || fail "KMS key $KV not usable by this VM's service account (publicKey HTTP $pk, asymmetricSign HTTP $sg); check roles/cloudkms.signer + roles/cloudkms.publicKeyViewer on the key"
+
+  # 2) gate-exec: python venv with the deps gate-exec/Dockerfile installs (versions as verified in production).
+  apt-get install -y -qq python3-venv >/dev/null 2>&1 || fail "apt-get install python3-venv"
+  [ -x /srv/fleet/gate-exec-venv/bin/python ] || sudo -u fleet -H python3 -m venv /srv/fleet/gate-exec-venv || fail "gate-exec venv"
+  sudo -u fleet -H /srv/fleet/gate-exec-venv/bin/pip install -q --no-cache-dir --disable-pip-version-check \
+    flask==3.1.3 cryptography==50.0.2 google-cloud-firestore==2.34.0 >/var/log/paracoding-gate-exec-pip.log 2>&1 \
+    || fail "gate-exec python deps, see /var/log/paracoding-gate-exec-pip.log"
+  # Jobs resolve gcloud through the unit's PATH; wait for the tarball Cloud SDK the control plane installs
+  # (the snap gcloud cannot start under NoNewPrivileges).
+  for i in $(seq 1 60); do sudo -u fleet -H /srv/fleet/google-cloud-sdk/bin/gcloud --version >/dev/null 2>&1 && break; sleep 5; done
+  sudo -u fleet -H /srv/fleet/google-cloud-sdk/bin/gcloud --version >/dev/null 2>&1 || echo "PARACODING-WARN /srv/fleet/google-cloud-sdk not ready; run_command jobs fall back to the snap gcloud"
+  cat > /etc/fleet/gate-exec.env <<EOF
+PORT=8091
+EXEC_TIMEOUT=870
+APPROVAL_REQUIRE_SIGNED=1
+APPROVAL_SIG_KEY_VERSIONS=$KV
+PC_EXEC_BUCKET=$XB
+PC_LOCKOUT_CP_SVC=vmcp-ui
+PC_LOCKOUT_MC_SVC=vmcp-mcp
+PC_LOCKOUT_SERVICES=vmcp-ui vmcp-mcp
+PC_LOCKOUT_SECRETS=wa-session-secret agent-tokens-b64 approval-mac-key
+PC_GUARDRAILS=0
+PC_RP_ID=$CONHOST
+EOF
+  chown root:fleet /etc/fleet/gate-exec.env; chmod 640 /etc/fleet/gate-exec.env
+  install -m 644 $F/systemd/fleet-gate-exec.service /etc/systemd/system/fleet-gate-exec.service
+  install -d -m 755 /etc/systemd/system/fleet-gate-exec.service.d
+  install -m 644 $F/systemd/fleet-gate-exec.service.d/10-sdk-path.conf /etc/systemd/system/fleet-gate-exec.service.d/10-sdk-path.conf
+  systemctl daemon-reload; systemctl enable fleet-gate-exec >/dev/null 2>&1; systemctl restart fleet-gate-exec
+  c=""; for i in $(seq 1 30); do c=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8091/healthz); [ "$c" = 200 ] && break; sleep 2; done
+  [ "$c" = 200 ] || fail "gate-exec not healthy (HTTP $c: $(curl -s http://127.0.0.1:8091/healthz | head -c 300)); journalctl -u fleet-gate-exec"
+
+  # 3) ops-exec: random token (root 0600), daemon + unit, health and token checks.
+  if [ ! -s /opt/pc-ops-token ]; then (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /opt/pc-ops-token); fi
+  chown root:root /opt/pc-ops-token; chmod 600 /opt/pc-ops-token
+  install -m 755 -o root -g root $F/ops-exec.py /opt/ops-exec.py
+  install -m 644 $F/systemd/ops-exec.service /etc/systemd/system/ops-exec.service
+  systemctl daemon-reload; systemctl enable ops-exec >/dev/null 2>&1; systemctl restart ops-exec
+  c=""; for i in $(seq 1 20); do c=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8022/); [ "$c" = 200 ] && break; sleep 1; done
+  [ "$c" = 200 ] || fail "ops-exec not listening on 127.0.0.1:8022; journalctl -u ops-exec"
+  H=$(mktemp); chmod 600 "$H"; printf 'X-Ops-Token: %s\n' "$(cat /opt/pc-ops-token)" > "$H"
+  r=$(curl -s -H @"$H" --data-binary 'id -u' http://127.0.0.1:8022/); rm -f "$H"
+  case "$r" in *'"exit": 0'*'"stdout": "0\n"'*) ;; *) fail "ops-exec token round-trip failed: $(printf '%s' "$r" | head -c 200)";; esac
+  c=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Ops-Token: wrong' --data-binary 'true' http://127.0.0.1:8022/)
+  [ "$c" = 403 ] || fail "ops-exec accepted a wrong token (HTTP $c)"
+
+  # 4) Control plane: the signing key + exec bucket go in its env file; OPS_TOKEN comes from the
+  #    secret loader (it reads /opt/pc-ops-token as root on every start). Restart once and verify.
+  sed -i '/^APPROVAL_SIG_KEY_VERSION=/d;/^PC_EXEC_BUCKET=/d' /etc/fleet/control-plane.env
+  printf 'APPROVAL_SIG_KEY_VERSION=%s\nPC_EXEC_BUCKET=%s\n' "$KV" "$XB" >> /etc/fleet/control-plane.env
+  grep -q OPS_TOKEN /usr/local/sbin/fleet-load-cp-secrets.sh || fail "secret loader does not deliver OPS_TOKEN"
+  systemctl restart fleet-control-plane
+  c=""; for i in $(seq 1 40); do c=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/.well-known/oauth-authorization-server); [ "$c" = 200 ] && break; sleep 3; done
+  [ "$c" = 200 ] || fail "control plane did not come back after the executor stage: journalctl -u fleet-control-plane"
+  grep -q '^OPS_TOKEN=.\+' /run/fleet/control-plane-secrets.env || fail "OPS_TOKEN did not reach /run/fleet/control-plane-secrets.env"
+  CPPID=$(systemctl show -p MainPID --value fleet-control-plane)
+  tr '\0' '\n' < "/proc/$CPPID/environ" | grep -qxF "APPROVAL_SIG_KEY_VERSION=$KV" || fail "control plane is not running with APPROVAL_SIG_KEY_VERSION"
+  touch $S/exec; fi
 
 if [ ! -f $S/sso ]; then say "gitlab single sign-on"
   CID=""; for i in $(seq 1 60); do

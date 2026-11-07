@@ -68,6 +68,29 @@ No domain, DNS or certificate is needed. To use your own domain, put a Google HT
 3. In the Flow Hood, bind that connector to `fleet-advisor`. Run `whoami` to confirm.
 4. Provision more strains from the Flow Hood when you need them.
 
+## Uninstall
+
+From the same checkout in Cloud Shell:
+
+```bash
+./install/uninstall.sh --project YOUR_PROJECT_ID          # dry run: lists what it would delete
+./install/uninstall.sh --project YOUR_PROJECT_ID --yes    # deletes it
+```
+
+It removes, by exact name, what the installer created: the two Cloud Run routers and their IAM and
+IAP bindings, the VM and its boot disk, the internal address, the NAT and router, the IAP SSH firewall
+rule, the Artifact Registry repo (only if it holds nothing but the two router images), the source and
+exec-records buckets, the generated secrets, the four service accounts and their project roles. Anything
+already gone is reported and skipped, so it is safe to re-run. Pass `--region`/`--zone` if you
+installed outside `us-east1`.
+
+- **The backups bucket is kept** (`gs://PROJECT-paracoding-backups`, the only copy of your data)
+  unless you also pass `--delete-backups`.
+- **The KMS signing key stays.** Cloud KMS never deletes key rings or keys; the uninstaller schedules
+  every key version for destruction (after 30 days by default), so the key can no longer sign anything.
+- Enabled APIs and Google-managed service agents are left as they are. To remove everything at once,
+  delete the project instead.
+
 ## Cost
 
 Measured on the reference install: about **$6 a day** with the VM running all day, about **$4 a
@@ -78,7 +101,7 @@ routers scale to zero. Model usage is billed by whichever provider you connect.
 
 | Path | What it is |
 | --- | --- |
-| `install/` | `install.sh` (Cloud Shell) and `vm-firstboot.sh` (VM startup script) |
+| `install/` | `install.sh` and `uninstall.sh` (Cloud Shell), `vm-firstboot.sh` (VM startup script) |
 | `control-plane/` | Flow Hood console, MCP server, OAuth, strains, tools (TypeScript, Node 24) |
 | `deploy/ui/vmcp-ui`, `deploy/mcp/vmcp-mcp` | the two Cloud Run routers, with Picket |
 | `deploy/vmcp-install/files/` | patching, idle-off and backup systemd units |
@@ -86,14 +109,25 @@ routers scale to zero. Model usage is billed by whichever provider you connect.
 | `ops/db/schema.sql` | the fleet database schema |
 | `gate-exec/` | the KMS-signed command executor |
 
-## Known gaps in v21.0
+## What's new in v21.1
 
-- `gate-exec` (signed execution) and the root ops daemon are in the tree but **not yet installed** by
-  `install.sh`; tools that need them (`run_command`, `vmcp_sudo`) return errors until they are.
-- Browser-driving tools need headless Chrome on the VM, which the installer does not set up yet.
-- Backups are not encrypted; keep the backup bucket private.
-- `uninstall.sh` is not written yet: delete the project, or remove the resources named `paracoding-*`,
-  `vmcp-ui` and `vmcp-mcp`.
+- **Signed execution and the root ops daemon now install with everything else.** `run_command` runs
+  through `gate-exec`, which verifies a Cloud KMS signature (`paracoding-approvals/approval-signing`,
+  EC P-256) on every approval and records each run in an exec bucket. `vmcp_sudo` talks to a
+  loopback-only root daemon that now handles requests in parallel, so one long command no longer
+  blocks the rest.
+- **Backups are encrypted.** Each archive is OpenPGP (AES-256) encrypted with a passphrase kept in
+  Secret Manager (`backup-passphrase`); restore decrypts automatically. **Export that secret and
+  keep it somewhere safe: without it no backup can be restored.**
+- **`install/uninstall.sh`** removes everything the installer created (see Uninstall).
+- Flow Hood's backup **Download** and **Verify** now use your install's backup bucket.
+
+## Known limits
+
+- Anything running as the `fleet` user on the VM (the control plane, approved `run_command` jobs)
+  can reach the root ops daemon. Treat strain access as root on the VM.
+- `gate-exec` listens on port 8091 on all VM interfaces; every job still needs a KMS-signed approval.
+- Installs made with v21.0 do not pick up v21.1's first-boot changes; reinstall into a new project.
 
 ## License
 

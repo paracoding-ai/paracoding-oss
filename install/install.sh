@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Paracoding v21 installer. Run from the repository root in Cloud Shell, as an Owner of the project:
 #   ./install/install.sh --project MY_PROJECT --admin me@example.com [--region us-east1] [--zone us-east1-b] [--no-wait]
-# It creates: APIs, an IAP-only SSH rule, Cloud NAT, a fixed internal IP, four service accounts, three
-# generated secrets, a source bucket and a backups bucket, one VM (GitLab CE + Postgres + control plane,
+# It creates: APIs, an IAP-only SSH rule, Cloud NAT, a fixed internal IP, four service accounts, four
+# generated secrets (one is the backup passphrase), a source bucket and a backups bucket, a Cloud KMS
+# approval-signing key and an exec-records bucket (run_command executor), one VM (GitLab CE + Postgres +
+# control plane + executor,
 # no public IP), and two Cloud Run routers (vmcp-ui behind IAP, vmcp-mcp as the MCP edge). Re-runnable.
 set -euo pipefail
 REGION=us-east1; ZONE=""; PROJECT=""; ADMIN=""; WAIT=1; MACHINE=e2-standard-4; DISK=100; GITLAB_VERSION=19.5.3
@@ -19,11 +21,12 @@ retry(){ for i in 1 2 3 4 5 6 7 8; do "$@" && return 0; sleep 8; done; return 1;
 PN=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
 CON=https://vmcp-ui-$PN.$REGION.run.app; MCP=https://vmcp-mcp-$PN.$REGION.run.app
 VM=paracoding-vm; SRC_BUCKET=$PROJECT-paracoding-src; BK_BUCKET=$PROJECT-paracoding-backups
+EXEC_BUCKET=$PROJECT-paracoding-exec; KEYRING=paracoding-approvals; SIGKEY=approval-signing
 SA(){ echo "$1@$PROJECT.iam.gserviceaccount.com"; }
 
 step "APIs"
 g services enable compute.googleapis.com run.googleapis.com iap.googleapis.com artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com secretmanager.googleapis.com iam.googleapis.com logging.googleapis.com storage.googleapis.com aiplatform.googleapis.com
+  cloudbuild.googleapis.com secretmanager.googleapis.com iam.googleapis.com logging.googleapis.com storage.googleapis.com aiplatform.googleapis.com cloudkms.googleapis.com
 
 step "network"
 g compute firewall-rules describe paracoding-allow-iap-ssh >/dev/null 2>&1 || g compute firewall-rules create paracoding-allow-iap-ssh \
@@ -50,6 +53,10 @@ sec(){ g secrets describe $1 >/dev/null 2>&1 && return 0; printf '%s' "$2" | g s
 sec wa-session-secret "$(head -c 48 /dev/urandom | base64 | tr -d '\n/+=' | cut -c1-64)"
 sec agent-tokens-b64 "$(printf '{}' | base64)"
 sec approval-mac-key "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# [BACKUP-CRYPT-V1] backups are encrypted with this passphrase (gpg AES256). Created ONCE and never rotated by a
+# re-run: replacing it would make every existing backup unrecoverable.
+BK_SECRET=backup-passphrase
+sec $BK_SECRET "$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
 
 step "storage"
 g artifacts repositories describe cloud-run-source-deploy --location=$REGION >/dev/null 2>&1 || \
@@ -57,20 +64,50 @@ g artifacts repositories describe cloud-run-source-deploy --location=$REGION >/d
 for b in $SRC_BUCKET $BK_BUCKET; do gcloud storage buckets describe gs://$b >/dev/null 2>&1 || \
   gcloud storage buckets create gs://$b --project=$PROJECT --location=$REGION --uniform-bucket-level-access --format=none; done
 
+step "executor (approval-signing key, exec-records bucket)"
+# [V21-EXEC-INSTALL-V1] The control plane signs every run_command approval with this key (Cloud KMS
+# asymmetricSign) and gate-exec verifies it with the public key; gate-exec only accepts
+# EC_SIGN_P256_SHA256 (PC_SIG_ALG in gate-exec/exec_server.py). Both run on the VM as paracoding-vm@.
+g kms keyrings describe $KEYRING --location=$REGION >/dev/null 2>&1 || g kms keyrings create $KEYRING --location=$REGION --format=none
+g kms keys describe $SIGKEY --keyring=$KEYRING --location=$REGION >/dev/null 2>&1 || g kms keys create $SIGKEY --keyring=$KEYRING \
+  --location=$REGION --purpose=asymmetric-signing --default-algorithm=ec-sign-p256-sha256 --protection-level=software --format=none
+# A key left by an earlier uninstall has only versions scheduled for destruction (keys themselves can't
+# be deleted): give it a fresh version so a reinstall into the same project works. [V21.1-KMS-REINSTALL]
+if [ -z "$(g kms keys versions list --key=$SIGKEY --keyring=$KEYRING --location=$REGION --filter='state=ENABLED OR state=PENDING_GENERATION' --format='value(name)' 2>/dev/null)" ]; then
+  echo "   no usable version of $KEYRING/$SIGKEY: creating one"
+  g kms keys versions create --key=$SIGKEY --keyring=$KEYRING --location=$REGION --format=none
+fi
+KEYVER=""; for i in $(seq 1 30); do
+  KEYVER=$(g kms keys versions list --key=$SIGKEY --keyring=$KEYRING --location=$REGION --filter='state=ENABLED AND algorithm=EC_SIGN_P256_SHA256' \
+    --sort-by=~createTime --limit=1 --format='value(name)' 2>/dev/null || true)
+  [ -n "$KEYVER" ] && break; sleep 4; done
+[ -n "$KEYVER" ] || { echo "no ENABLED EC_SIGN_P256_SHA256 version of KMS key $KEYRING/$SIGKEY in $REGION" >&2; exit 1; }
+echo "   approval-signing key $KEYVER"
+kbind(){ retry g kms keys add-iam-policy-binding $SIGKEY --keyring=$KEYRING --location=$REGION --member=serviceAccount:$(SA paracoding-vm) --role=$1 --format=none >/dev/null; }
+kbind roles/cloudkms.signer; kbind roles/cloudkms.publicKeyViewer
+# gate-exec writes the single-use claim, result and journal objects (create-only); the control plane reads them back.
+gcloud storage buckets describe gs://$EXEC_BUCKET >/dev/null 2>&1 || gcloud storage buckets create gs://$EXEC_BUCKET --project=$PROJECT \
+  --location=$REGION --uniform-bucket-level-access --public-access-prevention --format=none
+for r in roles/storage.objectCreator roles/storage.objectViewer; do
+  retry gcloud storage buckets add-iam-policy-binding gs://$EXEC_BUCKET --member=serviceAccount:$(SA paracoding-vm) --role=$r --format=none >/dev/null; done
+
 step "source"
 TMP=$(mktemp -d); tar -C "$ROOT" --exclude=.git -czf $TMP/src.tgz .; gcloud storage cp $TMP/src.tgz gs://$SRC_BUCKET/paracoding-src.tgz --quiet; rm -rf $TMP
 
 step "VM"
-if g compute instances describe $VM --zone=$ZONE >/dev/null 2>&1; then echo "   $VM exists; leaving it as is"; else
+if g compute instances describe $VM --zone=$ZONE >/dev/null 2>&1; then echo "   $VM exists; leaving it as is (executor metadata refreshed)"
+  g compute instances add-metadata $VM --zone=$ZONE --metadata=approval-sig-key-version=$KEYVER,exec-bucket=$EXEC_BUCKET --format=none
+else
   g compute instances create $VM --zone=$ZONE --machine-type=$MACHINE --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud \
     --boot-disk-size=${DISK}GB --boot-disk-type=pd-balanced --private-network-ip=$VMIP --no-address \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
     --service-account=$(SA paracoding-vm) --scopes=cloud-platform --tags=paracoding-vm \
-    --metadata=admin-email=$ADMIN,console-url=$CON,mcp-url=$MCP,source-uri=gs://$SRC_BUCKET/paracoding-src.tgz,backup-bucket=$BK_BUCKET,gitlab-version=$GITLAB_VERSION \
+    --metadata=admin-email=$ADMIN,console-url=$CON,mcp-url=$MCP,source-uri=gs://$SRC_BUCKET/paracoding-src.tgz,backup-bucket=$BK_BUCKET,backup-encrypt-secret=$BK_SECRET,gitlab-version=$GITLAB_VERSION,approval-sig-key-version=$KEYVER,exec-bucket=$EXEC_BUCKET \
     --metadata-from-file=startup-script=$ROOT/install/vm-firstboot.sh --format=none
 fi
 
 step "routers (Cloud Run)"
+echo "   (a first \"does not have storage.objects.get access\" error is new-account IAM propagation; the build is retried)"
 g beta services identity create --service=iap.googleapis.com --format=none >/dev/null 2>&1 || true
 COMMON=(--region=$REGION --build-service-account=projects/$PROJECT/serviceAccounts/$(SA paracoding-build) --min-instances=0 --max-instances=2
         --memory=256Mi --timeout=3600 --ingress=all --network=default --subnet=default --vpc-egress=private-ranges-only)
@@ -97,5 +134,12 @@ Paracoding v21 is installed in $PROJECT.
   GitLab:               $CON/gitlab/   (sign in with "Paracoding IAP")
   MCP server:           $MCP/mcp       (add to claude.ai as a custom connector)
 New connectors land on the read-only fleet-onboarder strain; bind yours to fleet-advisor in the Flow Hood.
-Backups: daily to gs://$BK_BUCKET (newest 7 kept). The VM stops itself after 2 idle hours; the console wakes it.
+Backups: daily to gs://$BK_BUCKET (newest 7 kept), ENCRYPTED (gpg AES256, *.tar.gz.gpg) with the
+  passphrase in Secret Manager secret "$BK_SECRET". The VM stops itself after 2 idle hours; the console wakes it.
+
+  !! If that secret is lost or deleted, EVERY backup is unrecoverable -- nobody can decrypt them. !!
+  Export it now and keep it somewhere outside this project (a password manager, an offline safe):
+    gcloud secrets versions access latest --secret=$BK_SECRET --project=$PROJECT > $BK_SECRET.txt
+  Decrypt a downloaded backup by hand:  gpg --decrypt fleet-backup-....tar.gz.gpg > fleet-backup-....tar.gz
+  Restore into a different project:     ops/backup/fleet-restore.sh --archive FILE.tar.gz.gpg --passphrase-file $BK_SECRET.txt ...
 DONE

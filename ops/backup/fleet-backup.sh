@@ -1,5 +1,5 @@
 #!/bin/bash
-# fleet-backup.sh -- one-file PLAIN (.tar.gz) system backup -> GCS.  [FLEET-BACKUP-V2 2026-10-31]
+# fleet-backup.sh -- one-file (.tar.gz, optionally .tar.gz.gpg) system backup -> GCS.  [FLEET-BACKUP-V2 2026-10-31]
 # Built from LOCAL paths only: the consolidated vmcp box holds everything a rebuild needs, and the
 # old GCS data-lake bucket no longer exists.
 #   core: db/fleet.dump  (Postgres `fleet` -- oa, vrp, public, msgraph_authz ...)
@@ -8,7 +8,13 @@
 #              + gitlab/ (a FRESH gitlab-backup tar = repos + CI + gitlabhq_production, plus
 #                         gitlab-secrets.json, gitlab.rb and the gitlab-runner config.toml)
 # Secret Manager is NOT included: it lives in GCP and survives the VM.
-# THE ARCHIVE IS NOT ENCRYPTED and contains gitlab-secrets.json and /etc/fleet tokens -- guard the bucket.
+# The archive contains gitlab-secrets.json and /etc/fleet tokens. [BACKUP-CRYPT-V1] Encryption is OPT-IN:
+#   BACKUP_ENCRYPT_SECRET=<Secret Manager secret name> in /etc/fleet/backup.env (the v21 installer sets
+#   backup-passphrase) -> the same tar.gz stream is wrapped in gpg --symmetric --cipher-algo AES256 and
+#   uploaded as fleet-backup-<ts>-<scope>.tar.gz.gpg; MANIFEST.json + the .meta.json sidecar say
+#   "encrypted":true and name the secret (never its value). Passphrase: fetched with the VM metadata token,
+#   handed to gpg on fd 3 only (see fleet-backup-crypt.sh). fleet-restore.sh decrypts automatically.
+#   Unset -> a PLAIN .tar.gz exactly as before (guard the bucket).
 # Runs as ROOT (ops-exec root daemon). Records state in oa.backups.
 # Env: BACKUP_SCOPE=full|core (default full), BACKUP_ID (default bk_<ts>), BACKUP_BY (default operator),
 #      BACKUP_KEEP (default 7: newest archives of this scope kept in the bucket; older ones pruned).
@@ -38,6 +44,23 @@ case "$SCOPE" in full|core) ;; *) echo '{"ok":false,"error":"scope must be full 
 
 { printf 'create schema if not exists oa; create table if not exists oa.backups (id text primary key, created_at timestamptz not null default now(), scope text, status text, object text, bucket text, size_bytes bigint, sha256 text, manifest jsonb, error text, created_by text, finished_at timestamptz);\n'; } | pgq || true
 { printf "insert into oa.backups (id,scope,status,bucket,created_by) values ('%s','%s','running','%s','%s') on conflict (id) do update set status='running', error=null;\n" "$ID" "$SCOPE" "$BACKUPS" "${BY//\'/}"; } | pgq || true
+
+# [BACKUP-CRYPT-V1] resolve the passphrase BEFORE the heavy work, so a missing key fails in seconds.
+ENC_SECRET="${BACKUP_ENCRYPT_SECRET:-}"; EXT=""; BKPASS=""; ENCMAN=""; METAENC='"encrypted":false'; ENCOUT=""
+RHINT='tar -xzf FILE.tar.gz (or any archive tool), then ops/backup/fleet-restore.sh --archive FILE --gitlab --db fleet --config --lake --confirm. GitLab must be installed at gitlab_version first.'
+if [ -n "$ENC_SECRET" ]; then
+  case "$ENC_SECRET" in *[!A-Za-z0-9_-]*) fail "BACKUP_ENCRYPT_SECRET is not a valid secret name";; esac
+  # shellcheck source=fleet-backup-crypt.sh
+  . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fleet-backup-crypt.sh" || fail "fleet-backup-crypt.sh missing"
+  command -v gpg >/dev/null 2>&1 || fail "gpg not installed (apt-get install gnupg)"
+  BKPASS=$(bk_sm_access "$ENC_SECRET") || BKPASS=""
+  [ "${#BKPASS}" -ge 16 ] || fail "backup passphrase secret $ENC_SECRET is unreadable or shorter than 16 chars"
+  EXT=".gpg"; ARCHIVE="$ARCHIVE$EXT"
+  ENCMAN=",\"encrypted\":true,\"cipher\":\"openpgp-symmetric-aes256\",\"key_secret\":\"$ENC_SECRET\""
+  METAENC="\"encrypted\":true,\"cipher\":\"openpgp-symmetric-aes256\",\"key_secret\":\"$ENC_SECRET\""
+  ENCOUT=",\"encrypted\":true,\"key_secret\":\"$ENC_SECRET\""
+  RHINT="gpg --decrypt FILE.tar.gz.gpg > FILE.tar.gz (passphrase = Secret Manager secret $ENC_SECRET), then tar -xzf FILE.tar.gz; or ops/backup/fleet-restore.sh --archive FILE.tar.gz.gpg --gitlab --db fleet --config --lake --confirm, which decrypts automatically (--passphrase-file F when the secret lives in another project). GitLab must be installed at gitlab_version first."
+fi
 
 mkdir -p "$STAGE/db" "$STAGE/etc-fleet"
 chown gitlab-psql:gitlab-psql "$STAGE/db"
@@ -72,20 +95,27 @@ fi
 OSS_SHA=$(git -C /srv/fleet/src -c safe.directory=/srv/fleet/src rev-parse HEAD 2>/dev/null || echo unknown)
 DBSHA=$(sha256sum "$STAGE/db/fleet.dump" | cut -d' ' -f1)
 cat > "$STAGE/MANIFEST.json" <<EOF
-{"id":"$ID","format":"fleet-backup-v2","created_at":"$TS","scope":"$SCOPE","hostname":"$(hostname)","oss_git_sha":"$OSS_SHA","pg_version":"17","gitlab_version":$GLVER,"created_by":"$BY","components":{"db":"db/fleet.dump","config":"etc-fleet/","lake":$LAKEREF,"gitlab":$GLREF},"db_sha256":"$DBSHA","restore":"tar -xzf FILE.tar.gz (or any archive tool), then ops/backup/fleet-restore.sh --archive FILE --gitlab --db fleet --config --lake --confirm. GitLab must be installed at gitlab_version first."}
+{"id":"$ID","format":"fleet-backup-v2","created_at":"$TS","scope":"$SCOPE","hostname":"$(hostname)","oss_git_sha":"$OSS_SHA","pg_version":"17","gitlab_version":$GLVER,"created_by":"$BY","components":{"db":"db/fleet.dump","config":"etc-fleet/","lake":$LAKEREF,"gitlab":$GLREF},"db_sha256":"$DBSHA"$ENCMAN,"restore":"$RHINT"}
 EOF
 
 # 5. tar + gzip -1 (the big parts are already compressed). A file changing under tar is a warning, not a failure.
+#    [BACKUP-CRYPT-V1] encrypted: the same stream goes through gpg (passphrase on fd 3) -- no plaintext archive on disk.
+if [ -n "$ENC_SECRET" ]; then
+  tar -C "$STAGE" --warning=no-file-changed -cf - . "${TARX[@]}" | gzip -1 | bk_encrypt 3< <(printf '%s' "$BKPASS") > "$ARCHIVE"
+  PS=("${PIPESTATUS[@]}"); BKPASS=""
+  { [ "${PS[0]}" -le 1 ] && [ "${PS[1]}" -eq 0 ] && [ "${PS[2]}" -eq 0 ]; } || fail "tar/gzip/gpg failed (tar=${PS[0]} gzip=${PS[1]} gpg=${PS[2]})"
+else
 tar -C "$STAGE" --warning=no-file-changed -cf - . "${TARX[@]}" | gzip -1 > "$ARCHIVE"
 PS=("${PIPESTATUS[@]}")
 { [ "${PS[0]}" -le 1 ] && [ "${PS[1]}" -eq 0 ]; } || fail "tar/gzip failed (tar=${PS[0]} gzip=${PS[1]})"
+fi
 
-SIZE=$(stat -c%s "$ARCHIVE"); SHA=$(sha256sum "$ARCHIVE" | cut -d' ' -f1); OBJ="$BASE.tar.gz"
+SIZE=$(stat -c%s "$ARCHIVE"); SHA=$(sha256sum "$ARCHIVE" | cut -d' ' -f1); OBJ="$BASE.tar.gz$EXT"
 
 # 6. upload archive + sidecar meta (no secrets in meta)
 $GSUTIL -q cp "$ARCHIVE" "gs://$BACKUPS/$OBJ" || fail "upload failed"
 cat > "/var/tmp/$BASE.meta.json" <<EOF
-{"id":"$ID","ts":"$TS","scope":"$SCOPE","object":"$OBJ","bucket":"$BACKUPS","size_bytes":$SIZE,"sha256":"$SHA","db_sha256":"$DBSHA","oss_git_sha":"$OSS_SHA","gitlab_version":$GLVER,"encrypted":false,"status":"done"}
+{"id":"$ID","ts":"$TS","scope":"$SCOPE","object":"$OBJ","bucket":"$BACKUPS","size_bytes":$SIZE,"sha256":"$SHA","db_sha256":"$DBSHA","oss_git_sha":"$OSS_SHA","gitlab_version":$GLVER,$METAENC,"status":"done"}
 EOF
 $GSUTIL -q cp "/var/tmp/$BASE.meta.json" "gs://$BACKUPS/$OBJ.meta.json" || true
 
@@ -97,7 +127,8 @@ MAN=$(cat "$STAGE/MANIFEST.json")
 #    Names sort by their UTC timestamp, so lexical order is age order.
 KEEP="${BACKUP_KEEP:-7}"
 if [ "$KEEP" -ge 1 ] 2>/dev/null; then
-  $GSUTIL ls "gs://$BACKUPS/fleet-backup-*-$SCOPE.tar.gz" 2>/dev/null | sort | head -n -"$KEEP" | while read -r o; do
+  PRUNE=("gs://$BACKUPS/fleet-backup-*-$SCOPE.tar.gz"); [ -n "$ENC_SECRET" ] && PRUNE+=("gs://$BACKUPS/fleet-backup-*-$SCOPE.tar.gz.gpg")
+  for pat in "${PRUNE[@]}"; do $GSUTIL ls "$pat" 2>/dev/null; done | sort | head -n -"$KEEP" | while read -r o; do
     [ -n "$o" ] || continue
     $GSUTIL -q rm "$o" 2>/dev/null && $GSUTIL -q rm "$o.meta.json" 2>/dev/null
     { printf "update oa.backups set status='pruned' where object='%s';\n" "$(basename "$o")"; } | pgq || true
@@ -108,4 +139,4 @@ fi
 # the GitLab tar this run made now lives in the archive; do not let local copies pile up
 [ -n "$GLTAR" ] && rm -f "$GLTAR"
 cleanup
-echo "{\"ok\":true,\"id\":\"$ID\",\"object\":\"$OBJ\",\"bucket\":\"$BACKUPS\",\"size_bytes\":$SIZE,\"sha256\":\"$SHA\",\"scope\":\"$SCOPE\",\"gitlab_version\":$GLVER}"
+echo "{\"ok\":true,\"id\":\"$ID\",\"object\":\"$OBJ\",\"bucket\":\"$BACKUPS\",\"size_bytes\":$SIZE,\"sha256\":\"$SHA\",\"scope\":\"$SCOPE\",\"gitlab_version\":$GLVER$ENCOUT}"

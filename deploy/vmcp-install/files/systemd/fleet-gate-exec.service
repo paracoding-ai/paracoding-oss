@@ -1,0 +1,20 @@
+[Unit]
+Description=Paracoding gate-exec (native executor, impersonates fleet-gate-exec-sa@)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fleet
+Group=fleet
+WorkingDirectory=/srv/fleet/src/gate-exec
+EnvironmentFile=/etc/fleet/gate-exec.env
+ExecStart=/srv/fleet/gate-exec-venv/bin/python exec_server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/srv/fleet
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
