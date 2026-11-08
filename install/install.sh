@@ -7,10 +7,10 @@
 # control plane + executor,
 # no public IP), and two Cloud Run routers (vmcp-ui behind IAP, vmcp-mcp as the MCP edge). Re-runnable.
 set -euo pipefail
-REGION=us-east1; ZONE=""; PROJECT=""; ADMIN=""; WAIT=1; MACHINE=e2-standard-4; DISK=100; GITLAB_VERSION=19.5.3
+REGION=us-east1; ZONE=""; PROJECT=""; ADMIN=""; WAIT=1; DESKTOP=on; MACHINE=e2-standard-4; DISK=100; GITLAB_VERSION=19.5.3
 while [ $# -gt 0 ]; do case "$1" in
   --project) PROJECT=$2; shift 2;; --admin) ADMIN=$2; shift 2;; --region) REGION=$2; shift 2;; --zone) ZONE=$2; shift 2;;
-  --machine) MACHINE=$2; shift 2;; --disk) DISK=$2; shift 2;; --gitlab-version) GITLAB_VERSION=$2; shift 2;; --no-wait) WAIT=0; shift;;
+  --machine) MACHINE=$2; shift 2;; --disk) DISK=$2; shift 2;; --gitlab-version) GITLAB_VERSION=$2; shift 2;; --no-wait) WAIT=0; shift;; --no-desktop) DESKTOP=off; shift;;
   -h|--help) sed -n 2,6p "$0"; exit 0;; *) echo "unknown argument: $1" >&2; exit 2;; esac; done
 [ -n "$PROJECT" ] && [ -n "$ADMIN" ] || { echo "usage: ./install/install.sh --project ID --admin EMAIL" >&2; exit 2; }
 ZONE=${ZONE:-$REGION-b}
@@ -38,6 +38,10 @@ g compute routers nats describe paracoding-nat --router=paracoding-router --regi
 g compute addresses describe paracoding-vm-ip --region=$REGION >/dev/null 2>&1 || g compute addresses create paracoding-vm-ip --region=$REGION --subnet=default --format=none
 VMIP=$(g compute addresses describe paracoding-vm-ip --region=$REGION --format='value(address)')
 echo "   VM internal IP $VMIP"
+
+g compute firewall-rules describe paracoding-deny-cdp >/dev/null 2>&1 || g compute firewall-rules create paracoding-deny-cdp \
+  --network=default --direction=INGRESS --priority=900 --action=DENY --rules=tcp:8025,tcp:9222 --source-ranges=0.0.0.0/0 \
+  --target-tags=paracoding-vm --format=none   # [V21.2-DESKTOP] the CDP bridge is for the control plane on the same VM only
 
 step "service accounts"
 mksa(){ g iam service-accounts describe $(SA $1) >/dev/null 2>&1 || g iam service-accounts create $1 --display-name="$2" --format=none; }
@@ -79,7 +83,7 @@ if [ -z "$(g kms keys versions list --key=$SIGKEY --keyring=$KEYRING --location=
 fi
 KEYVER=""; for i in $(seq 1 30); do
   KEYVER=$(g kms keys versions list --key=$SIGKEY --keyring=$KEYRING --location=$REGION --filter='state=ENABLED AND algorithm=EC_SIGN_P256_SHA256' \
-    --sort-by=~createTime --limit=1 --format='value(name)' 2>/dev/null || true)
+    --sort-by=~createTime --format='value(name)' 2>/dev/null | head -1 || true)   # [V21.2-KMS-LIMIT] --limit=1 cut the list BEFORE the filter
   [ -n "$KEYVER" ] && break; sleep 4; done
 [ -n "$KEYVER" ] || { echo "no ENABLED EC_SIGN_P256_SHA256 version of KMS key $KEYRING/$SIGKEY in $REGION" >&2; exit 1; }
 echo "   approval-signing key $KEYVER"
@@ -102,7 +106,7 @@ else
     --boot-disk-size=${DISK}GB --boot-disk-type=pd-balanced --private-network-ip=$VMIP --no-address \
     --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
     --service-account=$(SA paracoding-vm) --scopes=cloud-platform --tags=paracoding-vm \
-    --metadata=admin-email=$ADMIN,console-url=$CON,mcp-url=$MCP,source-uri=gs://$SRC_BUCKET/paracoding-src.tgz,backup-bucket=$BK_BUCKET,backup-encrypt-secret=$BK_SECRET,gitlab-version=$GITLAB_VERSION,approval-sig-key-version=$KEYVER,exec-bucket=$EXEC_BUCKET \
+    --metadata=admin-email=$ADMIN,console-url=$CON,mcp-url=$MCP,source-uri=gs://$SRC_BUCKET/paracoding-src.tgz,backup-bucket=$BK_BUCKET,backup-encrypt-secret=$BK_SECRET,gitlab-version=$GITLAB_VERSION,desktop=$DESKTOP,approval-sig-key-version=$KEYVER,exec-bucket=$EXEC_BUCKET \
     --metadata-from-file=startup-script=$ROOT/install/vm-firstboot.sh --format=none
 fi
 
@@ -143,3 +147,16 @@ Backups: daily to gs://$BK_BUCKET (newest 7 kept), ENCRYPTED (gpg AES256, *.tar.
   Decrypt a downloaded backup by hand:  gpg --decrypt fleet-backup-....tar.gz.gpg > fleet-backup-....tar.gz
   Restore into a different project:     ops/backup/fleet-restore.sh --archive FILE.tar.gz.gpg --passphrase-file $BK_SECRET.txt ...
 DONE
+if [ "$DESKTOP" = on ]; then cat <<DESK
+
+Browser tools (browser_* over MCP) drive the Chrome on the VM's desktop. Turn them on ONCE by pairing
+Chrome Remote Desktop (it needs your Google account, so the installer cannot do it):
+  1. Open https://remotedesktop.google.com/headless, click Begin, Next, Authorize, and copy the
+     "Debian Linux" command.
+  2. Run it on the VM as the desktop user (paste your command where shown, keep the quotes):
+       gcloud compute ssh $VM --zone=$ZONE --project=$PROJECT --tunnel-through-iap -- \
+         'sudo -u paracoding -i <PASTE THE COMMAND HERE>'
+  3. Connect at https://remotedesktop.google.com/access. Chrome opens on the desktop; sign into the sites
+     you want agents to use. Every site is drivable by default; lock that down in /opt/cdp-policy.json.
+DESK
+fi

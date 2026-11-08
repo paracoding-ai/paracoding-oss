@@ -1,0 +1,8 @@
+#!/bin/sh
+# [CDP-RESTORE-V1 / CDP-ONE-PROFILE-V1] The desktop's ONE Chrome: every launcher (menu, default
+# browser, `google-chrome` on PATH, session autostart) comes through here, so the Chrome the human
+# uses IS the Chrome agents drive -- same profile, same logins. Chrome 136+ refuses a DevTools port
+# on its default data dir, so the profile lives in ~/.config/google-chrome-desktop (a one-time
+# copy of the original profile). DevTools is bound to 127.0.0.1 and reached only via cdp-bridge.
+exec /usr/bin/google-chrome --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.config/google-chrome-desktop" --no-first-run --no-default-browser-check "$@"

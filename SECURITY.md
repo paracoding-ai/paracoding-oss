@@ -25,3 +25,9 @@
   commands as `fleet` can reach root: grant strains accordingly.
 
 Report vulnerabilities privately through GitHub Security Advisories on this repository.
+- **Browser tools.** Agents drive the desktop's Chrome through `cdp-bridge`, which binds only the VM's
+  internal address, demands its own random token (`/opt/cdp-token`), allows a fixed list of DevTools
+  methods, and is firewalled from the network (`paracoding-deny-cdp`); Chrome's DevTools port listens
+  on 127.0.0.1 only. The default site policy allows every website, because it is your browser and
+  your sessions: a strain with browser tools can act as you on any site you are signed into. Narrow
+  it in `/opt/cdp-policy.json` (allow list, deny list, input on/off).

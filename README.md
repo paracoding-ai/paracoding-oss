@@ -68,6 +68,27 @@ No domain, DNS or certificate is needed. To use your own domain, put a Google HT
 3. In the Flow Hood, bind that connector to `fleet-advisor`. Run `whoami` to confirm.
 4. Provision more strains from the Flow Hood when you need them.
 
+## Browser tools
+
+Agents can drive a real Chrome: the `browser_*` MCP tools (tabs, open, navigate, eval, screenshot,
+click, type, key, close). It is the Chrome on the VM's own Linux desktop (XFCE), which you reach with
+Chrome Remote Desktop, so the browser you sign into is the browser agents use: one profile, your
+logins.
+
+    MCP client -> control plane -> cdp-bridge (VM internal address, token) -> Chrome DevTools (127.0.0.1:9222)
+
+Turn them on once, after install, by pairing Remote Desktop (it needs your Google account, so the
+installer prints the exact command instead of running it): open
+https://remotedesktop.google.com/headless, copy the "Debian Linux" command, and run it on the VM as
+the `paracoding` desktop user over IAP SSH. Then connect at https://remotedesktop.google.com/access,
+and sign into the sites you want agents to use in the Chrome that opens.
+
+Every site is drivable by default, with click/type/key on. To lock that down, edit
+`/opt/cdp-policy.json` on the VM: list hosts in `origin_allow` (exact host or `*.domain`; an empty list
+denies everything), add hosts to `origin_deny` (deny beats allow), set `allow_input` or `allow_http`
+to false. Changes apply on the next call. `file://` and `chrome://` pages are never driven. Skip the
+desktop entirely with `install.sh --no-desktop`.
+
 ## Uninstall
 
 From the same checkout in Cloud Shell:
@@ -108,6 +129,14 @@ routers scale to zero. Model usage is billed by whichever provider you connect.
 | `ops/backup/` | `fleet-backup.sh` and `fleet-restore.sh` |
 | `ops/db/schema.sql` | the fleet database schema |
 | `gate-exec/` | the KMS-signed command executor |
+
+## What's new in v21.2
+
+- **Browser tools.** The installer builds the VM's desktop (XFCE, Google Chrome, Chrome Remote
+  Desktop) and the token-gated CDP bridge, and switches the `browser_*` tools on. One Chrome, one
+  profile: every launcher on the desktop opens the same, debuggable Chrome. See Browser tools.
+- Bridge fixes: click/type/key are admitted (they were refused), screenshots are no longer cut at
+  64 KB, and closing a tab works on current Chrome.
 
 ## What's new in v21.1
 

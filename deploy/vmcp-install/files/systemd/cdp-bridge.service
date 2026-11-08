@@ -1,0 +1,16 @@
+[Unit]
+Description=Paracoding CDP bridge (token-gated RPC to the desktop Chrome on 127.0.0.1:9222) [CDP-RESTORE-V1]
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=pc-cdp
+Group=pc-cdp
+ExecStart=/usr/bin/python3 -I /opt/cdp-bridge.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target

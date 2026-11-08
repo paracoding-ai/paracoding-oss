@@ -1,0 +1,11 @@
+{
+  "origin_allow": [
+    "*"
+  ],
+  "origin_deny": [],
+  "max_result_bytes": 65536,
+  "eval_timeout_ms": 15000,
+  "allow_input": true,
+  "screenshot_max_bytes": 8388608,
+  "allow_http": true
+}

@@ -3335,6 +3335,147 @@ const ctxBuild = async () => {
   // as gcp_api. One tool for the whole GitLab surface: repository files/commits/branches/tags
   // (the git read-write that supersedes the pcgit git_* tools), pipelines + jobs, merge
   // requests, releases, admin. GitLab is the fleet's only git now.
+  // ===================== [CDP-RESTORE-V1] workstation browser tools =====================
+  // Restored from the Platypus line. They register ONLY when WS_CDP_PORT is set -- the honest
+  // signal that a bridge was actually stood up on the workstation VM. browser_eval, the input
+  // tools and browser_screenshot each need their own opt-in, because each is a wider power than
+  // the read-only navigation set. The bridge enforces a CDP method allowlist and an origin policy
+  // ON THE BOX, so these services cannot reach a credential origin no matter what they send.
+  const _cdpPort = String(process.env.WS_CDP_PORT || '');
+  if (_cdpPort === '') {
+    console.log('[cp] browser tools NOT registered: WS_CDP_PORT unset. browser_tabs, browser_open, '
+      + 'browser_navigate, browser_close'
+      + (String(process.env.PC_BROWSER_EVAL || '') === '1' ? ', browser_eval' : '')
+      + (String(process.env.PC_BROWSER_SCREENSHOT || '') === '1' ? ', browser_screenshot' : '')
+      + (String(process.env.PC_BROWSER_INPUT || '') === '1' ? ', browser_click, browser_type, browser_key' : '')
+      + ' need a Chrome DevTools bridge on the workstation VM. Stand it up (workstation/linux-startup.sh), '
+      + 'then set WS_CDP_PORT, CDP_TOKEN, WS_VM and WS_ZONE on this service.');
+  } else {
+  server.registerTool('browser_tabs',
+    { description: 'List open tabs in the workstation Chrome. Each target carries targetId, title, url and a drivable flag (false + a reason = the VM-side origin policy refusing that URL). {"ok":true,"targets":[]} is SUCCESS with nothing open, not an error. CALL THIS FIRST: browser_navigate/eval/click/type/key/close all need a targetId from here when more than one tab is open; browser_open returns its own. Prefer this + browser_eval over screenshots -- cheaper and deterministic.', inputSchema: { ...AG } },
+    async (a: any) => { const j = await harCdp('Target.getTargets', {});
+      if (!(j && j.ok === true && Array.isArray(j.targets))) return { content: [{ type: 'text', text: JSON.stringify(j) }] };
+      const v = tabBudgetVerdict(j.targets, process.env.PC_BROWSER_TAB_MAX);
+      const out = Object.assign({}, j, { targets: tabBudgetAnnotate(j.targets), tab_budget: { tag: 'TAB-BUDGET-V1', count: v.count, max: v.max, max_source: v.max_source, remaining: Math.max(0, v.max - v.count) } });
+      return { content: [{ type: 'text', text: JSON.stringify(out) }] }; });
+  server.registerTool('browser_open',
+    { description: 'Open a URL in a NEW tab of the workstation Chrome and return its targetId. The origin is checked on the VM before the tab is created; a refused origin comes back ok:false and NO tab exists. BUDGETED: at or above PC_BROWSER_TAB_MAX page tabs (default 5) it REFUSES and creates nothing. Work in ONE tab with browser_navigate; open a second only when two must be live at once; close what you open with browser_close.', inputSchema: { url: z.string(), ...AG } },
+    async (a: any) => {
+      const census = await harCdp('Target.getTargets', {});
+      const v = tabBudgetVerdict((census && census.ok === true) ? census.targets : null, process.env.PC_BROWSER_TAB_MAX);
+      if (!v.allow) { const refusal = Object.assign({}, v, { ok: false, tag: 'TAB-BUDGET-V1', url_not_opened: String(a.url || ''), open: tabBudgetAnnotate(v.open), census_error: (census && census.ok === true) ? null : String((census && census.error) || 'the workstation bridge did not answer Target.getTargets') }); return { content: [{ type: 'text', text: JSON.stringify(refusal) }] }; }
+      const j = await harCdp('Target.createTarget', { params: { url: a.url } });
+      if (!(j && j.ok === true && j.targetId)) return { content: [{ type: 'text', text: JSON.stringify(j) }] };
+      tabBudgetRecord(String(j.targetId), who(a), String(a.url || ''));
+      const after = v.count + 1;
+      return { content: [{ type: 'text', text: JSON.stringify(Object.assign({}, j, { tab_budget: { tag: 'TAB-BUDGET-V1', count: after, max: v.max, remaining: Math.max(0, v.max - after), opened_by: who(a) } })) }] }; });
+  server.registerTool('browser_navigate',
+    { description: 'Navigate a workstation Chrome tab to a URL. Pass targetId from browser_tabs when more than one tab is open. Origin is checked on the VM against origin_allow/origin_deny, so a refusal naming an origin is policy, not a malfunction.', inputSchema: { url: z.string(), targetId: z.string().optional(), ...AG } },
+    async (a: any) => { const j = await harCdp('Page.navigate', { params: { url: a.url }, targetId: a.targetId || '' }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
+  server.registerTool('browser_close',
+    { description: 'Close ONE tab in the workstation Chrome. targetId is REQUIRED (from browser_tabs or the browser_open reply); there is no close-all. Close only tabs you opened -- closing one the operator is working in cannot be undone.', inputSchema: { targetId: z.string(), ...AG } },
+    async (a: any) => { const j = await harCdp('Target.closeTarget', { params: { targetId: String(a.targetId) }, targetId: String(a.targetId) }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
+  if (String(process.env.PC_BROWSER_EVAL || '') === '1') {
+    server.registerTool('browser_eval',
+      { description: 'Run JavaScript in a workstation Chrome tab and return its result. Use for reading (el.innerText), scraping the DOM and filling inputs -- prefer it over screenshots. Pass targetId from browser_tabs when more than one tab is open. For a submit/confirm/consent control, an OAuth or payment frame, or anything checking event.isTrusted, use browser_click -- a scripted .click() is isTrusted=false.', inputSchema: { js: z.string(), targetId: z.string().optional(), ...AG } },
+      async (a: any) => { const j = await harCdp('Runtime.evaluate', { params: { expression: a.js }, targetId: a.targetId || '' }); return { content: [{ type: 'text', text: JSON.stringify(j) }] }; });
+  }
+  if (String(process.env.PC_BROWSER_SCREENSHOT || '') === '1') {
+    server.registerTool('browser_screenshot',
+      { description: 'Capture a workstation Chrome tab as a PNG and WRITE IT TO THE DATA LAKE, returning the path -- the image never rides back through the tool result (base64 of a full window blows the result cap). Use browser_eval first; reach for this when the DOM will not answer (a CLOSED shadow root, which captureScreenshot renders anyway because it paints pixels). Pass targetId when more than one tab is open. full_page:true captures beyond the viewport.', inputSchema: { targetId: z.string().optional(), full_page: z.boolean().optional(), path: z.string().optional(), ...AG } },
+      async (a: any) => {
+        if (!lake) return { content: [{ type: 'text', text: 'data lake not configured (DATA_LAKE_BUCKET unset)' }], isError: true };
+        const j: any = await harCdp('Page.captureScreenshot', { params: { format: 'png', captureBeyondViewport: a.full_page === true }, targetId: a.targetId || '' });
+        const b64 = String((j && j.result && j.result.data) || '');
+        if (!b64) return { content: [{ type: 'text', text: 'no image came back from Page.captureScreenshot. The bridge said: ' + JSON.stringify(j).slice(0, 900) }], isError: true };
+        const buf = Buffer.from(b64, 'base64');
+        if (!buf.length) return { content: [{ type: 'text', text: 'Page.captureScreenshot returned data that did not decode to any bytes; nothing was written.' }], isError: true };
+        const me = who(a);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const want = String(a.path || ('agents/' + me + '/screenshots/' + stamp + '.png'));
+        const rk = resolveKey(want, me, 'write');
+        if (rk.err) return { content: [{ type: 'text', text: rk.err }], isError: true };
+        const sha = crypto.createHash('sha256').update(buf).digest('hex');
+        await harWriteLake(rk.key!, buf, 'image/png', { owner: me, pc_sha256: sha, pc_bytes: String(buf.length) });
+        return { content: [{ type: 'text', text: 'wrote gs://' + DATA_LAKE_BUCKET + '/' + rk.key + ' (' + buf.length + ' bytes, PNG)\nsha256: ' + sha + '\nRead it with read_file.' }] };
+      });
+  }
+  if (String(process.env.PC_BROWSER_INPUT || '') === '1') {
+    const _evalOn = String(process.env.PC_BROWSER_EVAL || '') === '1';
+    const _cdpVal = (j: any): any => { try { if (!j) return undefined; const r = j.result !== undefined ? j.result : j; if (r && r.result && r.result.value !== undefined) return r.result.value; if (r && r.value !== undefined) return r.value; return undefined; } catch (e) { return undefined; } };
+    const _KEYS: any = { Enter: { code: 'Enter', vk: 13, text: '\r' }, Tab: { code: 'Tab', vk: 9, text: '\t' }, Escape: { code: 'Escape', vk: 27, text: '' }, Backspace: { code: 'Backspace', vk: 8, text: '' }, Delete: { code: 'Delete', vk: 46, text: '' }, ArrowUp: { code: 'ArrowUp', vk: 38, text: '' }, ArrowDown: { code: 'ArrowDown', vk: 40, text: '' }, ArrowLeft: { code: 'ArrowLeft', vk: 37, text: '' }, ArrowRight: { code: 'ArrowRight', vk: 39, text: '' }, Home: { code: 'Home', vk: 36, text: '' }, End: { code: 'End', vk: 35, text: '' }, PageUp: { code: 'PageUp', vk: 33, text: '' }, PageDown: { code: 'PageDown', vk: 34, text: '' }, Space: { code: 'Space', vk: 32, text: ' ' } };
+    const _MODBIT: any = { alt: 1, ctrl: 2, control: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
+    const _mods = (a: any): number => { const src = Array.isArray(a) ? a : (typeof a === 'string' && a ? a.split(/[+,\s]+/) : []); let m = 0; for (const x of src) { const b = _MODBIT[String(x || '').toLowerCase()]; if (b) m |= b; } return m; };
+    const _pointOf = async (sel: string, targetId: string): Promise<any> => {
+      if (!_evalOn) return { ok: false, error: 'selector targeting needs PC_BROWSER_EVAL=1 on this service; pass explicit x/y instead' };
+      const expr = '(function(){var e=document.querySelector(' + JSON.stringify(sel) + ');if(!e)return null;try{e.scrollIntoView({block:"center",inline:"center"});}catch(_){}var r=e.getBoundingClientRect();if(!r||(r.width===0&&r.height===0))return null;return {x:r.left+r.width/2,y:r.top+r.height/2};})()';
+      const j = await harCdp('Runtime.evaluate', { params: { expression: expr, returnByValue: true }, targetId: targetId || '' });
+      const v = _cdpVal(j);
+      if (!v || typeof v.x !== 'number') return { ok: false, error: 'selector matched nothing visible: ' + sel, raw: j };
+      return { ok: true, x: Math.round(v.x), y: Math.round(v.y) };
+    };
+    server.registerTool('browser_click',
+      { description: 'Click the workstation Chrome with a REAL, trusted mouse event (Input.dispatchMouseEvent). Give selector (CSS, needs PC_BROWSER_EVAL=1) or explicit x/y viewport coordinates. Pass targetId when more than one tab is open. Use instead of browser_eval + .click() for submit/confirm/consent controls, OAuth or payment frames. Optional button (left|right|middle), clickCount, modifiers (["shift","ctrl"]).', inputSchema: { selector: z.string().optional(), x: z.number().optional(), y: z.number().optional(), button: z.string().optional(), clickCount: z.number().optional(), modifiers: z.array(z.string()).optional(), targetId: z.string().optional(), ...AG } },
+      async (a: any) => {
+        const tid = a.targetId || '';
+        let x = a.x, y = a.y;
+        if (a.selector) { const pt = await _pointOf(String(a.selector), tid); if (!pt.ok) return { content: [{ type: 'text', text: JSON.stringify(pt) }] }; x = pt.x; y = pt.y; }
+        if (typeof x !== 'number' || typeof y !== 'number') return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'browser_click needs selector, or both x and y' }) }] };
+        const btn = String(a.button || 'left').toLowerCase();
+        const bit = btn === 'right' ? 2 : (btn === 'middle' ? 4 : 1);
+        const cc = Math.max(1, Math.min(3, Number(a.clickCount || 1)));
+        const md = _mods(a.modifiers);
+        const base = { x, y, button: btn, clickCount: cc, modifiers: md };
+        const mv = await harCdp('Input.dispatchMouseEvent', { params: { x, y, type: 'mouseMoved', button: 'none', buttons: 0, modifiers: md }, targetId: tid });
+        const down = await harCdp('Input.dispatchMouseEvent', { params: Object.assign({}, base, { type: 'mousePressed', buttons: bit }), targetId: tid });
+        const up = await harCdp('Input.dispatchMouseEvent', { params: Object.assign({}, base, { type: 'mouseReleased', buttons: 0 }), targetId: tid });
+        const bad = [mv, down, up].find((r: any) => r && r.ok === false);
+        if (bad) return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'bridge refused the click: ' + String(bad.error || 'unknown'), x, y }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, x, y, button: btn, clickCount: cc }) }] };
+      });
+    server.registerTool('browser_type',
+      { description: 'Type text into the workstation Chrome as real input (Input.insertText) -- trusted, so React/Vue/contenteditable fields actually see it. Optional selector focuses that element first (needs PC_BROWSER_EVAL=1); otherwise types into whatever has focus, so browser_click first. Pass targetId when more than one tab is open. submit:true presses Enter afterwards.', inputSchema: { text: z.string(), selector: z.string().optional(), submit: z.boolean().optional(), targetId: z.string().optional(), ...AG } },
+      async (a: any) => {
+        const tid = a.targetId || '';
+        if (a.selector) {
+          if (!_evalOn) return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'selector focus needs PC_BROWSER_EVAL=1; browser_click the field first, then browser_type with no selector' }) }] };
+          const expr = '(function(){var e=document.querySelector(' + JSON.stringify(String(a.selector)) + ');if(!e)return false;try{e.scrollIntoView({block:"center"});}catch(_){}try{e.focus();}catch(_){}return document.activeElement===e;})()';
+          const fj = await harCdp('Runtime.evaluate', { params: { expression: expr, returnByValue: true }, targetId: tid });
+          if (_cdpVal(fj) !== true) return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'could not focus selector: ' + a.selector, raw: fj }) }] };
+        }
+        const ins = await harCdp('Input.insertText', { params: { text: String(a.text) }, targetId: tid });
+        let sub: any = null;
+        if (a.submit === true) {
+          await harCdp('Input.dispatchKeyEvent', { params: { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r' }, targetId: tid });
+          sub = await harCdp('Input.dispatchKeyEvent', { params: { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }, targetId: tid });
+        }
+        const bad = [ins, sub].find((r: any) => r && r.ok === false);
+        if (bad) return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'bridge refused the type: ' + String(bad.error || 'unknown') }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, chars: String(a.text).length }) }] };
+      });
+    server.registerTool('browser_key',
+      { description: 'Press a key in the workstation Chrome as a real keystroke (Input.dispatchKeyEvent). key is a named key (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space) or a single character. modifiers like ["ctrl","shift"]. Pass targetId when more than one tab is open. Use browser_type for text.', inputSchema: { key: z.string(), modifiers: z.array(z.string()).optional(), targetId: z.string().optional(), ...AG } },
+      async (a: any) => {
+        const tid = a.targetId || '';
+        const raw = String(a.key || '');
+        const def = _KEYS[raw];
+        if (!def && Array.from(raw).length !== 1) return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'unknown key: ' + raw + '. Use a named key (' + Object.keys(_KEYS).join(', ') + ') or a single character.' }) }] };
+        const md = _mods(a.modifiers);
+        const key = raw;
+        const code = def ? def.code : ('Key' + raw.toUpperCase());
+        const vk = def ? def.vk : raw.toUpperCase().charCodeAt(0);
+        const shortcut = (md & ~8) !== 0;
+        const text = shortcut ? '' : (def ? def.text : raw);
+        const p: any = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: md };
+        if (text) p.text = text;
+        const down = await harCdp('Input.dispatchKeyEvent', { params: Object.assign({}, p, { type: text ? 'keyDown' : 'rawKeyDown' }), targetId: tid });
+        const up = await harCdp('Input.dispatchKeyEvent', { params: { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: md, type: 'keyUp' }, targetId: tid });
+        const bad = [down, up].find((r: any) => r && r.ok === false);
+        if (bad) return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'bridge refused the key: ' + String(bad.error || 'unknown'), key, code }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, key, code, modifiers: md }) }] };
+      });
+  }
+  }  // [CDP-RESTORE-V1] end WS_CDP_PORT guard
   server.registerTool('gitlab_api',
     { description: 'Call the GitLab REST API (/api/v4) on the fleet GitLab server (root/paracoding-fleet and every project). The control plane adds the PRIVATE-TOKEN from Secret Manager (gitlab-api-token) -- the agent never holds it, same as gcp_api. path is everything after /api/v4, for example "/projects/root%2Fparacoding-fleet/pipelines" or "/projects/root%2Fparacoding-fleet/repository/files/README.md?ref=main"; encode a project-path slash as %2F. method defaults to GET; body (a JSON object) is sent on POST/PUT/DELETE. This is the whole surface -- repository files/commits/branches/tags (the git read-write that replaces pcgit git_*), pipelines, jobs and job traces, merge requests, releases, admin. Returns {status, body}. A very large response is still subject to the result cap; for bulk file movement use native git clone/push, not this.',
       inputSchema: { method: z.string().optional(), path: z.string(), body: z.any().optional(), ...AG } },
@@ -5456,6 +5597,94 @@ export function harHarnessHtml(): string {
 // withheld) and the refusal is applied at BOTH the single read chokepoint and each route.
 const WS_VM = process.env.WS_VM || '';
 const WS_ZONE = process.env.WS_ZONE || '';
+
+// ======================= [CDP-RESTORE-V1] workstation browser tools =======================
+// Ported back from the Platypus line (which kept them) into this single-operator fleet. The
+// workstation half -- /opt/cdp-bridge.py, its systemd unit, token and firewall -- is already
+// stood up by workstation/linux-startup.sh: a listener on WS_CDP_PORT that authenticates
+// X-Cdp-Token and serves POST /rpc {method,params,targetId}, with a CDP method allowlist and an
+// origin policy enforced ON THE BOX. This is the control-plane half that was phased out: harCdp()
+// plus the browser_* tools. One operator, one workstation VM -- the multi-tenant resolver the
+// Platypus copy carries is collapsed to WS_VM/WS_ZONE (or WS_CDP_IP) here.
+const CDP_TOKEN = process.env.CDP_TOKEN || '';
+let _cdpIpCache: { ip: string; at: number } = { ip: '', at: 0 };
+async function wsBoxInternalIp(): Promise<{ ok: boolean; ip?: string; error?: string }> {
+  const override = String(process.env.WS_CDP_IP || '').trim();
+  if (override) return { ok: true, ip: override };
+  const vm = String(process.env.WS_VM || '').trim();
+  const zone = String(process.env.WS_ZONE || '').trim();
+  const proj = GCP_PROJECT;
+  if (!vm || !zone || !proj) return { ok: false, error: 'WS_VM, WS_ZONE and GCP_PROJECT must all be set to reach the workstation bridge (or set WS_CDP_IP to its internal address directly)' };
+  const now = Date.now();
+  if (_cdpIpCache.ip && (now - _cdpIpCache.at) < 300000) return { ok: true, ip: _cdpIpCache.ip };
+  try {
+    const tok = await waAccessToken();
+    const url = 'https://compute.googleapis.com/compute/v1/projects/' + proj + '/zones/' + zone + '/instances/' + encodeURIComponent(vm) + '?fields=networkInterfaces(networkIP)';
+    const r = await waFetch(url, { headers: { Authorization: 'Bearer ' + tok } });
+    const j: any = await r.json();
+    const ip = String(((((j && j.networkInterfaces) || [])[0]) || {}).networkIP || '').trim();
+    if (!ip) return { ok: false, error: 'Compute returned no internal IP for ' + vm + ' in ' + zone + ': ' + JSON.stringify(j).slice(0, 300) };
+    _cdpIpCache = { ip: ip, at: now };
+    return { ok: true, ip: ip };
+  } catch (e: any) { return { ok: false, error: 'resolving workstation IP: ' + String((e && e.message) || e) }; }
+}
+// POST one CDP RPC to the workstation bridge. Single-operator: no tenant field. A browser tool
+// only registers when WS_CDP_PORT is set, so an install that stood up no bridge never reaches here.
+async function harCdp(method: string, body: any): Promise<any> {
+  const port = String(process.env.WS_CDP_PORT || '').trim();
+  if (!port) return { ok: false, error: 'WS_CDP_PORT unset; no workstation bridge configured' };
+  if (!CDP_TOKEN) return { ok: false, error: 'CDP_TOKEN unset; the workstation bridge refuses every request without X-Cdp-Token' };
+  const loc = await wsBoxInternalIp();
+  if (!loc.ok) return { ok: false, error: 'cdp bridge: ' + loc.error };
+  try {
+    const r = await waFetch('http://' + loc.ip + ':' + port + '/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Cdp-Token': CDP_TOKEN }, body: JSON.stringify({ method: method, params: (body && body.params) || {}, targetId: (body && body.targetId) || '' }) });
+    return await r.json();
+  } catch (e: any) { return { ok: false, error: 'cdp bridge: ' + String((e && e.message) || e), vm: { instance: process.env.WS_VM, zone: process.env.WS_ZONE, ip: loc.ip, port: port } }; }
+}
+// [TAB-BUDGET-V1] keep the operator's own Chrome from filling with abandoned tabs. A row counts as
+// a page when it says type 'page' or carries no type key at all (the bridge's getTargets already
+// filtered to pages and emits no type key); any other named type does not count. Fail-closed when
+// the census cannot be read.
+function tabBudgetVerdict(targets: any, max: any): any {
+  const DEFAULT_MAX = 5;
+  let cap = Number(max);
+  let capSource = 'PC_BROWSER_TAB_MAX';
+  if (!isFinite(cap) || Math.floor(cap) !== cap || cap < 1) { cap = DEFAULT_MAX; capSource = 'default'; }
+  if (!Array.isArray(targets)) {
+    return { ok: true, allow: false, count: null, max: cap, max_source: capSource, typeless: 0, open: [], reason: 'TAB-BUDGET-V1 refused: the open-tab census could not be read, so the budget cannot be checked. FAIL-CLOSED -- no tab was created.', remedies: ['Call browser_tabs to find out whether the workstation Chrome is reachable at all, then retry.'] };
+  }
+  let pages: any[] = [];
+  let typeless = 0;
+  for (const row of targets) {
+    if (!row || typeof row !== 'object') continue;
+    const hasType = Object.prototype.hasOwnProperty.call(row, 'type');
+    if (hasType && String(row.type) !== 'page') continue;
+    if (!hasType) typeless += 1;
+    pages.push({ targetId: String(row.targetId === undefined ? '' : row.targetId), title: String(row.title === undefined ? '' : row.title).slice(0, 200), url: String(row.url === undefined ? '' : row.url).slice(0, 500) });
+  }
+  const count = pages.length;
+  if (count < cap) return { ok: true, allow: true, count: count, max: cap, max_source: capSource, typeless: typeless, open: [], reason: '', remedies: [] };
+  return { ok: true, allow: false, count: count, max: cap, max_source: capSource, typeless: typeless, open: pages, reason: 'TAB-BUDGET-V1 refused: ' + count + ' page tab(s) are already open and the budget is ' + cap + '. NO TAB WAS CREATED. The workstation Chrome is a surface the operator uses himself, and tabs an agent leaves behind are litter in his workspace.', remedies: ['REUSE one: browser_navigate with the targetId of a tab listed in open below.', 'CLOSE one YOU opened: browser_close with its targetId. open names who opened each tab and when.'] };
+}
+const PC_TAB_OPENED_BY: Map<string, any> = new Map();
+const PC_TAB_OPENED_CAP = 512;
+function tabBudgetRecord(targetId: string, role: string, url: string): void {
+  const id = String(targetId || '').trim();
+  if (!id) return;
+  if (PC_TAB_OPENED_BY.size >= PC_TAB_OPENED_CAP) { const oldest = PC_TAB_OPENED_BY.keys().next(); if (!oldest.done) PC_TAB_OPENED_BY.delete(oldest.value); }
+  const at = new Date().toISOString();
+  PC_TAB_OPENED_BY.set(id, { opened_by: String(role || 'unknown'), opened_at: at, opened_url: String(url || '').slice(0, 500) });
+  console.log('[cp] [TAB-BUDGET-V1] tab opened targetId=' + id + ' by=' + String(role || 'unknown') + ' at=' + at + ' url=' + String(url || '').slice(0, 300));
+}
+function tabBudgetAnnotate(rows: any): any {
+  if (!Array.isArray(rows)) return rows;
+  return rows.map((row: any) => {
+    if (!row || typeof row !== 'object') return row;
+    const rec = PC_TAB_OPENED_BY.get(String(row.targetId || ''));
+    return Object.assign({}, row, rec ? rec : { opened_by: null, opened_at: null, opened_by_note: 'not recorded by this control-plane instance; Cloud Logging has the durable record ([TAB-BUDGET-V1] tab opened).' });
+  });
+}
+// ===================== [CDP-RESTORE-V1] end workstation browser helpers =====================
 const HAR_PROJECT = process.env.GCP_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || PC_PROJECT;
 // [OPS-EXEC-V1] OPS_TOKEN + opsExecRoot moved to ./mods/ops-exec.js (imported at top).
 // "off the gate once in the morning" window: gcloud-as-you stays live this long off a single gate auth.

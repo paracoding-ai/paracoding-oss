@@ -221,6 +221,58 @@ RB
   gitlab-rails runner /tmp/paracoding-nosignup.rb >/dev/null 2>&1 || echo "PARACODING-WARN could not disable GitLab sign-ups; do it in Admin > Settings"
   touch $S/sso; fi
 
+if [ ! -f $S/desktop ] && [ "$(curl -sf -H Metadata-Flavor:Google http://metadata.google.internal/computeMetadata/v1/instance/attributes/desktop || true)" != "off" ]; then
+  say "desktop, Chrome and browser tools"
+  # [V21.2-DESKTOP] An XFCE desktop reached through Chrome Remote Desktop, whose ONE Chrome is the
+  # browser agents drive through the browser_* tools (control plane -> cdp-bridge -> Chrome DevTools
+  # on 127.0.0.1:9222). Pairing Remote Desktop is a human step; the installer prints the command.
+  DU=paracoding; DH=/home/$DU; F=/srv/fleet/src/deploy/vmcp-install/files
+  apt-get install -y -qq --no-install-recommends xfce4 xfce4-session xfce4-terminal dbus-x11 xbase-clients xvfb \
+    fonts-dejavu-core >/var/log/paracoding-desktop.log 2>&1 || fail "desktop packages, see /var/log/paracoding-desktop.log"
+  for d in google-chrome-stable chrome-remote-desktop; do
+    if ! dpkg -s $d >/dev/null 2>&1; then
+      curl -fsSL -o /tmp/$d.deb "https://dl.google.com/linux/direct/${d}_current_amd64.deb" || fail "download $d"
+      apt-get install -y -qq /tmp/$d.deb >>/var/log/paracoding-desktop.log 2>&1 || fail "install $d, see /var/log/paracoding-desktop.log"
+      rm -f /tmp/$d.deb
+    fi
+  done
+  echo "exec /usr/bin/startxfce4" > /etc/chrome-remote-desktop-session
+  id $DU >/dev/null 2>&1 || useradd -m -s /bin/bash -c "Paracoding desktop" $DU
+  # Current Remote Desktop packages no longer create this group; older pairing flows still check it.
+  getent group chrome-remote-desktop >/dev/null || groupadd --system chrome-remote-desktop   # [V21.2-CRD-GROUP]
+  usermod -aG chrome-remote-desktop $DU
+  # One Chrome, one profile: every launcher goes through pc-chrome (CDP-ONE-PROFILE-V1).
+  install -m 0755 $F/browser/pc-chrome /usr/local/bin/pc-chrome
+  for n in google-chrome google-chrome-stable; do install -m 0755 $F/browser/google-chrome-shim /usr/local/bin/$n; done
+  install -d -o $DU -g $DU $DH/.local $DH/.local/share $DH/.local/share/applications $DH/.config $DH/.config/autostart
+  sed -E 's#^Exec=/usr/bin/google-chrome-stable#Exec=/usr/local/bin/pc-chrome#' /usr/share/applications/google-chrome.desktop > $DH/.local/share/applications/google-chrome.desktop
+  install -m 0644 $F/browser/pc-chrome.desktop $DH/.config/autostart/pc-chrome.desktop
+  chown $DU:$DU $DH/.local/share/applications/google-chrome.desktop $DH/.config/autostart/pc-chrome.desktop
+  runuser -u $DU -- xdg-settings set default-web-browser google-chrome.desktop >/dev/null 2>&1 || true
+  # The bridge: its own user, a random token, the open policy (every site; lock down by editing it).
+  getent group pc-cdp >/dev/null || groupadd --system pc-cdp
+  id pc-cdp >/dev/null 2>&1 || useradd --system --gid pc-cdp --home-dir /nonexistent --shell /usr/sbin/nologin pc-cdp
+  [ -s /opt/cdp-token ] || { install -m 0640 -o root -g pc-cdp /dev/null /opt/cdp-token; openssl rand -hex 32 | tr -d '\n' > /opt/cdp-token; }
+  chown root:pc-cdp /opt/cdp-token; chmod 0640 /opt/cdp-token
+  install -m 0755 $F/cdp-bridge.py /opt/cdp-bridge.py
+  [ -f /opt/cdp-policy.json ] || install -m 0644 $F/browser/cdp-policy.json /opt/cdp-policy.json
+  install -m 0644 $F/systemd/cdp-bridge.service /etc/systemd/system/cdp-bridge.service
+  systemctl daemon-reload; systemctl enable --now cdp-bridge >/dev/null 2>&1
+  NIC=$(curl -sf -H Metadata-Flavor:Google http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip) || fail "no nic0 address"
+  for i in $(seq 1 30); do c=$(curl -s -m 2 -o /dev/null -w '%{http_code}' -X POST http://$NIC:8025/rpc); [ "$c" = 403 ] && break; sleep 2; done
+  [ "$c" = 403 ] || fail "cdp-bridge not answering on $NIC:8025 (journalctl -u cdp-bridge)"
+  # The control plane registers browser_* when WS_CDP_PORT is set.
+  umask 027; { echo "WS_CDP_PORT=8025"; echo "WS_CDP_IP=$NIC"; printf 'CDP_TOKEN=%s\n' "$(cat /opt/cdp-token)"
+    echo "PC_BROWSER_SCREENSHOT=1"; echo "PC_BROWSER_INPUT=1"; echo "PC_BROWSER_EVAL=1"; } > /etc/fleet/cdp.env; umask 022
+  chown root:fleet /etc/fleet/cdp.env; chmod 0640 /etc/fleet/cdp.env
+  mkdir -p /etc/systemd/system/fleet-control-plane.service.d
+  printf '[Service]\nEnvironmentFile=-/etc/fleet/cdp.env\n' > /etc/systemd/system/fleet-control-plane.service.d/20-cdp.conf
+  systemctl daemon-reload; systemctl restart fleet-control-plane
+  for i in $(seq 1 40); do c=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/.well-known/oauth-authorization-server); [ "$c" = 200 ] && break; sleep 3; done
+  [ "$c" = 200 ] || fail "control plane did not come back after the browser-tools settings"
+  touch $S/desktop
+fi
+
 if [ ! -f $S/extras ]; then say "backups, patching, idle-off"
   F=/srv/fleet/src/deploy/vmcp-install/files
   install -m 644 $F/apt/52vmcp-security-boot /etc/apt/apt.conf.d/52vmcp-security-boot

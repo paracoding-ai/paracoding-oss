@@ -1,0 +1,3 @@
+#!/bin/sh
+# [CDP-ONE-PROFILE-V1] route every PATH launch of Chrome through pc-chrome
+exec /usr/local/bin/pc-chrome "$@"

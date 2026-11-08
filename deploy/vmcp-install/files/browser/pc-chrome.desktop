@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Chrome (DevTools on 127.0.0.1:9222)
+Exec=/usr/local/bin/pc-chrome
+X-GNOME-Autostart-enabled=true

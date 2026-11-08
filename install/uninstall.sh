@@ -115,6 +115,7 @@ res "Cloud NAT $NAT on $ROUTER" g compute routers nats describe "$NAT" --router=
 res "router $ROUTER ($REGION)" g compute routers describe "$ROUTER" --region="$REGION" -- \
   g compute routers delete "$ROUTER" --region="$REGION"
 res "firewall rule $FIREWALL" g compute firewall-rules describe "$FIREWALL" -- g compute firewall-rules delete "$FIREWALL"
+res "firewall rule paracoding-deny-cdp" g compute firewall-rules describe paracoding-deny-cdp -- g compute firewall-rules delete paracoding-deny-cdp
 
 step "Artifact Registry"
 rc=0; probe g artifacts repositories describe "$AR_REPO" --location="$REGION" || rc=$?

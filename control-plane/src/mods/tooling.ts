@@ -149,6 +149,18 @@ export const PC_TOOL_CLASS: any = {
   gcp_api: 'infra',
   gitlab_api: 'infra',
   run_roll: 'infra',
+  // [CDP-RESTORE-V1] workstation browser tools. tabs/screenshot READ; the acting tools
+  // (navigate/open/close/eval/click/type/key) are WRITEs. Unclassified would fall to 'other'
+  // and be withheld from every role under PC_TOOLS_ENFORCE.
+  browser_tabs: 'read',
+  browser_screenshot: 'read',
+  browser_open: 'write',
+  browser_navigate: 'write',
+  browser_close: 'write',
+  browser_eval: 'write',
+  browser_click: 'write',
+  browser_type: 'write',
+  browser_key: 'write',
 };
 
 export const PC_TOOL_DESTRUCTIVE_WRITES = ['delete_entities', 'delete_observations', 'delete_relations', 'cancel_work_item', 'supersede_job'];
